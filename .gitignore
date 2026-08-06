@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+htmlcov/
+.coverage
+.tox/
+
+# Local virtualenvs
+.venv/
+venv/
+env/
+
+# Test artifacts
+tests/__pycache__/
+tests/.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+
+# Node (jsdom for e2e tests, optional)
+node_modules/
+
+# Local scan output (not committed; CI produces these in build artifacts)
+.checkov/
+*.sarif
+report.html
+tfplan.binary
+plan.json
+coverage_matrix.csv
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store

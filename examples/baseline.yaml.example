@@ -1,0 +1,51 @@
+# Example Pacioli baseline manifest.
+# Copy this to your Terraform repo as `pci_baseline.yaml` and customize.
+#
+# A baseline entry suppresses a specific Checkov rule for a specific
+# resource pattern. Every entry MUST have all 9 fields below, or the
+# aggregator will refuse to run.
+#
+# - check_id:             CKV_AZURE_<n>  (string)
+# - resource_pattern:     glob (e.g. "azurerm_storage_account.*")
+# - justification:        human-readable why this is accepted risk
+# - compensating_control: reference to other control (e.g., "WAF rule abc123")
+# - owner:                team or person accountable (string)
+# - ticket_id:            ticket ID authorizing the suppression (e.g. "SEC-1234")
+# - approved_by:          approver name (e.g., "Jane Doe, SecOps Lead")
+# - approved_on:          ISO date — when this was approved
+# - expires_on:           ISO date — after this, the suppression is invalid
+#                         and the aggregator will re-surface the finding
+#
+# ENFORCEMENT:
+#   aggregator suppresses ONLY if expires_on >= today AND owner != TBD.
+#   Otherwise, the finding is emitted as ACTIVE.
+#
+# AUDIT TRAIL:
+#   Stale exclusions (expires_on < today) appear with a red STALE badge
+#   so the auditor knows they need re-approval.
+#
+# INITIAL POPULATION:
+#   This file is intentionally empty. After the first scan, run:
+#     make scan-baseline-init RUN_DIR=.checkov/<run_id>/
+#   which generates stub entries for every finding. Triage top-50 by
+#   count * severity_weight; populate the schema fields. Remaining
+#   entries stay as TBD and surface in the report as "requires triage".
+
+- check_id: CKV_AZURE_59
+  resource_pattern: "azurerm_storage_account.diagnostic_logs"
+  justification: "Diagnostic logs are forwarded to a third-party SIEM via Event Hub, not the native monitor_diagnostic_setting block."
+  compensating_control: "Event Hub forwarding rule HUB-789 (verified 2026-01-15)"
+  owner: "platform-team@example.com"
+  ticket_id: "SEC-1234"
+  approved_by: "Jane Doe, SecOps Lead"
+  approved_on: "2026-01-15"
+  expires_on: "2027-01-15"
+- check_id: CKV_AZURE_3
+  resource_pattern: "azurerm_storage_account.legacy_https"
+  justification: "Legacy storage account predates TLS 1.2 enforcement; migration scheduled for 2026-Q4."
+  compensating_control: "WAF rule restricts ingress to TLS 1.2+"
+  owner: "platform-team@example.com"
+  ticket_id: "SEC-5678"
+  approved_by: "Jane Doe, SecOps Lead"
+  approved_on: "2026-02-01"
+  expires_on: "2027-02-01"

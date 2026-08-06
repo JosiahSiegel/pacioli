@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: >-
+  If you use Pacioli in academic work, please cite the project itself
+  rather than individual contributors. This CITATION.cff follows the
+  CFF standard (https://citation-file-format.github.io/).
+title: Pacioli
+abstract: >-
+  A read-only compliance scanner for Azure Terraform code. Built on
+  Checkov, but aggregates per-environment SARIF into a single coverage
+  matrix mapped to a chosen framework (PCI DSS v4.0.1, SOC 2, CIS
+  Azure, NIST 800-53, ISO 27001). Emits a self-contained HTML report
+  with full per-requirement drill-down, in-line azurerm 4.x remediation
+  HCL, severity breakdowns, and a CI gate.
+type: software
+license: Apache-2.0
+license-url: https://github.com/YOUR_ORG/pacioli/blob/main/LICENSE
+repository-code: https://github.com/YOUR_ORG/pacioli
+keywords:
+  - compliance
+  - pci-dss
+  - soc2
+  - cis-azure
+  - nist-800-53
+  - checkov
+  - terraform
+  - azure
+  - policy-as-code
+  - security
+  - iac
+authors:
+  - name: Pacioli Contributors
+version: 0.1.0
+date-released: 2026-08-06

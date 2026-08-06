@@ -1,0 +1,35 @@
+# Pinned dependencies for the PCI Checkov scanner.
+#
+# Purpose (defect P2-02): the audit-grade-quarterly-review cadence
+# relies on deterministic Checkov rule output. Without a pin, a
+# fresh runner may pull a newer Checkov that renumbers or removes
+# rules, silently invalidating pci_mapping.yaml mappings
+# (e.g., CKV_AZURE_211 mapped to "PCI 10.7 audit log retention" is
+# only correct on Checkov 3.3.x — see bg_508b61a8 audit trail).
+#
+# This file is the regeneration seed, NOT the install source.
+# Install with: pip install -r .scripts/checkov/requirements-pinned.txt
+# Quarterly verification: compare `checkov --version` against the
+# pinned version; if Checkov upstream shipped a new release AND our
+# pci_mapping.yaml row counts diverge, schedule a PCI mapping
+# refresh PR with the CKV_AZURE_* IDs added/removed/deprecated.
+
+checkov==3.3.9
+
+# Transitive runtime deps that Checkov 3.3.9 needs but does not
+# always install reliably on a fresh system. Pinned to tested
+# Aug-2026 versions; bump with Checkov only.
+pyyaml>=6.0,<7.0
+requests>=2.28,<3.0
+
+# Pin policy (recorded here for the next operator):
+#   - The Checkov pin is exact (`==`): every rule_id in pci_mapping.yaml
+#     was cross-validated against this exact version. A bump to
+#     e.g. 3.4.x requires a pci_mapping.yaml refresh PR.
+#   - The pyyaml / requests pins are floor+ceiling (`>=`,`<`) so
+#     future Checkov-bundled-versions resolve; tighten only when a
+#     known incompatibility is observed.
+#   - When bumping: edit this file, commit as `chore: bump checkov
+#     <old> -> <new>`, run `make scan-pci-selftest` to confirm the
+#     new version still parses cleanly with our custom checks and
+#     terraform_remediation.yaml.

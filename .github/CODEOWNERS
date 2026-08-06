@@ -1,0 +1,3 @@
+docs/runbooks/
+!docs/runbooks/
+!docs/runbooks/*.md

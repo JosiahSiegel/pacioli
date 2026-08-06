@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pacioli"
+version = "0.1.0"
+description = "Read-only compliance scanner for Azure Terraform. PCI DSS v4.0.1, SOC 2, CIS Azure, NIST 800-53, ISO 27001."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Pacioli Contributors"}]
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+keywords = [
+    "compliance", "pci-dss", "soc2", "cis-azure", "nist-800-53",
+    "checkov", "terraform", "azure", "policy-as-code", "security", "iac",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "checkov==3.3.9",  # Pinned; bump with care, see requirements-pinned.txt
+    "jmespath>=1.0.0",  # Used by storage firewall whitelist logic
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+pacioli-scan = "scanner.scan:main"
+pacioli-aggregate = "scanner.aggregate:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"scanner" = [
+    "terraform_remediation.yaml",
+    "requirements-pinned.txt",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scanner*"]

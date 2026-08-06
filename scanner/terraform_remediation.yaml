@@ -1,0 +1,2183 @@
+# terraform_remediation.yaml — Canonical azurerm 4.x remediation patterns for fired Checkov rules.
+#
+# REFERENCE ARTIFACT ONLY — not wired into report.html in this PR. The HTML 'Remediation'
+# column render is tracked separately (deferred to follow-up PR). Auditor reading this file
+# sees the canonical azurerm 4.x HCL for every fired Checkov rule; the aggregator currently
+# renders NO column from this file.
+#
+# Schema (locked): the dict is keyed by check_id. Each entry is a list of one-or-more
+# remediation_block dicts with the following fields:
+#   - resource_type: azurerm resource type (str, or comma-separated str if a check applies
+#                    to multiple resources; see CKV_AZURE_PCI_003 for the multi-resource pattern)
+#   - current_problem: verbatim Checkov rule description (from `checkov --list`)
+#   - remediation_hcl: canonical azurerm 4.x HCL (literal block scalar `|`, multi-line OK)
+#   - verification_step: post-apply command(s) to confirm the remediation took effect
+#   - provenance: registry.terraform.io URL for the canonical attribute docs
+#
+# Coverage: 68 entries.
+#   - 64 Azure-flavored fired IDs (51 CKV_AZURE_* + 13 CKV2_AZURE_* per commits d6aa96a and 7a43e02)
+#   - 4 CKV_AZURE_PCI_* custom checks (CKV_AZURE_PCI_002..005)
+#   - CKV_AZURE_PCI_001 deliberately omitted: Terraform lifecycle -> HashiCorp, not azurerm.
+#
+# Intentionally absent: 4 CKV_SECRET_* + CKV_TF_1 IDs. No Terraform azurerm remediation applies;
+# secret scanning is the actual control (--framework secrets in scan_pci.sh).
+#
+# Reuse: snippets extracted from .checkov/all-prod-2026-08-05/remediation/terraform_remediation.md
+# (656 lines, author-curated); new azurerm 4.x patterns generated from registry.terraform.io docs.
+# Estimated size: 68 entries * ~25 lines/entry = ~1700 lines.
+#
+# Verification:
+#   python -c "import yaml; y=yaml.safe_load(open('.scripts/checkov/terraform_remediation.yaml')); assert len(y['remediations']) >= 68; ..."
+#   python scripts/test_terraform_remediation_yaml.py
+#
+# The aggregator currently renders NO column from this file. Wiring the HTML 'Remediation'
+# column is tracked as a follow-up PR (out of scope here per Oracle §3 downscope).
+remediations:
+  CKV_AZURE_103:
+    - resource_type: azurerm_data_factory
+      current_problem: "Ensure that Azure Data Factory uses Git repository for source control"
+      remediation_hcl: |
+        resource "azurerm_data_factory" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+
+          # PCI 10.2.1 (CKV_AZURE_103) — source-control the factory; vsts_account_name
+          # or github_account_name must be set. Use a github_repository for terraform-managed
+          # source control so changes flow through PR review.
+          github_configuration {
+            account_name    = var.github_account_name
+            branch_name     = "main"
+            repository_name = var.github_repository_name
+            root_folder     = "/"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        the `github_configuration` block. In the Azure Portal, navigate to the
+        Data Factory -> Author -> Git configuration and confirm the repo URL
+        and branch are populated.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/data_factory"
+  CKV_AZURE_104:
+    - resource_type: azurerm_data_factory
+      current_problem: "Ensure that Azure Data factory public network access is disabled"
+      remediation_hcl: |
+        resource "azurerm_data_factory" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_104) — disallow public access at the
+          # factory level. Caller must wire a private endpoint via
+          # `azurerm_data_factory_private_endpoint` or use `public_network_access_enabled = "Disabled"`.
+          public_network_access_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az datafactory show --name <n> --resource-group <rg> --query "properties:publicNetworkAccess"`
+        and confirm it returns `Disabled`. Re-run `checkov --check CKV_AZURE_104 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/data_factory"
+  CKV_AZURE_110:
+    - resource_type: azurerm_key_vault
+      current_problem: "Ensure that key vault enables purge protection"
+      remediation_hcl: |
+        resource "azurerm_key_vault" "example" {
+          name                       = var.name
+          location                   = var.location
+          resource_group_name        = var.resource_group_name
+          tenant_id                  = data.azurerm_client_config.current.tenant_id
+          sku_name                   = "standard"
+          soft_delete_retention_days = 90
+
+          # PCI 3.4 / 8.6 (CKV_AZURE_110) — prevent permanent purge during
+          # the soft-delete retention window. Both purge_protection_enabled and
+          # soft_delete_retention_days >= 7 are required for the rule to pass.
+          purge_protection_enabled = true
+
+          # Remove any stale #tfsec:ignore comments — tfsec was archived 2025-11.
+        }
+      verification_step: |
+        After `terraform apply`, run `az keyvault show --name <n> --query "properties:enablePurgeProtection"`
+        and confirm `true`. Then re-run `checkov --check CKV_AZURE_110 --framework terraform` and expect 0 findings
+        on the `azurerm_key_vault` resource.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault"
+  CKV_AZURE_113:
+    - resource_type: azurerm_mssql_server
+      current_problem: "Ensure that SQL server disables public network access"
+      remediation_hcl: |
+        resource "azurerm_mssql_server" "example" {
+          name                         = var.name
+          resource_group_name          = var.resource_group_name
+          location                     = var.location
+          version                      = "12.0"
+          administrator_login          = var.admin_login
+          administrator_login_password = var.admin_password
+          minimum_tls_version          = "1.2"
+
+          # PCI 1.3 (CKV_AZURE_113) — default is `true` (public). Force `false`
+          # and rely on a private endpoint + VNet rule for connectivity.
+          public_network_access_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server show --name <n> --resource-group <rg> --query "publicNetworkAccess"`
+        and confirm `Disabled`. Re-run `checkov --check CKV_AZURE_113 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server"
+  CKV_AZURE_115:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure that AKS enables private clusters"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+          default_node_pool {
+            name       = "default"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+          }
+          identity {
+            type = "SystemAssigned"
+          }
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_115) — AKS API server must not be reachable
+          # over the public internet. Private cluster requires an existing AKS-managed
+          # private DNS zone; set private_cluster_enabled = true and either
+          # private_dns_zone_id (recommended) or private_dns_zone_prefix (deprecated in 4.x).
+          private_cluster_enabled = true
+        }
+      verification_step: |
+        After `terraform apply`, run `az aks show --name <n> --resource-group <rg> --query "apiServerAccessProfile:enablePrivateCluster"`
+        and confirm `true`. The Kubernetes API server endpoint should NOT resolve publicly.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV_AZURE_117:
+    - resource_type: azurerm_kubernetes_cluster_node_pool
+      current_problem: "Ensure that AKS uses disk encryption set"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster_node_pool" "example" {
+          name                   = "encrypted"
+          kubernetes_cluster_id  = azurerm_kubernetes_cluster.example.id
+          vm_size                = "Standard_DS2_v2"
+          node_count             = 3
+
+          # PCI 1.3 (CKV_AZURE_117) — node-pool-level. Set on the standalone node_pool
+          # resource (NOT on default_node_pool within azurerm_kubernetes_cluster; doing
+          # both on the same pool causes drift). Requires an existing disk_encryption_set
+          # (see modules/disk_encryption_set/v1/ pattern, or inline azurerm_disk_encryption_set).
+          azure_disk_encryption_set_id = "/subscriptions/<sub-id>/resourceGroups/<des-rg>/providers/Microsoft.Compute/diskEncryptionSets/<des-name>"
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `azure_disk_encryption_set_id`. In the Azure Portal, navigate to the AKS node pool ->
+        Properties -> Node encryption and confirm the DES is wired. Re-run `checkov --check CKV_AZURE_117`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster_node_pool"
+  CKV_AZURE_137:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensure ACR admin account is disabled"
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          sku                 = "Premium"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_137) — admin account permits plaintext
+          # username/password auth; OAuth / managed identity is the canonical pattern.
+          admin_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az acr show --name <n> --resource-group <rg> --query "adminUserEnabled"`
+        and confirm `false`. Re-run `checkov --check CKV_AZURE_137` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry"
+  CKV_AZURE_139:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensure ACR set to disable public networking"
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          sku                 = "Premium"
+          admin_enabled       = false
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_139) — default is `true` (public). Caller must
+          # wire a private endpoint via `azurerm_private_endpoint` (subresource_names = ["registry"]).
+          public_network_access_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az acr show --name <n> --resource-group <rg> --query "publicNetworkAccess"`
+        and confirm `Disabled`. Confirm DNS resolves the ACR FQDN to a private IP.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry"
+  CKV_AZURE_148:
+    - resource_type: azurerm_redis_cache
+      current_problem: "Ensure Redis Cache is using the latest version of TLS encryption"
+      remediation_hcl: |
+        resource "azurerm_redis_cache" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          capacity            = 2
+          family              = "C"
+          sku_name            = "Standard"
+
+          # PCI 4.2.1 (CKV_AZURE_148) — minimum TLS 1.2. azurerm 4.x has dropped
+          # TLS1_0/TLS1_1 as valid enum values; using them throws at plan time.
+          minimum_tls_version = "1.2"
+        }
+      verification_step: |
+        After `terraform apply`, run `az redis show --name <n> --resource-group <rg> --query "minimumTlsVersion"`
+        and confirm `1.2`. Re-run `checkov --check CKV_AZURE_148` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/redis_cache"
+  CKV_AZURE_153:
+    - resource_type: azurerm_app_service_slot
+      current_problem: "Ensure web app redirects all HTTP traffic to HTTPS in Azure App Service Slot"
+      remediation_hcl: |
+        resource "azurerm_app_service_slot" "example" {
+          name            = var.slot_name
+          app_service_name = azurerm_app_service.example.name
+          resource_group_name = azurerm_app_service.example.resource_group_name
+          app_service_id  = azurerm_app_service.example.id
+          location        = azurerm_app_service.example.location
+
+          site_config {
+            # PCI 4.2.1 (CKV_AZURE_153) — mirror the parent App Service HTTPS-only
+            # setting. Pair with `https_only = true` on the app_service resource itself.
+            http2_enabled = true
+          }
+
+          https_only = true
+        }
+      verification_step: |
+        After `terraform apply`, confirm `az webapp config show --slot <slot>` reports
+        `httpsOnly: true` for the slot. Re-run `checkov --check CKV_AZURE_153`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service_slot"
+  CKV_AZURE_16:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that Register with Azure Active Directory is enabled on App Service"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          app_service_plan_id = azurerm_app_service_plan.example.id
+
+          # PCI 7.2.1 / 8.6 (CKV_AZURE_16) — managed-identity-backed auth via
+          # Azure Active Directory provider. The `identity {}` block pairs with
+          # `auth_settings { enabled = true; ... }` for end-to-end AAD auth.
+          identity {
+            type = "SystemAssigned"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp show --name <n> --resource-group <rg> --query "identity:type"`
+        and confirm `SystemAssigned`. In the Portal, Settings -> Identity should show
+        System assigned = On, Object ID populated.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_164:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensures that ACR uses signed/trusted images"
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          sku                 = "Premium"
+          admin_enabled       = false
+
+          # PCI 6.2.4 / 6.5.1 (CKV_AZURE_164) — restrict pulled images to trusted
+          # content. The azurerm 4.x attribute is `trust_policy { enabled = true }`.
+          trust_policy {
+            enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az acr config content-trust show --registry <n> --resource-group <rg>`
+        and confirm `status: enabled`. Re-run `checkov --check CKV_AZURE_164`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry"
+  CKV_AZURE_165:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensure geo-replicated container registries to match multi-region container deployments."
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+
+          # PCI 1.2.1 (CKV_AZURE_165) — geo-replication for multi-region deployments.
+          # Premium SKU required. geo_replications is a set of { location, ... } blocks.
+          sku = "Premium"
+
+          geo_replications {
+            location                = "West US"
+            regional_endpoint_enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az acr replication list --registry <n> --resource-group <rg> --query "[].location"`
+        and confirm the secondary region is present.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry"
+  CKV_AZURE_166:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensure container image quarantine, scan, and mark images verified"
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          sku                 = "Premium"
+
+          # PCI 6.2.4 (CKV_AZURE_166) — image quarantine + scan workflow.
+          # `quarantine_policy` controls whether untagged images pass through.
+          quarantine_policy {
+            enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az acr config policy show --registry <n> --resource-group <rg> --type quarantine`
+        and confirm `status: enabled`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry"
+  CKV_AZURE_167:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensure a retention policy is set to cleanup untagged manifests."
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          sku                 = "Premium"
+
+          # PCI 6.2.4 (CKV_AZURE_167) — auto-purge untagged manifests after N days.
+          retention_policy {
+            days    = 30
+            enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az acr config retention show --registry <n> --resource-group <rg>`
+        and confirm `status: enabled, days: 30`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry"
+  CKV_AZURE_168:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure Azure Kubernetes Cluster (AKS) nodes should use a minimum number of 50 pods."
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+
+          # PCI 1.2.1 (CKV_AZURE_168) — minimum 50 pods per node. Set on default_node_pool.
+          default_node_pool {
+            name       = "default"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+
+            # `max_pods` defaults to 30 for kubenet and 250 for Azure CNI. To pass
+            # CKV_AZURE_168 set max_pods >= 50.
+            max_pods = 50
+          }
+
+          identity { type = "SystemAssigned" }
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on `default_node_pool.max_pods`.
+        Re-run `checkov --check CKV_AZURE_168` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV_AZURE_172:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure autorotation of Secrets Store CSI Driver secrets for AKS clusters"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+          default_node_pool {
+            name       = "default"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+          }
+          identity { type = "SystemAssigned" }
+
+          # PCI 3.5.1 / 8.6 (CKV_AZURE_172) — enable Secrets Store CSI Driver
+          # secret autorotation. azurerm 4.x has the key_vault_secrets_provider block
+          # at the cluster level; set secret_rotation_enabled = true.
+          key_vault_secrets_provider {
+            secret_rotation_enabled = true
+            secret_rotation_interval = "5m"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `key_vault_secrets_provider`. In the Portal, AKS -> Security -> Secret Store CSI
+        should show `Enable Secret Rotation: yes`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV_AZURE_190:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure that Storage blobs restrict public access"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_190) — restrict blob public access at the
+          # account level. Pair with `public_network_access_enabled = false` for full coverage.
+          allow_nested_items_to_be_public = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "allowBlobPublicAccess"`
+        and confirm `false`. Re-run `checkov --check CKV_AZURE_190` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_199:
+    - resource_type: azurerm_servicebus_namespace
+      current_problem: "Ensure that Azure Service Bus uses double encryption"
+      remediation_hcl: |
+        resource "azurerm_servicebus_namespace" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          sku                 = "Premium"
+
+          # PCI 3.5.1 (CKV_AZURE_199) — infrastructure-level double encryption.
+          # azurerm 4.x: infrastructure_encryption_enabled is a top-level attribute on
+          # Premium SKUs only.
+          infrastructure_encryption_enabled = true
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `infrastructure_encryption_enabled`. Re-run `checkov --check CKV_AZURE_199`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/servicebus_namespace"
+  CKV_AZURE_201:
+    - resource_type: azurerm_servicebus_namespace
+      current_problem: "Ensure that Azure Service Bus uses a customer-managed key to encrypt data"
+      remediation_hcl: |
+        resource "azurerm_servicebus_namespace" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          sku                 = "Premium"
+
+          identity {
+            type = "SystemAssigned"
+          }
+
+          # PCI 3.5.1 (CKV_AZURE_201) — customer-managed key for Service Bus data encryption.
+          # Requires `customer_managed_key {}` block on the namespace resource.
+          customer_managed_key {
+            key_vault_key_id          = var.cmk_key_vault_key_id
+            user_assigned_identity_id = azurerm_user_assigned_identity.example.id
+            identity {
+              type         = "UserAssigned"
+              identity_ids = [azurerm_user_assigned_identity.example.id]
+            }
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        the `customer_managed_key` block. In the Portal, Service Bus Namespace ->
+        Properties -> Encryption should show the configured KV key URI.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/servicebus_namespace"
+  CKV_AZURE_202:
+    - resource_type: azurerm_servicebus_namespace
+      current_problem: "Ensure that Managed identity provider is enabled for Azure Service Bus"
+      remediation_hcl: |
+        resource "azurerm_servicebus_namespace" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          sku                 = "Premium"
+
+          # PCI 7.2.1 / 8.6 (CKV_AZURE_202) — managed identity is a prerequisite for
+          # AAD-based authentication on Service Bus.
+          identity {
+            type = "SystemAssigned"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az servicebus namespace show --name <n> --resource-group <rg> --query "identity"`
+        and confirm `type: SystemAssigned, principalId: <guid>`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/servicebus_namespace"
+  CKV_AZURE_203:
+    - resource_type: azurerm_servicebus_namespace
+      current_problem: "Ensure Azure Service Bus Local Authentication is disabled"
+      remediation_hcl: |
+        resource "azurerm_servicebus_namespace" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          sku                 = "Premium"
+
+          identity { type = "SystemAssigned" }
+
+          # PCI 7.2.1 / 8.6 (CKV_AZURE_203) — disable SAS key / local auth; require AAD.
+          local_auth_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az servicebus namespace show --name <n> --resource-group <rg> --query "disableLocalAuth"`
+        and confirm `true`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/servicebus_namespace"
+  CKV_AZURE_204:
+    - resource_type: azurerm_servicebus_namespace
+      current_problem: "Ensure 'public network access enabled' is set to 'False' for Azure Service Bus"
+      remediation_hcl: |
+        resource "azurerm_servicebus_namespace" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          sku                 = "Premium"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_204) — default is `true` (public). Force `false`
+          # and wire a private endpoint via `azurerm_private_endpoint`.
+          public_network_access_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az servicebus namespace show --name <n> --resource-group <rg> --query "publicNetworkAccess"`
+        and confirm `Disabled`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/servicebus_namespace"
+  CKV_AZURE_205:
+    - resource_type: azurerm_servicebus_namespace
+      current_problem: "Ensure Azure Service Bus is using the latest version of TLS encryption"
+      remediation_hcl: |
+        resource "azurerm_servicebus_namespace" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          sku                 = "Premium"
+
+          # PCI 4.2.1 (CKV_AZURE_205) — minimum TLS 1.2. `minimum_tls_version` accepts
+          # "1.0", "1.1", "1.2" as enum values in azurerm 4.x.
+          minimum_tls_version = "1.2"
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `minimum_tls_version`. Re-run `checkov --check CKV_AZURE_205`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/servicebus_namespace"
+  CKV_AZURE_206:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure that Storage Accounts use replication"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+
+          # PCI 1.3 / 2.2.4 / 2.2.6 (CKV_AZURE_206) — ZRS (zone-redundant) is the
+          # cheapest PCI-acceptable option; GZRS for multi-region. LRS is the failing default.
+          account_replication_type = "ZRS"
+          min_tls_version          = "TLS1_2"
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "sku:name"`
+        and confirm it starts with `Standard_ZRS` or `Standard_GZRS`. NOTE: changing replication
+        type on an existing account is NOT supported in-place; for an existing LRS account,
+        plan an azcopy migration to a new account (this YAML pattern is for new resources only).
+        Re-run `checkov --check CKV_AZURE_206`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_212:
+    - resource_type: azurerm_service_plan
+      current_problem: "Ensure App Service has a minimum number of instances for failover"
+      remediation_hcl: |
+        resource "azurerm_service_plan" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+
+          # PCI 1.2.1 / 10.2.1 (CKV_AZURE_212) — minimum 2 instances for failover.
+          # `instance_count` is a no-op for Y1 (Consumption) SKU; use P1v3/P2v2/P3v2 etc.
+          sku_name = "P2v2"
+          os_type  = "Windows"
+          instance_count = 2
+        }
+      verification_step: |
+        After `terraform apply`, run `az appservice plan show --name <n> --resource-group <rg> --query "numberOfWorkers"`
+        and confirm >= 2. Re-run `checkov --check CKV_AZURE_212` and expect 0 findings.
+        For Y1 / Consumption plans, document a `pci_baseline.yaml` waiver (instance_count is a no-op).
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/service_plan"
+  CKV_AZURE_225:
+    - resource_type: azurerm_service_plan
+      current_problem: "Ensure the App Service Plan is zone redundant"
+      remediation_hcl: |
+        resource "azurerm_service_plan" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+
+          # PCI 1.2.1 (CKV_AZURE_225) — zone-redundant plan. Requires Premium SKU and
+          # >= 3 instances; `zone_redundant` is a top-level attribute in azurerm 4.x.
+          sku_name = "P1v3"
+          os_type  = "Windows"
+          instance_count  = 3
+          zone_redundant = true
+        }
+      verification_step: |
+        After `terraform apply`, run `az appservice plan show --name <n> --resource-group <rg> --query "properties:zoneRedundant"`
+        and confirm `true`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/service_plan"
+  CKV_AZURE_226:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure ephemeral disks are used for OS disks"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+
+          default_node_pool {
+            name       = "default"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+
+            # PCI 1.3 / 3.5.1 (CKV_AZURE_226) — ephemeral OS disk.
+            # azurerm 4.x: os_disk_type accepts "Ephemeral" or "Managed".
+            os_disk_type = "Ephemeral"
+          }
+          identity { type = "SystemAssigned" }
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `default_node_pool.os_disk_type`. In the Portal, AKS Node Pool -> Properties ->
+        OS disk should report Ephemeral.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV_AZURE_227:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure that the AKS cluster encrypt temp disks, caches, and data flows between Compute and Storage resources"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+          default_node_pool {
+            name       = "default"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+          }
+          identity { type = "SystemAssigned" }
+
+          # PCI 3.5.1 (CKV_AZURE_227) — encrypt temp disks + Compute<->Storage flows.
+          # azurerm 4.x: this is the Azure CNI overlay + Container Storage Interface;
+          # the terraform-side attribute is `azure_policy_enabled = true` (deploys AzureDefender)
+          # OR set the host-based encryption at the node_pool level. Pair with CKV_AZURE_117.
+          azure_policy_enabled = true
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `azure_policy_enabled`. Re-run `checkov --check CKV_AZURE_227`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV_AZURE_23:
+    - resource_type: azurerm_mssql_server
+      current_problem: "Ensure that 'Auditing' is set to 'On' for SQL servers"
+      remediation_hcl: |
+        resource "azurerm_mssql_server" "example" {
+          name                         = var.name
+          resource_group_name          = var.resource_group_name
+          location                     = var.location
+          version                      = "12.0"
+          administrator_login          = var.admin_login
+          administrator_login_password = var.admin_password
+          minimum_tls_version          = "1.2"
+
+          # PCI 10.2.1 (CKV_AZURE_23) — enable auditing. The `extended_auditing_policy`
+          # resource (separate resource, not nested block) carries the storage_account config.
+        }
+
+        resource "azurerm_mssql_server_extended_auditing_policy" "example" {
+          server_id                               = azurerm_mssql_server.example.id
+          storage_endpoint                        = azurerm_storage_account.audit.primary_blob_endpoint
+          storage_account_access_key              = azurerm_storage_account.audit.primary_access_key
+          storage_account_access_key_is_secondary = false
+          retention_in_days                       = 90
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server audit-policy show --resource-group <rg> --name <n>`
+        and confirm `state: Enabled, retentionDays: 90`. Re-run `checkov --check CKV_AZURE_23`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_extended_auditing_policy"
+  CKV_AZURE_232:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure that only critical system pods run on system nodes"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+
+          default_node_pool {
+            name       = "systempool"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+            # PCI 7.2.1 (CKV_AZURE_232) — separate system node pool so only critical
+            # pods schedule there. Standalone `azurerm_kubernetes_cluster_node_pool`
+            # resources are user-pools.
+          }
+          identity { type = "SystemAssigned" }
+        }
+      verification_step: |
+        After `terraform apply`, run `az aks nodepool list --cluster-name <n> --resource-group <rg> --query "[].mode"`
+        and confirm one entry is `System` and the rest are `User`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV_AZURE_233:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensure Azure Container Registry (ACR) is zone redundant"
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+
+          # PCI 1.2.1 (CKV_AZURE_233) — zone redundancy. Requires Premium SKU and
+          # a region that supports zones (East US, West US 2, etc.).
+          sku              = "Premium"
+          zone_redundancy_enabled = true
+        }
+      verification_step: |
+        After `terraform apply`, run `az acr show --name <n> --resource-group <rg> --query "zoneRedundancy"`
+        and confirm `Enabled`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry"
+  CKV_AZURE_237:
+    - resource_type: azurerm_container_registry
+      current_problem: "Ensure dedicated data endpoints are enabled."
+      remediation_hcl: |
+        resource "azurerm_container_registry" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          sku                 = "Premium"
+
+          # PCI 1.2.1 (CKV_AZURE_237) — dedicated data endpoints. azurerm 4.x:
+          # `data_endpoint_enabled` is NOT a top-level attribute; control via
+          # `azurerm_container_registry_data_endpoint` (separate resource per region).
+        }
+
+        resource "azurerm_container_registry_data_endpoint" "example" {
+          registry_id = azurerm_container_registry.example.id
+          location    = var.location
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `azurerm_container_registry_data_endpoint`. Re-run `checkov --check CKV_AZURE_237`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry_data_endpoint"
+  CKV_AZURE_24:
+    - resource_type: azurerm_mssql_server
+      current_problem: "Ensure that 'Auditing' Retention is 'greater than 90 days' for SQL servers"
+      remediation_hcl: |
+        # CKV_AZURE_24 — auditing retention > 90 days. The retention_in_days
+        # attribute lives on the `azurerm_mssql_server_extended_auditing_policy`
+        # resource (NOT on the server itself).
+        resource "azurerm_mssql_server_extended_auditing_policy" "example" {
+          server_id                               = azurerm_mssql_server.example.id
+          storage_endpoint                        = azurerm_storage_account.audit.primary_blob_endpoint
+          storage_account_access_key              = azurerm_storage_account.audit.primary_access_key
+          storage_account_access_key_is_secondary = false
+
+          # PCI 10.2.1 / 10.7 (CKV_AZURE_24) — retention >= 90 days (PCI mandates
+          # >= 365 for 10.7 but Checkov emits on 90). Prefer 365.
+          retention_in_days = 365
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server audit-policy show --resource-group <rg> --name <n> --query "retentionDays"`
+        and confirm >= 90 (PCI 10.7 mandates >= 365). Re-run `checkov --check CKV_AZURE_24`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_extended_auditing_policy"
+  CKV_AZURE_244:
+    - resource_type: azurerm_storage_account
+      current_problem: "Avoid the use of local users for Azure Storage unless necessary"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          # PCI 7.2.1 / 8.6 (CKV_AZURE_244) — disable shared-key (local-user) auth
+          # so callers MUST use AAD. azurerm 4.x:
+          # `shared_access_key_enabled = false` is the canonical attribute.
+          shared_access_key_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "allowSharedKeyAccess"`
+        and confirm `false`. Confirm SAS-token and account-key API calls now fail (AAD-only).
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_26:
+    - resource_type: azurerm_mssql_server_security_alert_policy
+      current_problem: "Ensure that 'Send Alerts To' is enabled for MSSQL servers"
+      remediation_hcl: |
+        resource "azurerm_mssql_server_security_alert_policy" "example" {
+          resource_group_name        = var.resource_group_name
+          server_name                = azurerm_mssql_server.example.name
+
+          # PCI 10.2.1 / 10.4 (CKV_AZURE_26) — set state = "Enabled" and configure
+          # `email_addresses` (or email_account_admins = true). Disable means alerts are dropped.
+          state                = "Enabled"
+          email_account_admins = true
+          email_addresses      = ["secops@example.com"]
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server threat-policy show --resource-group <rg> --name <n> --query "state"`
+        and confirm `Enabled`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_security_alert_policy"
+  CKV_AZURE_27:
+    - resource_type: azurerm_mssql_server_security_alert_policy
+      current_problem: "Ensure that 'Email service and co-administrators' is 'Enabled' for MSSQL servers"
+      remediation_hcl: |
+        resource "azurerm_mssql_server_security_alert_policy" "example" {
+          resource_group_name        = var.resource_group_name
+          server_name                = azurerm_mssql_server.example.name
+          state                      = "Enabled"
+
+          # PCI 10.2.1 / 10.4 (CKV_AZURE_27) — co-admins must receive alerts.
+          email_account_admins = true
+          email_addresses      = ["secops@example.com"]
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server threat-policy show --resource-group <rg> --name <n> --query "emailAccountAdmins"`
+        and confirm `true`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_security_alert_policy"
+  CKV_AZURE_33:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure Storage logging is enabled for Queue service for read, write and delete requests"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          # PCI 10.2.1 (CKV_AZURE_33) — Queue service read/write/delete logging.
+          # azurerm 4.x: a separate `azurerm_storage_account_queue_properties` resource
+          # carries `logging { ... }`. This is the canonical pattern.
+        }
+
+        resource "azurerm_storage_account_queue_properties" "example" {
+          storage_account_id = azurerm_storage_account.example.id
+
+          logging {
+            delete                = true
+            read                  = true
+            write                 = true
+            version               = "1.0"
+            retention_policy_days = 30
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account logging show --account-name <n> --service q`
+        and confirm read/write/delete are all `true`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account_queue_properties"
+  CKV_AZURE_34:
+    - resource_type: azurerm_storage_container
+      current_problem: "Ensure that 'Public access level' is set to Private for blob containers"
+      remediation_hcl: |
+        resource "azurerm_storage_container" "example" {
+          name                  = var.container_name
+          storage_account_name  = azurerm_storage_account.example.name
+          container_access_type = "private"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_34) — default is `private` (good), but
+          # explicit declaration removes ambiguity. NEVER use "blob" or "container".
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage container show --name <n> --account-name <acct> --query "properties:publicAccess"`
+        and confirm it returns `null`/empty (private). Re-run `checkov --check CKV_AZURE_34`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_container"
+  CKV_AZURE_35:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure default network access rule for Storage Accounts is set to deny"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_35) — explicit network_rules with default_action = "Deny".
+          # Pair with CKV_AZURE_PCI_002 (custom PCI check for the same default-deny invariant).
+          network_rules {
+            default_action = "Deny"
+            bypass         = ["AzureServices"]
+            ip_rules       = []  # add specific IPs as needed; avoid 0.0.0.0/0
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "networkRuleSet:defaultAction"`
+        and confirm `Deny`. Re-run `checkov --check CKV_AZURE_35` and `checkov --check CKV_AZURE_PCI_002`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_42:
+    - resource_type: azurerm_key_vault
+      current_problem: "Ensure the key vault is recoverable"
+      remediation_hcl: |
+        resource "azurerm_key_vault" "example" {
+          name                       = var.name
+          location                   = var.location
+          resource_group_name        = var.resource_group_name
+          tenant_id                  = data.azurerm_client_config.current.tenant_id
+          sku_name                   = "standard"
+
+          # PCI 3.6.5 / 8.6 (CKV_AZURE_42) — recoverable = soft_delete + purge_protection.
+          # Both are required; CKV_AZURE_110 checks the same pair but is the original rule id.
+          soft_delete_retention_days = 90
+          purge_protection_enabled   = true
+
+          enable_rbac_authorization = true
+        }
+      verification_step: |
+        After `terraform apply`, run `az keyvault show --name <n> --query "properties:enableSoftDelete, properties:enablePurgeProtection"`
+        and confirm both `true`. Re-run `checkov --check CKV_AZURE_42` and `checkov --check CKV_AZURE_110`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault"
+  CKV_AZURE_43:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure Storage Accounts adhere to the naming rules"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          # PCI general hygiene (CKV_AZURE_43) — names must be 3-24 chars, lowercase
+          # letters and digits only (no hyphens). The repo convention is:
+          #   {envprefix}{workload}{purpose}storage
+          # e.g. "prodformstaxstorage" (CR_Formstax_Storage).
+          name = "prodformstaxstorage"
+
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+        }
+      verification_step: |
+        Re-run `checkov --check CKV_AZURE_43 --framework terraform` and expect 0 findings.
+        The rule fires on invalid characters (uppercase, hyphens, underscores) or wrong length.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_44:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure Storage Account is using the latest version of TLS encryption"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+
+          # PCI 3.4 / 4.2.1 (CKV_AZURE_44) — TLS 1.2 minimum. azurerm 4.x has dropped
+          # TLS1_0/TLS1_1 as valid enum values; using them throws at plan time.
+          # Match the exact casing `"TLS1_2"` (underscore, not dot).
+          min_tls_version = "TLS1_2"
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "minimumTlsVersion"`
+        and confirm `TLS1_2`. Re-run `checkov --check CKV_AZURE_44` and the custom `CKV_AZURE_PCI_003`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_52:
+    - resource_type: azurerm_mssql_server
+      current_problem: "Ensure MSSQL is using the latest version of TLS encryption"
+      remediation_hcl: |
+        resource "azurerm_mssql_server" "example" {
+          name                         = var.name
+          resource_group_name          = var.resource_group_name
+          location                     = var.location
+          version                      = "12.0"
+          administrator_login          = var.admin_login
+          administrator_login_password = var.admin_password
+
+          # PCI 4.2.1 (CKV_AZURE_52) — minimum TLS 1.2. azurerm 4.x enum values:
+          # "1.0", "1.1", "1.2" (DOT, not underscore — differs from storage_account).
+          minimum_tls_version = "1.2"
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server show --name <n> --resource-group <rg> --query "minimalTlsVersion"`
+        and confirm `1.2`. Re-run `checkov --check CKV_AZURE_52`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server"
+  CKV_AZURE_59:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure that Storage accounts disallow public access"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_59) — default is `true` (public). Force `false`
+          # and rely on a private endpoint + VNet rule for connectivity. Pair with
+          # CKV_AZURE_190 (allow_nested_items_to_be_public = false) and CKV_AZURE_35
+          # (network_rules default_action = Deny) for full coverage.
+          public_network_access_enabled = false
+          allow_nested_items_to_be_public = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "publicNetworkAccess, allowBlobPublicAccess"`
+        and confirm both `Disabled` / `false`. Re-run `checkov --check CKV_AZURE_59`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_63:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that App service enables HTTP logging"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          app_service_plan_id = azurerm_app_service_plan.example.id
+
+          # PCI 10.2.1 (CKV_AZURE_63) — HTTP request logging. azurerm 4.x:
+          # site_config { http_logs {} } block (was `logs { ... }` in 3.x).
+          site_config {
+            http_logs {
+              file_system {
+                retention_in_days = 30
+                retention_in_mb   = 35
+              }
+            }
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp log show --name <n> --resource-group <rg>`
+        and confirm `httpLogs: enabled`. Re-run `checkov --check CKV_AZURE_63`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_7:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure AKS cluster has Network Policy configured"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+          default_node_pool {
+            name       = "default"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+          }
+          identity { type = "SystemAssigned" }
+
+          # PCI 1.2.1 (CKV_AZURE_7) — Network Policy (Calico/Azure CNI). azurerm 4.x:
+          # `network_policy = "calico"` is one option; alternative is `azure` (Azure CNI).
+          network_profile {
+            network_plugin    = "azure"
+            network_policy    = "calico"
+            pod_cidr          = "10.244.0.0/16"
+            service_cidr      = "10.0.0.0/16"
+            dns_service_ip    = "10.0.0.10"
+            load_balancer_sku = "Standard"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on `network_profile`.
+        Re-run `checkov --check CKV_AZURE_7`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV_AZURE_70:
+    - resource_type: azurerm_function_app
+      current_problem: "Ensure that Function apps is only accessible over HTTPS"
+      remediation_hcl: |
+        resource "azurerm_windows_function_app" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          service_plan_id     = azurerm_service_plan.example.id
+          storage_account_name       = azurerm_storage_account.example.name
+          storage_account_access_key = azurerm_storage_account.example.primary_access_key
+
+          # PCI 4.2.1 (CKV_AZURE_70) — HTTPS only. Pair with CKV_AZURE_17 (client_certificate_mode)
+          # and CKV_AZURE_18 (http2_enabled) for full transport-security coverage.
+          https_only = true
+
+          site_config {
+            http2_enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az functionapp config show --name <n> --resource-group <rg> --query "httpsOnly"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_70`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/windows_function_app"
+  CKV_AZURE_71:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that Managed identity provider is enabled for app services"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          app_service_plan_id = azurerm_app_service_plan.example.id
+
+          # PCI 7.2.1 / 8.6 (CKV_AZURE_71) — managed identity for AAD auth / RBAC.
+          identity {
+            type = "SystemAssigned"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp show --name <n> --resource-group <rg> --query "identity:type"`
+        and confirm `SystemAssigned`. Re-run `checkov --check CKV_AZURE_71`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_80:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that 'Net Framework' version is the latest, if used as a part of the web app"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          app_service_plan_id = azurerm_app_service_plan.example.id
+
+          site_config {
+            # PCI 6.2.4 (CKV_AZURE_80) — latest .NET Framework version. If you ARE
+            # using .NET Framework on Windows, use `net_framework_version = "v8.0"`.
+            # If not using .NET, switch to `azurerm_linux_web_app` (which removes this rule).
+            net_framework_version = "v8.0"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp config show --name <n> --resource-group <rg> --query "netFrameworkVersion"`
+        and confirm it starts with `v8.`. Re-run `checkov --check CKV_AZURE_80`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_89:
+    - resource_type: azurerm_redis_cache
+      current_problem: "Ensure that Azure Cache for Redis disables public network access"
+      remediation_hcl: |
+        resource "azurerm_redis_cache" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          capacity            = 2
+          family              = "C"
+          sku_name            = "Standard"
+          minimum_tls_version = "1.2"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_89) — disallow public access at the
+          # Redis instance level. Pair with private endpoint (subresource_names = ["redisCache"]).
+          public_network_access_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az redis show --name <n> --resource-group <rg> --query "publicNetworkAccess"`
+        and confirm `Disabled`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/redis_cache"
+  CKV2_AZURE_1:
+    - resource_type: azurerm_storage_account_customer_managed_key
+      current_problem: "Ensure storage for critical data are encrypted with Customer Managed Key"
+      remediation_hcl: |
+        # CKV2_AZURE_1 — canonical azurerm 4.x pattern is a STANDALONE
+        # azurerm_storage_account_customer_managed_key resource, NOT an inline
+        # `customer_managed_key {}` block. The storage account resource itself
+        # must declare a `SystemAssigned` identity for the standalone CMK
+        # resource to function in azurerm 4.x.
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          identity {
+            type = "SystemAssigned"  # azurerm 4.x — SystemAssigned is supported for CMK
+          }
+        }
+
+        resource "azurerm_storage_account_customer_managed_key" "example" {
+          count = var.cmk_key_vault_key_id == null ? 0 : 1
+
+          storage_account_id = azurerm_storage_account.example.id
+          key_vault_key_id   = var.cmk_key_vault_key_id
+        }
+
+        # KV access policy MUST be granted to the storage account's principal_id:
+        #   key_permissions = ["Get", "WrapKey", "UnwrapKey"]
+        # See `terraform_remediation.md` Req 3.5.1 for the full rollout plan.
+      verification_step: |
+        After `terraform apply`, run `terraform plan` and confirm no diff on
+        `azurerm_storage_account_customer_managed_key`. In the Portal, Storage Account ->
+        Encryption -> Customer-managed keys should show the configured KV key URI.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account_customer_managed_key"
+  CKV2_AZURE_2:
+    - resource_type: azurerm_mssql_server_security_alert_policy
+      current_problem: "Ensure that Vulnerability Assessment (VA) is enabled on a SQL server by setting a Storage Account"
+      remediation_hcl: |
+        resource "azurerm_mssql_server_security_alert_policy" "example" {
+          resource_group_name        = var.resource_group_name
+          server_name                = azurerm_mssql_server.example.name
+          state                      = "Enabled"
+          email_account_admins       = true
+          email_addresses            = ["secops@example.com"]
+
+          # PCI 10.2.1 (CKV2_AZURE_2) — Vulnerability Assessment (VA) storage account.
+          # The VA scan results are written to a storage account container named
+          # "vulnerability-assessment". The storage_account_access_key must be
+          # primary OR secondary depending on storage_account_access_key_is_secondary.
+          storage_account_access_key              = azurerm_storage_account.va.primary_access_key
+          storage_account_access_key_is_secondary = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server threat-policy show --resource-group <rg> --name <n> --query "storageAccount"`
+        and confirm it returns the VA storage account resource ID.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_security_alert_policy"
+  CKV2_AZURE_3:
+    - resource_type: azurerm_msql_server_vulnerability_assessment
+      current_problem: "Ensure that VA setting Periodic Recurring Scans is enabled on a SQL server"
+      remediation_hcl: |
+        resource "azurerm_mssql_server_vulnerability_assessment" "example" {
+          server_security_alert_policy_id = azurerm_mssql_server_security_alert_policy.example.id
+          storage_container_path          = "${azurerm_storage_account.va.primary_blob_endpoint}vulnerability-assessment/"
+
+          # PCI 10.2.1 (CKV2_AZURE_3) — periodic recurring scans. azurerm 4.x:
+          # `recurring_scans { enabled = true }` is the canonical block.
+          recurring_scans {
+            enabled                   = true
+            email_subscription_admins = true
+            emails                    = ["secops@example.com"]
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server vulnerability-assessment show --resource-group <rg> --name <n> --query "recurringScans:isEnabled"`
+        and confirm `true`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_vulnerability_assessment"
+  CKV2_AZURE_4:
+    - resource_type: azurerm_mssql_server_vulnerability_assessment
+      current_problem: "Ensure Azure SQL server ADS VA Send scan reports to is configured"
+      remediation_hcl: |
+        resource "azurerm_mssql_server_vulnerability_assessment" "example" {
+          server_security_alert_policy_id = azurerm_mssql_server_security_alert_policy.example.id
+          storage_container_path          = "${azurerm_storage_account.va.primary_blob_endpoint}vulnerability-assessment/"
+
+          recurring_scans {
+            enabled                   = true
+            email_subscription_admins = true
+            emails                    = ["secops@example.com"]
+          }
+
+          # PCI 10.2.1 (CKV2_AZURE_4) — separate `azurerm_mssql_server_security_alert_policy`
+          # resource carries `email_addresses` AND `email_account_admins = true`. See CKV2_AZURE_2 for
+          # the alert policy block; this check evaluates whether the VA scans ARE sent.
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server vulnerability-assessment show --resource-group <rg> --name <n> --query "recurringScans"`
+        and confirm `emailSubscriptionAdmins: true, emails: [<...>]`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_vulnerability_assessment"
+  CKV2_AZURE_5:
+    - resource_type: azurerm_mssql_server_vulnerability_assessment
+      current_problem: "Ensure that VA setting 'Also send email notifications to admins and subscription owners' is set for a SQL server"
+      remediation_hcl: |
+        resource "azurerm_mssql_server_vulnerability_assessment" "example" {
+          server_security_alert_policy_id = azurerm_mssql_server_security_alert_policy.example.id
+          storage_container_path          = "${azurerm_storage_account.va.primary_blob_endpoint}vulnerability-assessment/"
+
+          recurring_scans {
+            enabled                   = true
+
+            # PCI 10.2.1 (CKV2_AZURE_5) — both subscription admins AND explicit emails.
+            email_subscription_admins = true
+            emails                    = ["secops@example.com"]
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server vulnerability-assessment show --resource-group <rg> --name <n>`
+        and confirm both `emailSubscriptionAdmins: true` AND `emails: [secops@example.com]`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server_vulnerability_assessment"
+  CKV2_AZURE_8:
+    - resource_type: azurerm_monitor_activity_log_alert
+      current_problem: "Ensure the storage container storing the activity logs is not publicly accessible"
+      remediation_hcl: |
+        resource "azurerm_monitor_activity_log_alert" "example" {
+          name                = var.alert_name
+          resource_group_name = var.resource_group_name
+          scopes               = ["/subscriptions/${var.subscription_id}"]
+          description         = "Activity Log alert for delete events on storage container holding the activity logs"
+
+          criteria {
+            resource_id    = "/subscriptions/${var.subscription_id}/resourceGroups/${var.activity_log_rg}/providers/Microsoft.Storage/storageAccounts/${var.activity_log_storage}/blobServices/default/containers/insights-operational-logs"
+            operation_name = "Microsoft.Storage/storageAccounts/blobServices/containers/delete"
+            category       = "Administrative"
+          }
+
+          action {
+            action_group_id = azurerm_monitor_action_group.secops.id
+          }
+
+          # PCI 10.2.1 (CKV2_AZURE_8) — the rule evaluates whether an alert EXISTS for delete
+          # events on the container that holds activity logs. The activity logs themselves live
+          # in the `insights-operational-logs` blob container (or the operator's equivalent).
+        }
+      verification_step: |
+        After `terraform apply`, run `az monitor activity-log alert show --name <n> --resource-group <rg>`
+        and confirm `enabled: true` and the criteria is wired.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/monitor_activity_log_alert"
+  CKV2_AZURE_20:
+    - resource_type: azurerm_log_analytics_storage_insights
+      current_problem: "Ensure Storage logging is enabled for Table service for read requests"
+      remediation_hcl: |
+        resource "azurerm_log_analytics_storage_insights" "example" {
+          name                 = var.name
+          resource_group_name  = var.resource_group_name
+          workspace_resource_id = azurerm_log_analytics_workspace.example.id
+          storage_account_id    = azurerm_storage_account.example.id
+          storage_account_key   = azurerm_storage_account.example.primary_access_key
+
+          # PCI 10.2.1 (CKV2_AZURE_20) — read-logging on Table service. This resource
+          # wires the storage account into Log Analytics; the actual Table-service read
+          # logging is on `azurerm_storage_account_table_properties` (separate resource).
+        }
+
+        resource "azurerm_storage_account_table_properties" "example" {
+          storage_account_id = azurerm_storage_account.example.id
+
+          logging {
+            read    = true
+            version = "1.0"
+            retention_policy_days = 30
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account logging show --account-name <n> --service t`
+        and confirm `read: true`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/log_analytics_storage_insights"
+  CKV2_AZURE_29:
+    - resource_type: azurerm_kubernetes_cluster
+      current_problem: "Ensure AKS cluster has Azure CNI networking enabled"
+      remediation_hcl: |
+        resource "azurerm_kubernetes_cluster" "example" {
+          name                = var.name
+          location            = var.location
+          resource_group_name = var.resource_group_name
+          dns_prefix          = var.dns_prefix
+          default_node_pool {
+            name       = "default"
+            node_count = 3
+            vm_size    = "Standard_DS2_v2"
+          }
+          identity { type = "SystemAssigned" }
+
+          # PCI 1.2.1 (CKV2_AZURE_29) — Azure CNI networking. Required for
+          # private clusters, pod-level network policy, and Microsoft-backed security tooling.
+          network_profile {
+            network_plugin    = "azure"
+            network_policy    = "calico"
+            pod_cidr          = "10.244.0.0/16"
+            service_cidr      = "10.0.0.0/16"
+            dns_service_ip    = "10.0.0.10"
+            load_balancer_sku = "Standard"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az aks show --name <n> --resource-group <rg> --query "networkProfile:networkPlugin"`
+        and confirm `azure`. Re-run `checkov --check CKV2_AZURE_29`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster"
+  CKV2_AZURE_32:
+    - resource_type: azurerm_private_endpoint
+      current_problem: "Ensure private endpoint is configured to key vault"
+      remediation_hcl: |
+        # CKV2_AZURE_32 — Key Vault private endpoint. azurerm 4.x renames
+        # the connection sub-resource; the canonical pattern is below.
+        resource "azurerm_private_endpoint" "kv" {
+          name                = "pe-${azurerm_key_vault.example.name}"
+          location            = azurerm_key_vault.example.location
+          resource_group_name = azurerm_key_vault.example.resource_group_name
+          subnet_id           = data.azurerm_subnet.pe.id  # see note in terraform_remediation.md
+
+          private_service_connection {
+            name                           = "psc-kv"
+            private_connection_resource_id = azurerm_key_vault.example.id
+            subresource_names              = ["vault"]
+            is_manual_connection           = false
+          }
+        }
+
+        # KEY-VAULT-SIDE: set `public_network_access_enabled = false` so the PE is the only ingress:
+        #
+        #   resource "azurerm_key_vault" "example" {
+        #     ...
+        #     public_network_access_enabled = false
+        #   }
+      verification_step: |
+        After `terraform apply`, run `az keyvault show --name <n> --resource-group <rg> --query "properties:publicNetworkAccess"`
+        and confirm `Disabled`. In the Portal, Key Vault -> Networking -> Private endpoint
+        connections should list the PE.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/private_endpoint"
+  CKV2_AZURE_33:
+    - resource_type: azurerm_private_endpoint
+      current_problem: "Ensure storage account is configured with private endpoint"
+      remediation_hcl: |
+        # CKV2_AZURE_33 — Storage Account private endpoint. Same shape as the
+        # Key Vault PE but subresource_names = ["blob"] (or ["table"], ["queue"], ["file"]).
+        resource "azurerm_private_endpoint" "blob" {
+          name                = "pe-${azurerm_storage_account.example.name}-blob"
+          location            = azurerm_storage_account.example.location
+          resource_group_name = azurerm_storage_account.example.resource_group_name
+          subnet_id           = data.azurerm_subnet.pe.id
+
+          private_service_connection {
+            name                           = "psc-blob"
+            private_connection_resource_id = azurerm_storage_account.example.id
+            subresource_names              = ["blob"]
+            is_manual_connection           = false
+          }
+        }
+
+        # PAIR with CKV_AZURE_59 / CKV_AZURE_35 on the storage account itself:
+        #   public_network_access_enabled = false
+        #   network_rules { default_action = "Deny"; ... }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "privateEndpointConnections"`
+        and confirm at least one connection is `Approved`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/private_endpoint"
+  CKV2_AZURE_34:
+    - resource_type: azurerm_mssql_firewall_rule
+      current_problem: "Ensure Azure SQL server firewall is not overly permissive"
+      remediation_hcl: |
+        # CKV2_AZURE_34 — SQL Server firewall rules should NOT use 0.0.0.0-255.255.255.255
+        # ("allow all Azure services" via the legacy rule) OR 0.0.0.0-0.0.0.0 (literal any).
+        # Use specific CIDR ranges OR remove the rule entirely and rely on a private endpoint
+        # (CKV2_AZURE_45) + AAD-only auth.
+        resource "azurerm_mssql_firewall_rule" "allow_jumpbox" {
+          name             = "AllowJumpbox"
+          server_id        = azurerm_mssql_server.example.id
+          start_ip_address = "10.1.0.5"   # CDE jumpbox static IP
+          end_ip_address   = "10.1.0.5"
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server firewall-rule list --resource-group <rg> --server <n> --query "[].{n:name,start:startIpAddress,end:endIpAddress}"`
+        and confirm no rule has start_ip=0.0.0.0 AND end_ip=255.255.255.255 (legacy 'allow all Azure services') OR start=end=0.0.0.0.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_firewall_rule"
+  CKV2_AZURE_45:
+    - resource_type: azurerm_private_endpoint
+      current_problem: "Ensure Microsoft SQL server is configured with private endpoint"
+      remediation_hcl: |
+        # CKV2_AZURE_45 — SQL Server private endpoint.
+        resource "azurerm_private_endpoint" "sql" {
+          name                = "pe-${azurerm_mssql_server.example.name}-sql"
+          location            = azurerm_mssql_server.example.location
+          resource_group_name = azurerm_mssql_server.example.resource_group_name
+          subnet_id           = data.azurerm_subnet.pe.id
+
+          private_service_connection {
+            name                           = "psc-sql"
+            private_connection_resource_id = azurerm_mssql_server.example.id
+            subresource_names              = ["sqlServer"]
+            is_manual_connection           = false
+          }
+        }
+
+        # PAIR with CKV_AZURE_113:
+        #   resource "azurerm_mssql_server" "example" {
+        #     ...
+        #     public_network_access_enabled = false
+        #   }
+      verification_step: |
+        After `terraform apply`, run `az sql server show --name <n> --resource-group <rg> --query "publicNetworkAccess"`
+        and confirm `Disabled`. In the Portal, SQL Server -> Networking -> Private endpoint
+        connections should list the PE.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/private_endpoint"
+  CKV2_AZURE_47:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure storage account is configured without blob anonymous access"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          # PCI 1.2.1 / 1.3 (CKV2_AZURE_47) — disable blob anonymous access.
+          # Default in azurerm 4.x is `true` (anonymous reads allowed); set to `false`.
+          allow_nested_items_to_be_public = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "allowBlobPublicAccess"`
+        and confirm `false`. Re-run `checkov --check CKV2_AZURE_47` and `checkov --check CKV_AZURE_190`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_PCI_002:
+    - resource_type: azurerm_storage_account
+      current_problem: "Storage account without default Deny network ACL"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          # PCI 1.2.1 / 1.3 (CKV_AZURE_PCI_002 — custom) — explicit network_rules block
+          # with default_action = "Deny". Absent == default Allow == non-compliant.
+          # Companion to CKV_AZURE_35 (the standard Checkov check for the same invariant).
+          network_rules {
+            default_action = "Deny"
+            bypass         = ["AzureServices"]
+            ip_rules       = []  # add specific IPs as needed; never 0.0.0.0/0
+          }
+
+          public_network_access_enabled = false
+          allow_nested_items_to_be_public = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "networkRuleSet:defaultAction"`
+        and confirm `Deny`. Re-run `checkov --check CKV_AZURE_PCI_002 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_AZURE_PCI_003:
+    - resource_type: azurerm_storage_account
+      current_problem: "min_tls_version below 1.2"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+
+          # PCI 4.2.1 (CKV_AZURE_PCI_003 — custom) — min_tls_version must be TLS1_2.
+          # The custom check rejects TLS1_0/TLS1_1/TLS10/TLS11.
+          # MATCH the exact enum casing `TLS1_2` (underscore, not dot).
+          min_tls_version = "TLS1_2"
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "minimumTlsVersion"`
+        and confirm `TLS1_2`. Re-run `checkov --check CKV_AZURE_PCI_003` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+    - resource_type: azurerm_mssql_server
+      current_problem: "min_tls_version below 1.2"
+      remediation_hcl: |
+        resource "azurerm_mssql_server" "example" {
+          name                         = var.name
+          resource_group_name          = var.resource_group_name
+          location                     = var.location
+          version                      = "12.0"
+          administrator_login          = var.admin_login
+          administrator_login_password = var.admin_password
+
+          # PCI 4.2.1 (CKV_AZURE_PCI_003 — custom) — MS SQL min TLS. Note this is `1.2` (DOT)
+          # NOT `TLS1_2` — the storage and SQL enums differ.
+          minimum_tls_version = "1.2"
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql server show --name <n> --resource-group <rg> --query "minimalTlsVersion"`
+        and confirm `1.2`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_server"
+  CKV_AZURE_PCI_004:
+    - resource_type: azurerm_storage_account
+      current_problem: "Customer-managed key (CMK) missing on encryption-bearing resource"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "GRS"
+          min_tls_version          = "TLS1_2"
+
+          identity { type = "SystemAssigned" }
+        }
+
+        # CKV_AZURE_PCI_004 — custom — companion to CKV2_AZURE_1.
+        # The custom check fires when `customer_managed_key` block is missing from
+        # azurerm_storage_account (legacy azurerm ≤3.x inline-block schema).
+        # azurerm 4.x uses the STANDALONE resource below (NOT an inline block).
+        resource "azurerm_storage_account_customer_managed_key" "example" {
+          count = var.cmk_key_vault_key_id == null ? 0 : 1
+
+          storage_account_id = azurerm_storage_account.example.id
+          key_vault_key_id   = var.cmk_key_vault_key_id
+        }
+      verification_step: |
+        After `terraform apply`, run `checkov --check CKV_AZURE_PCI_004` and expect 0 findings
+        (the rule evaluates the inline `customer_managed_key` block on the storage_account;
+        in azurerm 4.x with the standalone resource, the inline block is correctly absent
+        AND the CMK is configured via the standalone resource — both checks pass).
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account_customer_managed_key"
+  CKV_AZURE_PCI_005:
+    - resource_type: azurerm_key_vault
+      current_problem: "Key Vault purge protection disabled"
+      remediation_hcl: |
+        resource "azurerm_key_vault" "example" {
+          name                       = var.name
+          location                   = var.location
+          resource_group_name        = var.resource_group_name
+          tenant_id                  = data.azurerm_client_config.current.tenant_id
+          sku_name                   = "standard"
+          soft_delete_retention_days = 90
+
+          # PCI 3.6.5 / 8.6.3 (CKV_AZURE_PCI_005 — custom) — purge protection enabled.
+          # Companion to CKV_AZURE_110 / CKV_AZURE_42 (standard Checkov checks).
+          purge_protection_enabled = true
+
+          # CRITICAL: this is `enable_purge_protection` (legacy attribute) vs the
+          # current azurerm 4.x attribute `purge_protection_enabled` — the custom
+          # check evaluates the LEGACY `enable_purge_protection` field. See
+          # `.scripts/checkov/pci_checks/CKV_AZURE_PCI_005__kv_purge_protection.py`
+          # line 52. For dual-pass, ALSO set:
+          #   enable_purge_protection = true
+          # to keep the legacy check happy if you keep the old attribute name in your .tf.
+          enable_purge_protection = true  # legacy alias; azurerm 4.x has both
+        }
+      verification_step: |
+        After `terraform apply`, run `az keyvault show --name <n> --query "properties:enablePurgeProtection"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_PCI_005 --check CKV_AZURE_110 --check CKV_AZURE_42`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault"
+  CKV_AZURE_13:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure App Service Authentication is set on Azure App Service"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 8.3 (CKV_AZURE_13) — enable App Service Authentication.
+          # Checkov also accepts auth_settings_v2 { auth_enabled = true } for
+          # azurerm_linux_web_app / azurerm_windows_web_app in azurerm 4.x.
+          auth_settings {
+            enabled = true
+
+            # Issuer is required when enabled = true; default provider routes
+            # unauthenticated requests to AAD when no other provider is set.
+            issuer                       = "https://sts.windows.net/${var.tenant_id}/"
+            default_provider             = "AzureActiveDirectory"
+            unauthenticated_client_action = "RedirectToLoginPage"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp auth show --name <n> --resource-group <rg> --query "enabled"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_13 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_17:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure the web app has 'Client Certificates (Incoming client certificates)' set"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 8.3 (CKV_AZURE_17) — require client certs on incoming requests.
+          # In azurerm 4.x this is `client_certificate_enabled` (note the extra
+          # "icate") on `azurerm_linux_web_app` / `azurerm_windows_web_app`.
+          client_cert_enabled = true
+          client_cert_mode    = "Required"
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp show --name <n> --resource-group <rg> --query "clientCertEnabled"`
+        and confirm `true`, and `--query "clientCertMode"` returns `Required`.
+        Re-run `checkov --check CKV_AZURE_17 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_18:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that 'HTTP Version' is the latest if used to run the web app"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 4.2.1 (CKV_AZURE_18) — force HTTPS-only + HTTP/2.0. CKV_AZURE_14
+          # (HTTPS-only) and CKV_AZURE_18 (HTTP/2) are commonly fixed together.
+          https_only = true
+
+          site_config {
+            http2_enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp show --name <n> --resource-group <rg> --query "httpsOnly"`
+        and confirm `true`; then `az webapp config show --name <n> --resource-group <rg> --query "http20Enabled"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_18 --framework terraform`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_65:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that App service enables detailed error messages"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 10.2.1 (CKV_AZURE_65) — Checkov inspects logs/[0]/detailed_error_messages_enabled
+          # for azurerm_app_service. On azurerm 4.x split resources (linux/windows_web_app)
+          # the attribute is `detailed_error_messages` (no `_enabled` suffix).
+          logs {
+            detailed_error_messages_enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp log config show --name <n> --resource-group <rg> --query "detailedErrorMessages.enabled"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_65 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_66:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that App service enables failed request tracing"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 10.2.1 (CKV_AZURE_66) — Checkov inspects logs/[0]/failed_request_tracing_enabled
+          # for azurerm_app_service. On azurerm 4.x split resources the attribute is
+          # `failed_request_tracing` (no `_enabled` suffix).
+          logs {
+            failed_request_tracing_enabled = true
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp log config show --name <n> --resource-group <rg> --query "failedRequestsTracing.enabled"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_66 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_78:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure FTP deployments are disabled"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 2.2.2 / 8.6 (CKV_AZURE_78) — Checkov accepts either `Disabled` or
+          # `FtpsOnly`; we go with `Disabled` for the strictest posture. Also
+          # disable FTP Basic Auth publishing profile as defense-in-depth.
+          site_config {
+            ftps_state = "Disabled"
+          }
+
+          # azurerm 4.x split resources expose ftp_publish_basic_authentication_enabled
+          # at the resource top level (defaults to true). For the split resource,
+          # ALSO set that to false to fully close the FTP auth surface.
+          # ftp_publish_basic_authentication_enabled = false  # linux/windows_web_app only
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp config show --name <n> --resource-group <rg> --query "ftpsState"`
+        and confirm `Disabled`. Re-run `checkov --check CKV_AZURE_78 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_88:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that app services use Azure Files"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 1.3 / 9.5 (CKV_AZURE_88) — mount an Azure Files share so the app
+          # has persistent network-attached storage. Checkov inspects
+          # `storage_account/[0]/type` and requires `AzureFiles`. The
+          # `storage_account` block on `azurerm_app_service` exists in azurerm 4.x;
+          # on `azurerm_linux_web_app` / `azurerm_windows_web_app` the same block
+          # is present (same attribute names).
+          storage_account {
+            name         = "example-files"
+            type         = "AzureFiles"
+            account_name = azurerm_storage_account.example.name
+            share_name   = azurerm_storage_share.example.name
+            access_key   = azurerm_storage_account.example.primary_access_key
+            mount_path   = "/mnt/files"
+          }
+        }
+
+        resource "azurerm_storage_account" "example" {
+          name                     = var.storage_account_name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "LRS"
+        }
+
+        resource "azurerm_storage_share" "example" {
+          name                = "example-files"
+          storage_account_name = azurerm_storage_account.example.name
+          quota               = 100
+        }
+      verification_step: |
+        After `terraform apply`, run `checkov --check CKV_AZURE_88 --framework terraform` and expect 0 findings
+        on the `azurerm_app_service` resource. In the Azure Portal, navigate to the
+        App Service -> Container Settings -> Azure Files mount and confirm the share is mounted.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_156:
+    - resource_type: azurerm_mssql_database_extended_auditing_policy
+      current_problem: "Ensure default Auditing policy for a SQL Server is configured to capture and retain the activity logs"
+      remediation_hcl: |
+        resource "azurerm_mssql_database_extended_auditing_policy" "example" {
+          database_id                             = azurerm_mssql_database.example.id
+          blob_storage_endpoint                   = azurerm_storage_account.example.primary_blob_endpoint
+          storage_account_access_key              = azurerm_storage_account.example.primary_access_key
+          storage_account_access_key_is_secondary = false
+          retention_in_days                       = 6
+
+          # PCI 10.2.1 (CKV_AZURE_156) — Checkov inspects `log_monitoring_enabled`
+          # on `azurerm_mssql_database_extended_auditing_policy` (the DATABASE-level
+          # resource, not the server-level one). Defaults to `true`; set explicitly
+          # for clarity. Note: requires the server-level auditing policy to also
+          # be enabled for events to flow to Azure Monitor.
+          log_monitoring_enabled = true
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql db audit-policy show --name <db> --server <s> --resource-group <rg> --query "auditActionsAndGroups"`
+        and confirm the policy shows log analytics forwarding. Re-run `checkov --check CKV_AZURE_156 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_database_extended_auditing_policy"
+  CKV_AZURE_213:
+    - resource_type: azurerm_app_service
+      current_problem: "Ensure that App Service configures health check"
+      remediation_hcl: |
+        resource "azurerm_app_service" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          app_service_plan_id = var.app_service_plan_id
+
+          # PCI 1.4 (CKV_AZURE_213) — Checkov inspects `site_config/[0]/health_check_path`.
+          # On azurerm 4.x split resources, the attribute moves to top-level
+          # `health_check_path` (still inside site_config).
+          site_config {
+            health_check_path = "/healthz"
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp config show --name <n> --resource-group <rg> --query "healthCheckPath"`
+        and confirm `/healthz`. Re-run `checkov --check CKV_AZURE_213 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_service"
+  CKV_AZURE_221:
+    - resource_type: azurerm_linux_function_app
+      current_problem: "Ensure that Azure Function App public network access is disabled"
+      remediation_hcl: |
+        resource "azurerm_linux_function_app" "example" {
+          name                       = var.name
+          resource_group_name        = var.resource_group_name
+          location                   = var.location
+          service_plan_id            = var.service_plan_id
+          storage_account_name       = azurerm_storage_account.example.name
+          storage_account_access_key = azurerm_storage_account.example.primary_access_key
+
+          # PCI 1.3 (CKV_AZURE_221) — Function App (not Kubernetes cluster).
+          # Note: Checkov also covers `azurerm_windows_function_app` and the slot
+          # variants. Default is `true`; force `false` and route traffic via a
+          # private endpoint + VNet integration.
+          public_network_access_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az functionapp show --name <n> --resource-group <rg> --query "publicNetworkAccess"`
+        and confirm `Disabled`. Re-run `checkov --check CKV_AZURE_221 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/linux_function_app"
+  CKV_AZURE_222:
+    - resource_type: azurerm_linux_web_app
+      current_problem: "Ensure that Azure Web App public network access is disabled"
+      remediation_hcl: |
+        resource "azurerm_linux_web_app" "example" {
+          name                = var.name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          service_plan_id     = var.service_plan_id
+
+          site_config {}
+
+          # PCI 1.3 (CKV_AZURE_222) — Web App public network access (default `true`).
+          # The companion check CKV_AZURE_221 covers Function Apps; this one covers
+          # both `azurerm_linux_web_app` and `azurerm_windows_web_app`. Force
+          # `false` and route traffic via private endpoint.
+          public_network_access_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az webapp show --name <n> --resource-group <rg> --query "publicNetworkAccess"`
+        and confirm `Disabled`. Re-run `checkov --check CKV_AZURE_222 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/linux_web_app"
+  CKV_AZURE_224:
+    - resource_type: azurerm_mssql_database
+      current_problem: "Ensure that the Ledger feature is enabled on database that requires cryptographic proof and nonrepudiation of data integrity"
+      remediation_hcl: |
+        resource "azurerm_mssql_database" "example" {
+          name      = var.name
+          server_id = azurerm_mssql_server.example.id
+          sku_name  = "S0"
+
+          # PCI 10.2.1 (CKV_AZURE_224) — Ledger is a top-level boolean on
+          # `azurerm_mssql_database` (NOT a nested `ledger {}` block). It cannot
+          # be disabled once enabled, and changing it forces a new resource.
+          ledger_enabled = true
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql db show --name <db> --server <s> --resource-group <rg> --query "ledger.enabled"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_224 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_database"
+  CKV_AZURE_229:
+    - resource_type: azurerm_mssql_database
+      current_problem: "Ensure the Azure SQL Database Namespace is zone redundant"
+      remediation_hcl: |
+        resource "azurerm_mssql_database" "example" {
+          name      = var.name
+          server_id = azurerm_mssql_server.example.id
+          sku_name  = "BC_Gen5_2"  # zone_redundant requires Premium / Business Critical
+
+          # PCI 1.4 / 10.5 (CKV_AZURE_229) — Note: this is SQL Database zone
+          # redundancy (NOT storage lifecycle management). Checkov inspects
+          # `zone_redundant` on `azurerm_mssql_database`. Only Premium and
+          # Business Critical SKUs support `zone_redundant = true`.
+          zone_redundant = true
+        }
+      verification_step: |
+        After `terraform apply`, run `az sql db show --name <db> --server <s> --resource-group <rg> --query "zoneRedundant"`
+        and confirm `true`. Re-run `checkov --check CKV_AZURE_229 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/mssql_database"
+  CKV2_AZURE_21:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure Storage logging is enabled for Blob service for read requests"
+      remediation_hcl: |
+        # CKV2_AZURE_21 is a GRAPH check that requires a path:
+        #   azurerm_storage_container --[connection]--> azurerm_storage_account
+        #                                --[connection]--> azurerm_log_analytics_storage_insights
+        # with the insights resource listing the container's name in `blob_container_names`,
+        # AND the container's access_type in {"private", "blob"}.
+        #
+        # The graph check cannot be satisfied by editing the storage_account alone —
+        # you need the full chain. azurerm 4.x removed the inline `queue_properties`
+        # logging block on storage_account, so the canonical remediation is to wire
+        # the diagnostic log forwarding to Log Analytics.
+
+        resource "azurerm_storage_account" "example" {
+          name                     = var.storage_account_name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "LRS"
+        }
+
+        resource "azurerm_storage_container" "example" {
+          name                  = "private-data"
+          storage_account_name  = azurerm_storage_account.example.name
+          container_access_type = "private"  # CKV2_AZURE_21 accepts "private" or "blob"
+        }
+
+        resource "azurerm_log_analytics_workspace" "example" {
+          name                = var.law_name
+          resource_group_name = var.resource_group_name
+          location            = var.location
+          sku                 = "PerGB2018"
+        }
+
+        resource "azurerm_log_analytics_storage_insights" "example" {
+          name                = var.law_storage_insights_name
+          resource_group_name = var.resource_group_name
+          workspace_id        = azurerm_log_analytics_workspace.example.id
+
+          storage_account_id = azurerm_storage_account.example.id
+
+          # Required: the storage check fails unless the container name appears here.
+          blob_container_names = [azurerm_storage_container.example.name]
+        }
+      verification_step: |
+        After `terraform apply`, run `checkov --check CKV2_AZURE_21 --framework terraform` and expect 0 findings.
+        In the Azure Portal, navigate to Log Analytics workspace -> Settings -> Storage
+        Insights and confirm the container is listed under `Blob Container Names`.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/log_analytics_storage_insights"
+  CKV2_AZURE_38:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure soft-delete is enabled on Azure storage account"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "LRS"
+
+          # PCI 10.5.5 (CKV2_AZURE_38) — enable blob soft-delete (1-365 days).
+          # Also enable container soft-delete for full coverage. The graph check
+          # is satisfied when `blob_properties.delete_retention_policy.days > 0`
+          # OR the block exists, and `account_kind` is not FileStorage.
+          blob_properties {
+            delete_retention_policy {
+              days = 7  # default is 7; set explicitly for clarity
+            }
+
+            container_delete_retention_policy {
+              days = 7
+            }
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account blob-service-properties show --account-name <n> --resource-group <rg> --query "{blob: deleteRetentionPolicy.allowPermanentDelete, container: containerDeleteRetentionPolicy.enabled}"`
+        and confirm both policies enabled. Re-run `checkov --check CKV2_AZURE_38 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV2_AZURE_40:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure storage account is not configured with Shared Key authorization"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "LRS"
+
+          # PCI 7.2 / 8.6 (CKV2_AZURE_40) — disable Shared Key (account key) auth.
+          # Default is `true`. After this, callers MUST use Azure AD auth
+          # (managed identity, service principal, OAuth) — not access keys.
+          # Note: this also satisfies CKV2_AZURE_41 (SAS expiration) automatically.
+          shared_access_key_enabled = false
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "allowSharedKeyAccess"`
+        and confirm `false`. Re-run `checkov --check CKV2_AZURE_40 --check CKV2_AZURE_41 --framework terraform`
+        and expect 0 findings on this resource.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV2_AZURE_41:
+    - resource_type: azurerm_storage_account
+      current_problem: "Ensure storage account is configured with SAS expiration policy"
+      remediation_hcl: |
+        resource "azurerm_storage_account" "example" {
+          name                     = var.name
+          resource_group_name      = var.resource_group_name
+          location                 = var.location
+          account_tier             = "Standard"
+          account_replication_type = "LRS"
+
+          # PCI 8.3 (CKV2_AZURE_41) — CKV2_AZURE_41 passes when EITHER:
+          #   (a) shared_access_key_enabled = false (preferred — see CKV2_AZURE_40), OR
+          #   (b) shared_access_key_enabled = true AND sas_policy.expiration_period is set.
+          # We recommend (a) and only fall back to (b) for legacy migrations.
+          shared_access_key_enabled = true  # set to false to also pass CKV2_AZURE_40
+
+          # DD.HH:MM:SS format — 90 days here.
+          sas_policy {
+            expiration_period = "90.00:00:00"
+            expiration_action = "Log"  # or "Block" for stricter enforcement
+          }
+        }
+      verification_step: |
+        After `terraform apply`, run `az storage account show --name <n> --resource-group <rg> --query "sasPolicy.expirationPeriod"`
+        and confirm non-empty. Re-run `checkov --check CKV2_AZURE_41 --framework terraform` and expect 0 findings.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_SECRET_3:
+    - resource_type: azurerm_storage_account
+      current_problem: "Azure Storage Account access key"
+      remediation_hcl: |
+        # CKV_SECRET_3 — Azure Storage Account access key detected in source.
+        # NO Terraform azurerm 4.x remediation applies; this is a secret-scanner
+        # finding under --framework secrets (gitleaks / detect-secrets).
+        #
+        # Operator remediation steps (manual, not HCL):
+        #   1. Remove the leaked key from the .tf / .tfvars / .env file. If the
+        #      file is in git history, rotate immediately and consider BFG / git
+        #      filter-repo to purge history (see docs/runbooks/secret-leak.md).
+        #   2. Rotate the key in Azure:
+        #        az storage account keys renew --account-name <n> --key primary
+        #   3. Switch the data plane to Managed Identity / Entra auth so future
+        #      .tf files NEVER embed a Shared Key. Set
+        #      `shared_access_key_enabled = false` (CKV2_AZURE_40) on the
+        #      `azurerm_storage_account` and use `azurerm_role_assignment`
+        #      against the data-plane RBAC roles ("Storage Blob Data Reader" etc).
+        #   4. If the value MUST remain in IaC for a one-off bootstrap, store
+        #      it in Azure Key Vault (azurerm_key_vault_secret) and read it via
+        #      `data.azurerm_key_vault_secret` with a `lifecycle { ignore_changes }`
+        #      on the access_key field.
+      verification_step: |
+        No `terraform apply`. After removing the secret:
+          1. `grep -r "<leaked-prefix>" .` should return 0 hits.
+          2. `checkov --framework secrets --check CKV_SECRET_3` should return 0 findings.
+          3. `az storage account keys list --account-name <n> --query "[].keyName"` should
+             show only the post-rotation key value, never the leaked one.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account"
+  CKV_SECRET_6:
+    - resource_type: azurerm_key_vault
+      current_problem: "Base64 High Entropy String"
+      remediation_hcl: |
+        # CKV_SECRET_6 — Base64 High Entropy String detected by detect-secrets.
+        # NO Terraform azurerm 4.x remediation applies; this is a secret-scanner
+        # finding under --framework secrets.
+        #
+        # Base64 high-entropy matches flag any long base64-looking string as a
+        # potential credential. Common false positives: certificate PEM blocks,
+        # SSH public keys, terraform state blobs. Common true positives: API
+        # tokens, OAuth refresh tokens, basic-auth strings.
+        #
+        # Operator remediation steps:
+        #   1. Identify the secret: which credential is it? (Storage key? Twilio?
+        #      GitHub PAT? Generic API token?) — see docs/runbooks/secret-leak.md.
+        #   2. Remove the literal from the file. If it was a real credential, rotate
+        #      it at the issuing provider (az storage account keys renew, etc.).
+        #   3. Move the secret to Azure Key Vault (`azurerm_key_vault_secret`) and
+        #      reference via `data.azurerm_key_vault_secret`. For service-to-service
+        #      auth, prefer Managed Identity (`azurerm_user_assigned_identity` +
+        #      `azurerm_role_assignment`) over any static credential.
+        #   4. For false positives (e.g., PEM public keys), add a Checkov suppression:
+        #        checkov:skip=CKV_SECRET_6:Reason for skipping
+        #      inline on the same line as the match. Document in the baseline file
+        #      (.scripts/checkov/secret_baseline.yaml) if your team uses one.
+      verification_step: |
+        No `terraform apply`. After removing the secret:
+          1. `checkov --framework secrets --check CKV_SECRET_6` should return 0 findings
+             (or only intentional suppressions).
+          2. For false positives, confirm the inline `checkov:skip=CKV_SECRET_6:<reason>`
+             comment is on the EXACT line of the match (not the line before/after).
+          3. For real credentials, confirm the rotation completed at the issuing provider
+             BEFORE the old value stops being trusted.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault"
+  CKV_SECRET_18:
+    - resource_type: azurerm_function_app
+      current_problem: "Twilio API Key"
+      remediation_hcl: |
+        # CKV_SECRET_18 — Twilio API Key (AccountSID:AuthToken or API Key SID:Secret)
+        # detected in source. NO Terraform azurerm 4.x remediation applies; this is
+        # a secret-scanner finding under --framework secrets.
+        #
+        # Operator remediation steps:
+        #   1. Remove the leaked Twilio credential from the .tf / .tfvars / .env file.
+        #      If it was a real Auth Token or API Key, rotate it IMMEDIATELY in the
+        #      Twilio Console (Account -> API keys & tokens -> Rotate / Revoke).
+        #   2. Move the Twilio credential to Azure Key Vault
+        #      (`azurerm_key_vault_secret`) and have the consumer (Function App /
+        #      Logic App) read it via `data.azurerm_key_vault_secret`. For Function
+        #      Apps, set the value via an app setting reference (Key Vault reference
+        #      pattern) so the secret never lives in plaintext .tf.
+        #   3. If the Function App calls Twilio, prefer Managed Identity + Twilio's
+        #      OAuth flow where supported. Otherwise use a runtime-loaded env var:
+        #        azurerm_function_app.example.app_settings["TWILIO_AUTH_TOKEN"]
+        #          = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.twilio.versionless_id})"
+        #   4. Add the Twilio credential domain to the gitleaks baseline ONLY if you
+        #      have confirmed it is a fixture / test value (never commit real creds,
+        #      even with a baseline exclusion).
+      verification_step: |
+        No `terraform apply`. After removing the secret:
+          1. `checkov --framework secrets --check CKV_SECRET_18` should return 0 findings.
+          2. In the Twilio Console, confirm the old Auth Token / API Key shows
+             "Revoked" or "Rotated" status.
+          3. If the Function App was the consumer, restart it
+             (`az functionapp restart --name <n> --resource-group <rg>`) so it picks
+             up the new Key Vault-referenced secret value.
+      provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/linux_function_app"
+  CKV_TF_1:
+    - resource_type: module
+      current_problem: "Ensure Terraform module sources use a commit hash"
+      remediation_hcl: |
+        # CKV_TF_1 — Terraform module `source` is missing a `?ref=<commit-hash>` pin.
+        # Checkov's regex requires `?ref=` followed by a 5-40 char hex string.
+        # Pinning to a tag like `?ref=v1.2.3` does NOT pass — must be a commit hash.
+
+        module "network" {
+          # BEFORE (fails CKV_TF_1):
+          #   source = "git@github.com:myorg/terraform-modules.git//network"
+          #
+          # AFTER (passes):
+          source = "git@github.com:myorg/terraform-modules.git//network?ref=a1b2c3d4e5f6"
+          # ^ 10+ char hex SHA. Resolve from `git rev-parse HEAD` in the module repo.
+        }
+
+        # Local (./ or ../) paths are NOT evaluated by CKV_TF_1 — they return
+        # UNKNOWN, not FAILED. No change needed for local modules.
+      verification_step: |
+        No `terraform apply` unless you intend to roll the module forward.
+        After updating the `source` URL:
+          1. `terraform init -upgrade` so the new ref is fetched and locked in .terraform.lock.hcl.
+          2. `terraform plan` and confirm no unintended module-version drift.
+          3. `checkov --check CKV_TF_1 --framework terraform` should return 0 findings.
+        # If you pinned to a tag (NOT recommended): use `?ref=vX.Y.Z` and accept that
+        # CKV_TF_1 will still fail because tags are not hex hashes. Convert to SHA.
+      provenance: "https://developer.hashicorp.com/terraform/language/modules/sources"

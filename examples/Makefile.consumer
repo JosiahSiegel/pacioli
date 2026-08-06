@@ -1,0 +1,74 @@
+# Pacioli Makefile.consumer
+# =============================================================================
+# Copy this file into your Terraform repo as `Makefile.pacioli` (or merge
+# it into your existing Makefile). Update PACIOLI_DIR to point at your
+# local Pacioli checkout (or use a git submodule / pip install).
+# =============================================================================
+
+# Path to the Pacioli scanner installation.
+# Override at the command line: make -f Makefile.pacioli scan PACIOLI_DIR=...
+PACIOLI_DIR ?= ../pacioli
+PACIOLI_SCANNER := $(PACIOLI_DIR)/scanner
+
+# Scope + baseline live in THIS repo (consumer-owned).
+SCOPE_FILE ?= pci_scope.yaml
+BASELINE_FILE ?= pci_baseline.yaml
+
+# Mapping pack to use. Default: PCI DSS v4.0.1 from the pacioli install.
+MAPPING_FILE ?= $(PACIOLI_DIR)/mappings/pci_dss_4.0.1.yaml
+
+# Optional: Azure storage account for state-blob scan tier.
+# Set to your tenant's storage account name.
+PACIOLI_STATE_STORAGE_ACCOUNT ?=
+export PACIOLI_STATE_STORAGE_ACCOUNT
+
+# Tell the scanner where to find this repo.
+export PACIOLI_TARGET_REPO := $(CURDIR)
+
+.PHONY: scan scan-plan scan-state scan-gate scan-baseline-init scan-cleanup scan-fix-list test help
+
+help:
+	@echo "Pacioli scan targets:"
+	@echo "  make scan                    - Source-only scan (no terraform, no Azure calls)"
+	@echo "  make scan-plan               - + terraform plan layer (needs Azure auth)"
+	@echo "  make scan-state              - + state blob download + drift diff"
+	@echo "  make scan-gate               - CI gate (exits non-zero on HIGH/CRITICAL)"
+	@echo "  make scan-baseline-init      - Generate stub baseline entries from a run"
+	@echo "  make scan-fix-list           - Re-emit fix_list.md from a run"
+	@echo ""
+	@echo "Common args: PROJECT=<p> ENV=<e> RUN_DIR=.checkov/<run_id>"
+
+scan:
+	@bash $(PACIOLI_SCANNER)/scan.sh --mode report \
+		$(if $(PROJECT),--project $(PROJECT)) \
+		$(if $(ENV),--env $(ENV)) \
+		$(if $(LABEL),--label $(LABEL))
+
+scan-plan:
+	@bash $(PACIOLI_SCANNER)/scan.sh --mode report --scan-plan \
+		$(if $(PROJECT),--project $(PROJECT)) \
+		$(if $(ENV),--env $(ENV))
+
+scan-state:
+	@bash $(PACIOLI_SCANNER)/scan.sh --mode report --scan-state \
+		$(if $(PROJECT),--project $(PROJECT)) \
+		$(if $(ENV),--env $(ENV))
+
+scan-gate:
+	@bash $(PACIOLI_SCANNER)/scan.sh --mode gate \
+		$(if $(PROJECT),--project $(PROJECT)) \
+		$(if $(ENV),--env $(ENV))
+
+scan-baseline-init:
+	@bash $(PACIOLI_SCANNER)/scan_baseline_init.sh \
+		$(if $(RUN_DIR),--run-dir $(RUN_DIR))
+
+scan-fix-list:
+	@python $(PACIOLI_SCANNER)/aggregate.py --run-dir $(RUN_DIR) --emit-fix-list
+
+scan-cleanup:
+	@bash $(PACIOLI_SCANNER)/lib/safety.sh && \
+	echo "no stale IPs to clean (manual: az storage account network-rule list ...)"
+
+test:
+	@cd $(PACIOLI_DIR) && make test

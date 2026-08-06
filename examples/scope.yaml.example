@@ -1,0 +1,23 @@
+# Example Pacioli scope manifest.
+# Copy this to your Terraform repo as `pci_scope.yaml` and customize.
+#
+# Each `project` is a logical grouping (usually a Terraform module).
+# Each project lists the `envs` to scan. The scanner walks
+# <repo_root>/env/<project>/<env>/*.tf for each entry.
+#
+# The scope file lives in YOUR Terraform repo (not in pacioli itself),
+# because scope is tenant-specific.
+
+- project: myapp
+  description: My application infrastructure
+  envs:
+    - prod
+    - staging
+- project: myapp-data
+  description: Data layer for myapp
+  envs:
+    - prod
+- project: shared-services
+  description: Shared services (logging, monitoring, identity)
+  envs:
+    - prod

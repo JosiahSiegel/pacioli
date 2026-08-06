@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install pyyaml
+          # Checkov is only needed for the actual scan; CI just validates
+          # code paths and the mapping loader. Skip the heavy install.
+          # Uncomment if you want to run the full scan in CI:
+          # pip install -r .scripts/checkov/requirements-pinned.txt
+
+      - name: Run pytest
+        run: pytest
+
+  shellcheck:
+    name: Shell lint + safety selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint shell scripts
+        run: |
+          shellcheck .scripts/checkov/lib/common.sh
+          shellcheck .scripts/checkov/lib/safety.sh
+          shellcheck .scripts/checkov/scan_pci.sh
+          shellcheck .scripts/checkov/scan_pci_audit.sh
+          shellcheck .scripts/checkov/scan_pci_baseline_init.sh
+
+      - name: Run scanner self-test
+        run: make scan-pci-selftest
+
+  mapping-lint:
+    name: Validate mapping YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate mapping schema
+        run: |
+          python -c "
+          import yaml
+          from pathlib import Path
+          sys = __import__('sys')
+          sys.path.insert(0, '.scripts/checkov')
+          from aggregate_pci import load_pci_mapping, validate_out_of_scope_entries
+          data = yaml.safe_load(Path('pci_mapping.yaml').read_text())
+          # Required top-level keys
+          for key in ('framework_name', 'framework_version', 'requirements'):
+              assert key in data, f'pci_mapping.yaml missing required key: {key}'
+          # Map loads cleanly
+          mapping = load_pci_mapping(Path('pci_mapping.yaml'))
+          assert len(mapping) > 0, 'no checks mapped'
+          # OOS entries validate
+          if 'out_of_scope_requirements' in data:
+              errors, _ = validate_out_of_scope_entries(
+                  data['out_of_scope_requirements'],
+                  today_iso='2026-08-06',
+              )
+              if errors:
+                  print('OOS validation errors:')
+                  for e in errors:
+                      print('  -', e)
+                  exit(1)
+          print(f'OK: {len(mapping)} checks mapped to {len(data[\"requirements\"])} requirements')
+          "
