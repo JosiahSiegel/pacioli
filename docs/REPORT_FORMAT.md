@@ -59,9 +59,9 @@ The `runs[]` array contains one entry per layer scanned. The
 The aggregator's per-run merge of all per-env SARIFs. Use this
 when a single SIEM integration is preferred over N per-env files.
 
-Properties added by the aggregator:
+Properties added by the aggregator (only the new fields are shown; the rest of the SARIF is unchanged):
 
-```json
+```text
 {
   "runs": [
     {
@@ -70,8 +70,8 @@ Properties added by the aggregator:
         "pci_env": "prod",
         "pci_source_sarif": "results_terraform_source.sarif"
       },
-      "tool": { ... },
-      "results": [ ... ]
+      "tool": { /* original SARIF tool.driver block */ },
+      "results": [ /* original SARIF results array */ ]
     }
   ]
 }

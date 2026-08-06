@@ -126,7 +126,7 @@ bash scanner/scan_baseline_init.sh [--run-dir DIR] [--top N] [--append]
 | `--run-dir <dir>` | `.checkov/<most-recent>/` | The run dir to read `combined.sarif` from. |
 | `--top <N>` | 50 | The number of top-by-priority entries to highlight for triage. (All findings get a stub entry regardless.) |
 | `--append` | off | Merge with the existing `pci_baseline.yaml` instead of replacing. |
-| `--help` / `-h` | Show usage. |
+| `--help` / `-h` | — | Show usage. |
 
 The output `pci_baseline.yaml` entries have `TBD` for
 `justification`, `owner`, `ticket_id`, `expires_on`. Triage
@@ -208,7 +208,7 @@ Checkov expects. Used by `scan.sh` in tier 3.
 
 ### Synopsis
 
-```bash
+```text
 python scanner/tfstate_to_plan.py <state.tfstate> <out.plan.json>
 ```
 
@@ -229,7 +229,7 @@ emits a drift report at the destination.
 
 ### Synopsis
 
-```bash
+```text
 python scanner/drift_report.py <plan.json> <state_as_plan.json> <out.json>
 ```
 

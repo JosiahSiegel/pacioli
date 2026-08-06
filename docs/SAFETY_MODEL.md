@@ -98,7 +98,7 @@ hygiene — see `shred_plan_artifacts` in `lib/common.sh`).
 
 `scanner/lib/safety.sh` defines:
 
-```bash
+```text
 declare -a REFUSE_PATTERN=( ... )     # Extended regex patterns
 declare -A REFUSE_REASON=( ... )      # Human-readable reason per pattern
 declare -a ALLOWED_EXCEPTIONS=( ... ) # Patterns exempted from refusal
