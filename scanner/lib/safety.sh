@@ -1,6 +1,6 @@
 # lib/safety.sh — Hard refusals for any operation that mutates Azure.
 #
-# This file is sourced by scan_pci.sh and aggregate_pci.py. It enforces the
+# This file is sourced by scan.sh and aggregate.py. It enforces the
 # Phase 2 safety invariants: the scanner is READ-ONLY against Azure. The ONLY
 # Azure mutations permitted are the storage firewall IP whitelist additions
 # done by tf_init.sh, and they MUST be paired with cleanup in a trap.
@@ -46,8 +46,8 @@ declare -a REFUSE_PATTERN=(
 )
 
 declare -A REFUSE_REASON=(
-  ['terraform[[:space:]]+apply\b']='Terraform apply mutates Azure. Forbidden in scan_pci.sh. Use scan_pci.sh for read-only scans only.'
-  ['terraform[[:space:]]+destroy\b']='Terraform destroy deletes Azure resources. Forbidden in scan_pci.sh.'
+  ['terraform[[:space:]]+apply\b']='Terraform apply mutates Azure. Forbidden in scan.sh. Use scan.sh for read-only scans only.'
+  ['terraform[[:space:]]+destroy\b']='Terraform destroy deletes Azure resources. Forbidden in scan.sh.'
   ['terraform[[:space:]]+state[[:space:]]+(rm|mv|import|replace-provider|list)\b']='Terraform state mutations are forbidden. PCI scan is read-only.'
   ['terraform[[:space:]]+taint\b']='Taint triggers destroy on next apply. Forbidden.'
   ['terraform[[:space:]]+untaint\b']='Untaint clears taint marker. Forbidden.'

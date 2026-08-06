@@ -6,19 +6,21 @@ file issues, submit pull requests, and add new mappings/remediations.
 ## Project structure
 
 ```
-.scripts/checkov/        # The scanner itself (driver + aggregator + helpers)
+scanner/                 # The scanner itself (driver + aggregator + helpers)
   scan.sh                # Driver: orchestrates Checkov invocations
   scan_audit.sh          # Audit: re-emit a prior report from archive
+  scan_baseline_init.sh  # Bulk-generate baseline stubs from a scan
   aggregate.py           # Aggregator: SARIF → HTML/CSV/JUnit
   rewrite_sarif_help.py  # Post-processor: rewrites Checkov helpUri links
   checkov_url_overrides.py # Single source of truth for rule URLs
   terraform_remediation.yaml # Canonical azurerm 4.x fix snippets
-  pci_checks/            # Custom policy-as-code checks (5 Python files)
+  checks/                # Custom policy-as-code checks (5 Python files)
   lib/                   # Shared bash helpers (common + safety)
   tests/                 # Test suite (pytest)
-pci_*.yaml               # Mapping / scope / baseline (or rename for SOC 2)
-docs/runbooks/           # Operator-facing documentation
-.devops/                 # CI/CD pipeline definitions
+mappings/                # Framework mapping packs (PCI DSS v4.0.1, etc.)
+examples/                # scope.yaml, baseline.yaml, Makefile.consumer templates
+docs/                    # Operator-facing documentation
+.github/                 # Issue templates, workflows, community health
 ```
 
 ## Adding a new Checkov rule → framework mapping
@@ -89,7 +91,7 @@ For the custom checks in `pci_checks/`, you can either:
 
 ```bash
 make scan-pci-selftest    # Bash unit tests (safety invariants)
-pytest .scripts/checkov/tests/  # Python unit tests
+pytest scanner/tests/  # Python unit tests
 ```
 
 ## Style guide

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scan_pci.sh — Read-only PCI scan orchestrator.
+# scan.sh — Read-only PCI scan orchestrator.
 #
 # Runs the Plan B pipeline: terraform plan -json per in-scope env, then
 # checkov on the plan JSON + secrets framework on the .tf source. NEVER
@@ -7,7 +7,7 @@
 # (added by tf_init.sh, removed by lib/common.sh::cleanup_ip_whitelist).
 #
 # Usage:
-#   scan_pci.sh [--mode gate|report|audit] [--project P] [--env E]
+#   scan.sh [--mode gate|report|audit] [--project P] [--env E]
 #               [--scan-plan|--scan-state] [--dry-run] [--verbose]
 #               [--no-aggregate] [--label TEXT] 
 #
@@ -15,7 +15,7 @@
 #   gate    — CI gate. --hard-fail-on HIGH,CRITICAL. Exits non-zero on findings.
 #             Does NOT auto-aggregate (CI ingests SARIF artifacts directly).
 #   report  — Manual scan. --soft-fail. Never blocks. (default for human runs)
-#             Auto-runs aggregate_pci.py at the end and prints the report
+#             Auto-runs aggregate.py at the end and prints the report
 #             path. Use --no-aggregate to skip.
 #   audit   — Re-emit a prior report from archive. No re-scan, no aggregation
 #             here (audit mode emits from archive).
@@ -34,7 +34,7 @@
 set -uo pipefail
 
 # Source common helpers (which sources safety.sh). common.sh exports UTF-8 env
-# vars needed by child Python processes (checkov, aggregate_pci.py) — see the
+# vars needed by child Python processes (checkov, aggregate.py) — see the
 # comment in lib/common.sh for why.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
@@ -50,7 +50,7 @@ DRY_RUN=0
 SCAN_PLAN=0    # If 1, run the terraform_plan framework layer (needs init+plan).
 SCAN_STATE=0   # If 1, also download state blob and scan; emit drift diff.
                # Implicitly enables SCAN_PLAN.
-NO_AGGREGATE=0 # If 1, --mode report skips the end-of-run aggregate_pci.py
+NO_AGGREGATE=0 # If 1, --mode report skips the end-of-run aggregate.py
                # call. Gate and audit modes never aggregate (gate is exit-
                # only; audit re-emits from archive).
 RUN_LABEL=""   # If non-empty, used as the run-dir slug instead of the
@@ -72,7 +72,7 @@ Run mode:
   gate    CI gate (default if CI env detected).  --hard-fail-on HIGH,CRITICAL.
           Does NOT auto-aggregate (CI ingests raw SARIF artifacts).
   report  Manual scan.  --soft-fail.  Never blocks.  (default for humans)
-          Auto-runs aggregate_pci.py at the end and prints the report
+          Auto-runs aggregate.py at the end and prints the report
           HTML path.  Use --no-aggregate to skip.
   audit   Re-emit prior report from archive (no re-scan).
 
@@ -96,7 +96,7 @@ Scan depth (three tiers, default = source only):
                  firewall whitelist + state-blob read access.
 
 Filters:
-  --project P      Restrict to one project (e.g. CR_Formstax_SQL).
+  --project P      Restrict to one project (e.g. myapp).
   --env E          Restrict to one env (e.g. prod).
 
 Modifiers:
@@ -104,7 +104,7 @@ Modifiers:
   --verbose        Enable INFO logging (DEBUG with PCI_DEBUG=1).
   --no-aggregate   Skip the auto-aggregation step (only meaningful for
                    --mode report; gate and audit modes never aggregate).
-                   When omitted, --mode report invokes aggregate_pci.py
+                   When omitted, --mode report invokes aggregate.py
                    at the end of the scan and prints the report.html path.
   --label TEXT     Custom slug for the run-dir name (sanitized to
                    [A-Za-z0-9_-]). Suffixes the UTC date for ordering.
@@ -126,7 +126,7 @@ Safety:
   Allowed (when their flag is set): terraform init/plan/show,
            az storage blob download (state read-back only, --scan-state),
            az storage account network-rule {add,remove,list} (cleanup).
-  See .scripts/checkov/lib/safety.sh for the full list.
+  See scanner/lib/safety.sh for the full list.
 EOF
 }
 
@@ -211,7 +211,7 @@ run_checkov() {
 # deep-links now redirect to a generic landing page (no per-rule context).
 # We rewrite the URLs to the canonical GitHub source files so any
 # downstream tooling that ingests the SARIF (CI scanners, the
-# aggregate_pci.py HTML report, the iac-reports archive) sees URLs
+# aggregate.py HTML report, the iac-reports archive) sees URLs
 # that actually resolve to the rule definition.
 #
 # Usage:
@@ -232,7 +232,7 @@ rewrite_sarif_help_url() {
     pci_log WARN "python not found; skipping helpUri rewrite for $sarif_path"
     return 0
   fi
-  python "${PCI_REPO_ROOT}/.scripts/checkov/rewrite_sarif_help.py" "$sarif_path" >/dev/null \
+  python "${SCRIPT_DIR}/rewrite_sarif_help.py" "$sarif_path" >/dev/null \
     || pci_log WARN "rewrite_sarif_help.py failed for $sarif_path (rc=$?)"
 }
 
@@ -402,8 +402,8 @@ while IFS=$'\t' read -r proj env; do
   done < <(find_aztfexport_files "$env_dir")
 
   # Custom PCI checks (policy-as-code). Loaded via --external-checks-dir.
-  # Auto-load all .py files under .scripts/checkov/pci_checks/.
-  PCI_CHECKS_DIR="${PCI_REPO_ROOT}/.scripts/checkov/pci_checks"
+  # Auto-load all .py files under scanner/pci_checks/.
+  PCI_CHECKS_DIR="${SCRIPT_DIR}/checks"
   external_check_args=()
   if [[ -d "$PCI_CHECKS_DIR" ]]; then
     external_check_args+=("--external-checks-dir" "$PCI_CHECKS_DIR")
@@ -535,7 +535,7 @@ while IFS=$'\t' read -r proj env; do
   if [[ $SCAN_STATE -eq 1 ]]; then
     pci_log INFO "  state-scan: download state blob from Azure"
     # The remote backend key is read from terraform.aztfexport.tf to
-    # handle naming variations (e.g., "Fromstax" vs "Formstax").
+    # handle backend-key naming variations across environments.
     backend_key=""
     if [[ -f "$env_dir/terraform.aztfexport.tf" ]]; then
       backend_key="$(grep -E '^\s*key\s*=' "$env_dir/terraform.aztfexport.tf" \
@@ -552,7 +552,7 @@ while IFS=$'\t' read -r proj env; do
 
     if [[ $DRY_RUN -eq 1 ]]; then
       echo "[dry-run] az storage blob download --container-name iac --name ${backend_key} --file ${state_local}"
-      echo "[dry-run] python .scripts/checkov/tfstate_to_plan.py ${state_local} ${state_plan_json}"
+      echo "[dry-run] python scanner/tfstate_to_plan.py ${state_local} ${state_plan_json}"
     else
       run_cmd az storage blob download \
         --account-name "$PCI_STATE_STORAGE_ACCOUNT" \
@@ -564,7 +564,7 @@ while IFS=$'\t' read -r proj env; do
       if [[ -f "$state_local" && -s "$state_local" ]]; then
         pci_log INFO "  state blob downloaded: $(stat -c %s "$state_local" 2>/dev/null || wc -c < "$state_local") bytes"
         # Shred the encrypted state blob ASAP (PCI 10.7 hygiene)
-        run_cmd python .scripts/checkov/tfstate_to_plan.py "$state_local" "$state_plan_json"
+        run_cmd python scanner/tfstate_to_plan.py "$state_local" "$state_plan_json"
         if [[ -f "$state_local" ]]; then
           shred -u "$state_local" 2>/dev/null || rm -f "$state_local"
         fi
@@ -597,7 +597,7 @@ while IFS=$'\t' read -r proj env; do
         # attributes that differ between the two views. This is the
         # signal that ignore_changes is masking real Azure drift.
         if [[ -f "$plan_json" && -f "$state_plan_json" ]]; then
-          run_cmd python .scripts/checkov/drift_report.py \
+          run_cmd python scanner/drift_report.py \
             "$plan_json" "$state_plan_json" "$drift_report"
         fi
 
@@ -629,7 +629,7 @@ done < "$SCOPE_PAIRS_FILE"
 # Audit mode: skip. scan_pci_audit.sh handles aggregation against the
 #   iac-reports archive; this script's --mode audit branch is the wrong
 #   place for that work.
-# Report mode: aggregate_pci.py walks every <env>/results_*.sarif and
+# Report mode: aggregate.py walks every <env>/results_*.sarif and
 #   emits combined.sarif, coverage_matrix.csv, junit.xml, report.html.
 #   Without this step, operators would have to run a second command.
 
@@ -643,10 +643,10 @@ if [[ "$MODE" == "report" && $NO_AGGREGATE -eq 0 ]]; then
       AGG_RC=0
     else
       AGG_RC=$?
-      pci_log ERROR "aggregate_pci.py failed (rc=$AGG_RC); raw SARIFs are still in $RUN_DIR"
+      pci_log ERROR "aggregate.py failed (rc=$AGG_RC); raw SARIFs are still in $RUN_DIR"
     fi
 
-    # aggregate_pci.py default --out is <run-dir>/aggregate (it preserves
+    # aggregate.py default --out is <run-dir>/aggregate (it preserves
     # that subdir for backwards compatibility with the original manual
     # flow). Probe both possible locations so the operator gets a useful
     # path even if the script's default ever changes.

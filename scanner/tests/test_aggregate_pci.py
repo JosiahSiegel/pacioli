@@ -64,7 +64,7 @@ def test_validate_oos_accepts_complete_entry():
         "title": "Test req",
         "rationale": "Test rationale",
         "control_owner": "team@example.com",
-        "approved_by": "Jane Doe",
+        "approved_by": "Approver Name",
         "approved_on": "2026-01-01",
         "expires_on": "2027-01-01",
         "evidence_link": "https://example.com/evidence",

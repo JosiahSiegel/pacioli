@@ -10,8 +10,8 @@
 # - justification:        human-readable why this is accepted risk
 # - compensating_control: reference to other control (e.g., "WAF rule abc123")
 # - owner:                team or person accountable (string)
-# - ticket_id:            ticket ID authorizing the suppression (e.g. "SEC-1234")
-# - approved_by:          approver name (e.g., "Jane Doe, SecOps Lead")
+# - ticket_id:            ticket ID authorizing the suppression (e.g. "TICKET-123")
+# - approved_by:          approver name (e.g., "Approver Name")
 # - approved_on:          ISO date — when this was approved
 # - expires_on:           ISO date — after this, the suppression is invalid
 #                         and the aggregator will re-surface the finding
@@ -30,22 +30,29 @@
 #   which generates stub entries for every finding. Triage top-50 by
 #   count * severity_weight; populate the schema fields. Remaining
 #   entries stay as TBD and surface in the report as "requires triage".
+#
+# NOTE on the example entries below:
+#   - All values are obvious placeholders (REPLACE_ME, TICKET-123, etc).
+#     Replace them with your real ticket system + team contacts before use.
+#   - There are intentionally no real names, real emails, or real
+#     ticket IDs in this file. Anyone copy-pasting these values into
+#     production will notice and fix them.
 
 - check_id: CKV_AZURE_59
-  resource_pattern: "azurerm_storage_account.diagnostic_logs"
-  justification: "Diagnostic logs are forwarded to a third-party SIEM via Event Hub, not the native monitor_diagnostic_setting block."
-  compensating_control: "Event Hub forwarding rule HUB-789 (verified 2026-01-15)"
-  owner: "platform-team@example.com"
-  ticket_id: "SEC-1234"
-  approved_by: "Jane Doe, SecOps Lead"
+  resource_pattern: "azurerm_storage_account.EXAMPLE_NAME"
+  justification: "REPLACE_ME: explain why this resource is accepted risk"
+  compensating_control: "REPLACE_ME: reference to the compensating control"
+  owner: "TEAM_EMAIL (e.g., security-team@example.org)"
+  ticket_id: "TICKET-123"
+  approved_by: "Approver Name"
   approved_on: "2026-01-15"
   expires_on: "2027-01-15"
 - check_id: CKV_AZURE_3
-  resource_pattern: "azurerm_storage_account.legacy_https"
-  justification: "Legacy storage account predates TLS 1.2 enforcement; migration scheduled for 2026-Q4."
-  compensating_control: "WAF rule restricts ingress to TLS 1.2+"
-  owner: "platform-team@example.com"
-  ticket_id: "SEC-5678"
-  approved_by: "Jane Doe, SecOps Lead"
+  resource_pattern: "azurerm_storage_account.EXAMPLE_NAME"
+  justification: "REPLACE_ME: legacy resource pending migration"
+  compensating_control: "REPLACE_ME: WAF rule or other mitigation"
+  owner: "TEAM_EMAIL (e.g., security-team@example.org)"
+  ticket_id: "TICKET-456"
+  approved_by: "Approver Name"
   approved_on: "2026-02-01"
   expires_on: "2027-02-01"

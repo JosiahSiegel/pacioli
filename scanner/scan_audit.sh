@@ -6,7 +6,7 @@
 #      container for the most recent run.
 #   2. Download the four aggregate files (coverage_matrix.csv,
 #      combined.sarif, junit.xml, report.html) from
-#      complyrightiacsa/iac-reports/<run_id>/.
+#      iacsa/iac-reports/<run_id>/.
 #   3. Place them under .checkov/<run_id>/aggregate/ locally.
 #   4. If --out is given, copy report.html there.
 #
@@ -34,7 +34,7 @@ OUT_PATH=""
 DRY_RUN=0
 # Storage account + container for the iac-reports archive. Override
 # with PCI_STATE_STORAGE_ACCOUNT and PCI_REPORTS_CONTAINER env vars.
-STORAGE_ACCOUNT="${PCI_STATE_STORAGE_ACCOUNT:-complyrightiacsa}"
+STORAGE_ACCOUNT="${PCI_STATE_STORAGE_ACCOUNT:-iacsa}"
 CONTAINER_NAME="${PCI_REPORTS_CONTAINER:-iac-reports}"
 
 while [[ $# -gt 0 ]]; do

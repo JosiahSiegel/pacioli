@@ -52,11 +52,11 @@ fixes the things that make Checkov hard to use in production:
 
 ```bash
 # Install dependencies (Python 3.12+, Checkov, jq)
-pip install -r .scripts/checkov/requirements-pinned.txt
+pip install -r scanner/requirements-pinned.txt
 brew install jq   # or apt-get install jq
 
 # Source-only scan (fast, no Azure calls, no init)
-make scan-pci-report
+bash scanner/scan.sh --mode report
 
 # Open the report
 open .checkov/<run-id>/report.html
@@ -65,16 +65,16 @@ open .checkov/<run-id>/report.html
 Or pick a single project + env:
 
 ```bash
-make scan-pci-report PROJECT=myapp ENV=prod
+bash scanner/scan.sh --mode report --project myapp --env prod
 ```
 
 ## Three Scan Tiers
 
 | Tier | Command | What it does |
 |------|---------|--------------|
-| 1. Source | `make scan-pci-report` | Static `.tf` parse. **~seconds.** No init, no plan, no storage. |
-| 2. Plan | `make scan-pci-plan-report` | Adds `terraform plan` so Checkov sees resolved values. |
-| 3. State | `make scan-pci-state-report` | Adds `.tfstate` blob scan + drift diff. |
+| 1. Source | `scan.sh --mode report` | Static `.tf` parse. **~seconds.** No init, no plan, no storage. |
+| 2. Plan | `scan.sh --mode report --scan-plan` | Adds `terraform plan` so Checkov sees resolved values. |
+| 3. State | `scan.sh --mode report --scan-state` | Adds `.tfstate` blob scan + drift diff. |
 
 Tier 1 is right for pre-commit hooks and day-to-day CI. Tier 2/3 catch
 things the source can't see (like CMK buried in a module output).
@@ -83,10 +83,10 @@ things the source can't see (like CMK buried in a module output).
 
 ```bash
 # Exits non-zero on HIGH/CRITICAL findings. For PR gates.
-make scan-pci
+scan.sh --mode gate
 
 # Manual scan. Never blocks. Prints the report path.
-make scan-pci-report
+scan.sh --mode report
 ```
 
 ## Customization
@@ -94,15 +94,15 @@ make scan-pci-report
 The scanner is framework-agnostic at the code level. Add a new framework
 in two steps:
 
-1. Copy `pci_mapping.yaml` to `soc2_mapping.yaml` (or whatever).
+1. Copy `mappings/pci_dss_4.0.1.yaml` to `mappings/soc2.yaml` (or whatever).
 2. Change `framework_name` and `framework_version` at the top.
 
-Re-run with `--mapping soc2_mapping.yaml` and the HTML title/subtitle
+Re-run with `--mapping mappings/soc2.yaml` and the HTML title/subtitle
 will reflect the new framework.
 
 ## Documentation
 
-- [Runbook](docs/runbooks/pci-checkov.md) — full operator guide
+- [Operator Guide](docs/OPERATOR_GUIDE.md) — full operator guide
 - [Contributing](CONTRIBUTING.md) — how to add mappings + remediations
 - [Security](SECURITY.md) — how to report vulnerabilities
 

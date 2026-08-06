@@ -8,7 +8,7 @@
 # only correct on Checkov 3.3.x — see bg_508b61a8 audit trail).
 #
 # This file is the regeneration seed, NOT the install source.
-# Install with: pip install -r .scripts/checkov/requirements-pinned.txt
+# Install with: pip install -r scanner/requirements-pinned.txt
 # Quarterly verification: compare `checkov --version` against the
 # pinned version; if Checkov upstream shipped a new release AND our
 # pci_mapping.yaml row counts diverge, schedule a PCI mapping

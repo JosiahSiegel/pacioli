@@ -17,31 +17,31 @@ storage firewall IP whitelist, paired with a cleanup trap. See
 make scan-pci-report
 
 # Scan a single project
-make scan-pci-report PROJECT=CR_Formstax_SQL
+make scan-pci-report PROJECT=CR_PROJECT_NAME
 
 # Scan a single env
-make scan-pci-report PROJECT=CR_Formstax_SQL ENV=prod
+make scan-pci-report PROJECT=CR_PROJECT_NAME ENV=prod
 
 # Source-only scan (default, Tier 1). No terraform, no init, no Azure
 # storage access, no IP whitelist. Fast (seconds per env). Right for
 # pre-commit hooks and day-to-day CI.
-make scan-pci-report PROJECT=CR_Formstax_SQL ENV=prod
+make scan-pci-report PROJECT=CR_PROJECT_NAME ENV=prod
 
 # Source + plan scan (Tier 2). Adds `terraform init` + `terraform plan`
 # so Checkov can inspect resolved values. Auto-handles storage-firewall
 # IP whitelist for the duration of the run.
-make scan-pci-plan-report PROJECT=CR_Formstax_SQL ENV=prod
+make scan-pci-plan-report PROJECT=CR_PROJECT_NAME ENV=prod
 
 # Source + plan + state-drift scan (Tier 3, top). Downloads the .tfstate
 # blob from Azure Storage and emits a drift_report.{json,md} comparing
 # source plan and state plan. Catches `ignore_changes` drift.
- make scan-pci-state-report PROJECT=CR_Formstax_SQL ENV=prod
+ make scan-pci-state-report PROJECT=CR_PROJECT_NAME ENV=prod
 
 # CI gate mode (blocks on HIGH/CRITICAL findings). Same three tiers.
 # Gate mode does NOT auto-aggregate — CI ingests SARIF artifacts directly.
-make scan-pci PROJECT=CR_Formstax_SQL ENV=prod
-make scan-pci-plan PROJECT=CR_Formstax_SQL ENV=prod
-make scan-pci-state PROJECT=CR_Formstax_SQL ENV=prod
+make scan-pci PROJECT=CR_PROJECT_NAME ENV=prod
+make scan-pci-plan PROJECT=CR_PROJECT_NAME ENV=prod
+make scan-pci-state PROJECT=CR_PROJECT_NAME ENV=prod
 
 # (Optional) Re-aggregate an existing run dir into a single report.
 # The scan-pci-report variants above already do this automatically.
@@ -70,8 +70,8 @@ find. The UTC calendar date is always suffixed for chronological ordering:
 |---|---|
 | `make scan-pci-report` (no filter) | `all-prod-2026-08-05/` |
 | `make scan-pci-report ENV=prod` | `all-prod-2026-08-05/` |
-| `make scan-pci-report PROJECT=CR_Formstax_Redis` | `CR_Formstax_Redis-prod-2026-08-05/` |
-| `make scan-pci-report PROJECT=CR_Formstax_Redis ENV=prod` | `CR_Formstax_Redis-prod-2026-08-05/` |
+| `make scan-pci-report PROJECT=CR_PROJECT_NAME` | `CR_PROJECT_NAME-prod-2026-08-05/` |
+| `make scan-pci-report PROJECT=CR_PROJECT_NAME ENV=prod` | `CR_PROJECT_NAME-prod-2026-08-05/` |
 
 Re-running the same scope the same day auto-appends `-HHMM` (and a `-N`
 counter if that minute is also taken) so previous reports are never
@@ -86,12 +86,12 @@ the derived name. Useful for one-off scans you want to find later:
 
 ```bash
 # Memo-tag a pre-deploy check
-make scan-pci-report PROJECT=CR_Formstax_SQL ENV=prod LABEL=pre-deploy
+make scan-pci-report PROJECT=CR_PROJECT_NAME ENV=prod LABEL=pre-deploy
 # -> .checkov/pre-deploy-2026-08-05/
 
 # Equivalent direct invocation
 bash .scripts/checkov/scan_pci.sh --mode report \
-    --label audit-q4 --project CR_Formstax_SQL --env prod
+    --label audit-q4 --project CR_PROJECT_NAME --env prod
 # -> .checkov/audit-q4-2026-08-05/
 ```
 
@@ -276,11 +276,11 @@ When a new HIGH/CRITICAL finding appears:
 
 ```yaml
 - check_id: CKV_AZURE_206
-  resource_pattern: "azurerm_storage_account.custsupp_legacy"
-  justification: "Legacy storage; migration tracked in SEC-1234"
-  compensating_control: "WAF rule abc123 + private endpoint in transit"
-  owner: "team-custsupp"
-  ticket_id: "SEC-1234"
+  resource_pattern: "azurerm_storage_account.EXAMPLE_NAME"
+  justification: "REPLACE_ME: legacy storage; migration tracked in TICKET-123"
+  compensating_control: "REPLACE_ME: WAF rule + private endpoint in transit"
+  owner: "TEAM_EMAIL (e.g., security-team@example.org)"
+  ticket_id: "TICKET-123"
   expires_on: "2027-01-01"
 ```
 
@@ -417,7 +417,7 @@ output matches Azure reality for the canonical golden env:
 
 ```bash
 # 1. Run scan
-make scan-pci-report PROJECT=CR_Formstax_SQL ENV=prod
+make scan-pci-report PROJECT=CR_PROJECT_NAME ENV=prod
 
 # 2. Capture findings
 RUN_DIR=$(ls -td .checkov/*/ | head -1)
@@ -435,7 +435,7 @@ Update the "Golden Env Verification" section below after each verification.
 
 | Date | Env | Findings | Verified | False Positives | Notes |
 |---|---|---|---|---|---|
-| 2026-08-04 | CR_Formstax_SQL/prod | 53 | 0 | – | Initial smoke test; verification in progress |
+| 2026-08-04 | CR_PROJECT_NAME/prod | 53 | 0 | – | Initial smoke test; verification in progress |
 
 ## Out-of-band Azure mutations
 
@@ -591,7 +591,7 @@ defect-class driven (see `audit-grade-bundle.md` defects P2-03).
    the OOS section for any req that depended on the prior
    classification (10.4.1.1 SP-only, etc.).
 6. **Re-run Golden Env smoke test** — follow the "Golden Env
-   verification" section above against `CR_Formstax_SQL/prod` and
+   verification" section above against `CR_PROJECT_NAME/prod` and
    confirm the report output is byte-identical to the prior
    quarter (modulo date stamps and `verified_against`).
 7. **Review new Checkov rules** — run
@@ -701,19 +701,19 @@ The emitted file is `<run_dir>/fix_list.md`. It contains:
 
 ```bash
 # 1. Scan
-make scan-pci-report PROJECT=CR_Formstax_SQL ENV=prod
+make scan-pci-report PROJECT=CR_PROJECT_NAME ENV=prod
 
 # 2. Audit the HTML report (regulatory review)
 start .checkov/<run_id>/report.html
 
 # 3. Hand the fix list to the dev who will remediate
 make scan-pci-fix-list RUN_DIR=.checkov/<run_id>
-cp .checkov/<run_id>/fix_list.md /tmp/CR_Formstax_SQL-fix-list.md
+cp .checkov/<run_id>/fix_list.md /tmp/CR_PROJECT_NAME-fix-list.md
 
 # 4. Dev applies the HCL blocks top-down (CRITICAL first),
 #    runs the printed verification command after each one,
 #    re-runs the scan to confirm.
-make scan-pci-report PROJECT=CR_Formstax_SQL ENV=prod
+make scan-pci-report PROJECT=CR_PROJECT_NAME ENV=prod
 ```
 
 The fix list is regenerated from the same run dir without a

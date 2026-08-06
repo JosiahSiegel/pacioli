@@ -1,6 +1,6 @@
-# lib/common.sh — Shared helpers for scan_pci.sh.
+# lib/common.sh — Shared helpers for scan.sh.
 #
-# Sourced by scan_pci.sh and anythin in .scripts/checkov/.
+# Sourced by scan.sh and anythin in scanner/.
 # Provides:
 #   - run_id generation (scope-derived, UTC-date-suffixed, sortable)
 #   - output_dir management (under .checkov/<run_id>/)
@@ -20,7 +20,7 @@ __COMMON_SH_LOADED=1
 source "$(dirname "${BASH_SOURCE[0]}")/safety.sh"
 
 # ---------------------------------------------------------------------------
-# Force UTF-8 for all Python subprocesses (checkov, aggregate_pci.py, etc.).
+# Force UTF-8 for all Python subprocesses (checkov, aggregate.py, etc.).
 #
 # Why: Windows Python defaults to cp1252 for file I/O. Some .tf modules embed
 # JSON-encoded strings with emoji glyphs (KQL workbook titles, ADF dashboard
@@ -86,14 +86,14 @@ PCI_CACHE_ROOT="${PCI_CACHE_ROOT:-${PACIOLI_TARGET_REPO}/.checkov}"
 # ---------------------------------------------------------------------------
 # Azure storage account for state-file archive + IP whitelist
 # ---------------------------------------------------------------------------
-# Override these for any Azure tenant. The defaults match the original
-# ComplyRight deployment so existing scripts keep working, but a different
-# tenant now just sets:
+# Override these for any Azure tenant. The defaults are placeholder values
+# (originally seeded from the project's first deployment). For any other
+# tenant, set:
 #   export PCI_STATE_STORAGE_ACCOUNT=mystorage
 #   export PCI_REPORTS_CONTAINER=iac-reports
 # before invoking the scanner.
 # ---------------------------------------------------------------------------
-PCI_STATE_STORAGE_ACCOUNT="${PCI_STATE_STORAGE_ACCOUNT:-complyrightiacsa}"
+PCI_STATE_STORAGE_ACCOUNT="${PCI_STATE_STORAGE_ACCOUNT:-iacsa}"
 PCI_REPORTS_CONTAINER="${PCI_REPORTS_CONTAINER:-iac-reports}"
 
 # ---------------------------------------------------------------------------
@@ -300,7 +300,7 @@ redact_cmd() {
 
 # safe_run_exec <cmd> [args...]
 # Validates against refuse_if_mutating then executes with redaction.
-# This is the ONLY way to run external commands in scan_pci.sh.
+# This is the ONLY way to run external commands in scan.sh.
 #
 # IMPORTANT: this function does NOT touch xtrace state. Callers may
 # enable/disable -x as needed via the redact_cmd helper.
@@ -501,9 +501,8 @@ print(json.dumps(active))
 #   - provider.tf              (hand-written provider block — e.g. when no
 #                               provider.aztfexport.tf was generated)
 # The previous implementation only accepted main.tf or provider.aztfexport.tf,
-# which incorrectly rejected several valid envs (CR_Formstax_Redis,
-# CR_Formstax_Storage, CR_Formstax_Marketing_WebApps, etc.) that use
-# main.aztfexport.tf + provider.tf.
+# which incorrectly rejected valid envs that use main.aztfexport.tf +
+# provider.tf (the aztfexport-generated provider block).
 require_env_dir() {
   local d="$1"
   if [[ ! -d "$d" ]]; then
@@ -568,7 +567,7 @@ common_selftest() {
 
   # Test init_pretty_run_dir: produces a dir, applies collision logic.
   local tmp_pairs; tmp_pairs="$(mktemp)"
-  printf 'CR_Formstax_Redis\tprod\nCR_SQL\tprod\n' > "$tmp_pairs"
+  printf 'PROJECT_A\tprod\nPROJECT_B\tprod\n' > "$tmp_pairs"
   local pretty1 pretty2
   pretty1="$(init_pretty_run_dir "$tmp_pairs")" || pretty1=""
   if [[ ! -d "$pretty1" ]]; then

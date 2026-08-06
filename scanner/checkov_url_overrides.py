@@ -9,14 +9,14 @@ Why this lives in its own module:
   This module is the single source of truth for the canonical GitHub
   source URL for every Checkov rule we care about. It is used by:
 
-    1. aggregate_pci.py — to rewrite the helpUri shown in the HTML report
+    1. aggregate.py — to rewrite the helpUri shown in the HTML report
        (and to dedupe the SAST rule table).
 
     2. rewrite_sarif_help.py — to rewrite the helpUri in every per-env
        SARIF on disk so CI pipelines that ingest SARIF directly also see
        the correct URL.
 
-    3. scan_pci.sh — to build a sed script that rewrites Checkov's
+    3. scan.sh — to build a sed script that rewrites Checkov's
        console output so the operator's terminal does not show broken
        prismacloud.io links.
 

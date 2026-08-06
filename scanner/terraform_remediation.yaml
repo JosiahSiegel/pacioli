@@ -20,14 +20,14 @@
 #   - CKV_AZURE_PCI_001 deliberately omitted: Terraform lifecycle -> HashiCorp, not azurerm.
 #
 # Intentionally absent: 4 CKV_SECRET_* + CKV_TF_1 IDs. No Terraform azurerm remediation applies;
-# secret scanning is the actual control (--framework secrets in scan_pci.sh).
+# secret scanning is the actual control (--framework secrets in scan.sh).
 #
 # Reuse: snippets extracted from .checkov/all-prod-2026-08-05/remediation/terraform_remediation.md
 # (656 lines, author-curated); new azurerm 4.x patterns generated from registry.terraform.io docs.
 # Estimated size: 68 entries * ~25 lines/entry = ~1700 lines.
 #
 # Verification:
-#   python -c "import yaml; y=yaml.safe_load(open('.scripts/checkov/terraform_remediation.yaml')); assert len(y['remediations']) >= 68; ..."
+#   python -c "import yaml; y=yaml.safe_load(open('scanner/terraform_remediation.yaml')); assert len(y['remediations']) >= 68; ..."
 #   python scripts/test_terraform_remediation_yaml.py
 #
 # The aggregator currently renders NO column from this file. Wiring the HTML 'Remediation'
@@ -941,8 +941,8 @@ remediations:
           # PCI general hygiene (CKV_AZURE_43) — names must be 3-24 chars, lowercase
           # letters and digits only (no hyphens). The repo convention is:
           #   {envprefix}{workload}{purpose}storage
-          # e.g. "prodformstaxstorage" (CR_Formstax_Storage).
-          name = "prodformstaxstorage"
+          # e.g. "prodworkloadstorage" — replace with your actual account name.
+          name = "prodworkloadstorage"
 
           resource_group_name      = var.resource_group_name
           location                 = var.location
@@ -1609,7 +1609,7 @@ remediations:
           # CRITICAL: this is `enable_purge_protection` (legacy attribute) vs the
           # current azurerm 4.x attribute `purge_protection_enabled` — the custom
           # check evaluates the LEGACY `enable_purge_protection` field. See
-          # `.scripts/checkov/pci_checks/CKV_AZURE_PCI_005__kv_purge_protection.py`
+          # `scanner/pci_checks/CKV_AZURE_PCI_005__kv_purge_protection.py`
           # line 52. For dual-pass, ALSO set:
           #   enable_purge_protection = true
           # to keep the legacy check happy if you keep the old attribute name in your .tf.
@@ -2110,7 +2110,7 @@ remediations:
         #   4. For false positives (e.g., PEM public keys), add a Checkov suppression:
         #        checkov:skip=CKV_SECRET_6:Reason for skipping
         #      inline on the same line as the match. Document in the baseline file
-        #      (.scripts/checkov/secret_baseline.yaml) if your team uses one.
+        #      (scanner/secret_baseline.yaml) if your team uses one.
       verification_step: |
         No `terraform apply`. After removing the secret:
           1. `checkov --framework secrets --check CKV_SECRET_6` should return 0 findings

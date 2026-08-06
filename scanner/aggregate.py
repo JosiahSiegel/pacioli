@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Aggregate per-env Checkov SARIFs into a single PCI report.
+"""Aggregate per-env Checkov SARIFs into a single compliance report.
 
-Walks the run directory produced by scan_pci.sh, parses each
-results_*.sarif, joins them with pci_mapping.yaml (PCI requirement -> check_id)
-and pci_baseline.yaml (suppressions), and emits:
+Walks the run directory produced by scan.sh, parses each
+results_*.sarif, joins them with the framework mapping YAML
+(default: mappings/pci_dss_4.0.1.yaml) and the consumer's baseline
+file (suppressions), and emits:
 
-  - coverage_matrix.csv : rows = PCI requirement, cols = check_id, cells =
-                          compliant|non_compliant|not_applicable|out_of_scope|not_scanned
+  - coverage_matrix.csv : rows = framework requirement, cols = check_id,
+                          cells = compliant|non_compliant|not_applicable|
+                          out_of_scope|not_scanned
   - combined.sarif      : all per-env SARIFs merged
   - junit.xml           : one `<testcase>` per finding, FAIL = HIGH/CRITICAL
   - report.html         : human-readable single-page report with degraded-mode banner
@@ -15,11 +17,15 @@ Distinguishes "0 findings" from "scan did not run" by checking that the
 SARIF file exists AND has a non-empty `runs` array.
 
 Usage:
-  aggregate_pci.py --run-dir <path> [--out <path>]
+  aggregate.py --run-dir <path> [--out <path>] \
+               [--scope <file>] [--mapping <file>] [--baseline <file>]
 
 Defaults:
-  --run-dir .checkov/<run_id>/
-  --out    <run-dir>/aggregate/
+  --run-dir  .checkov/<run_id>/
+  --scope    <repo>/pci_scope.yaml
+  --mapping  <pacioli>/mappings/pci_dss_4.0.1.yaml
+  --baseline <repo>/pci_baseline.yaml
+  --out      <run-dir>/aggregate/
 
 Exit codes:
   0  success
@@ -40,7 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Local module: canonical Checkov rule URL overrides. Single source of
-# truth shared with rewrite_sarif_help.py and scan_pci.sh's CLI filter.
+# truth shared with rewrite_sarif_help.py and scan.sh's CLI filter.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checkov_url_overrides import (  # noqa: E402
     RULE_SOURCE_URLS as CHECKOV_RULE_SOURCE_URLS,
@@ -155,7 +161,7 @@ class EnvResult:
 # continue to use the SARIF-provided helpUri.
 #
 # The mapping now lives in checkov_url_overrides.py (single source of
-# truth shared with rewrite_sarif_help.py and scan_pci.sh's CLI filter).
+# truth shared with rewrite_sarif_help.py and scan.sh's CLI filter).
 # The CHECKOV_RULE_SOURCE_URLS name is re-exported at the top of this
 # file from that module, so all `CHECKOV_RULE_SOURCE_URLS.get(...)`
 # call sites continue to work unchanged.
@@ -1407,7 +1413,7 @@ def _collect_drift_findings(env_results: list[EnvResult]) -> list[dict]:
     """Load and flatten drift_report.json files emitted by tier 3 scans.
 
     The drift report lives at `<run-dir>/<project>/<env>/drift_report.json`
-    (per-env, see scan_pci.sh drift_report= line). Tier 1/2 runs do not
+    (per-env, see scan.sh drift_report= line). Tier 1/2 runs do not
     produce it; this function returns [] in that case (silent skip -- no
     error, no placeholder). For tier 3 runs we read each per-env file
     and produce a flat list of dicts the HTML renderer can iterate over.
@@ -2162,7 +2168,7 @@ def write_html_report(
     body += "<section id=\"route-remediation\" class=\"route\">\n"
     body += "  <div class=\"route-header\"><h1>Remediation Library</h1>"
     body += f"<div class=\"meta\">{len(_unique_rems)} unique fix pattern{'' if len(_unique_rems)==1 else 's'} · azurerm 4.x HCL</div></div>\n"
-    body += "  <p>Canonical Terraform remediation patterns pulled from <code>.scripts/checkov/terraform_remediation.yaml</code>. "
+    body += "  <p>Canonical Terraform remediation patterns pulled from <code>scanner/terraform_remediation.yaml</code>. "
     body += "Click any check_id to copy the resource_type. Apply the patterns in your <code>env/&lt;project&gt;/&lt;env&gt;</code> directory, then re-run <code>make scan-pci-report</code> to confirm.</p>\n"
     if _unique_rems:
         body += "  <table>\n"
@@ -3421,7 +3427,7 @@ def load_findings(results: list[EnvResultFull]) -> None:
                 )
             )
         if r.sarif_paac:
-            # PAAC = policy-as-code = our custom .scripts/checkov/pci_checks
+            # PAAC = policy-as-code = our custom scanner/checks
             r.findings.extend(
                 parse_sarif(r.sarif_paac, r.project, r.env, "paac")
             )
@@ -3452,7 +3458,7 @@ def sarif_is_empty(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--run-dir", required=True, help="Run dir produced by scan_pci.sh")
+    ap.add_argument("--run-dir", required=True, help="Run dir produced by scan.sh")
     ap.add_argument("--out", help="Output dir (default: <run-dir>/aggregate)")
     ap.add_argument("--scope", default="pci_scope.yaml", help="Scope manifest")
     ap.add_argument("--mapping", default="pci_mapping.yaml", help="PCI mapping")
