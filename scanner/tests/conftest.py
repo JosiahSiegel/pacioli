@@ -1,7 +1,8 @@
 """pytest configuration for the Pacioli scanner tests.
 
-Adds .scripts/checkov to sys.path so test files can `import` the
-scanner modules directly without needing an installable package.
+Adds the scanner/ directory to sys.path so test files can `import`
+the scanner modules directly without needing an installable
+package.
 """
 import sys
 from pathlib import Path

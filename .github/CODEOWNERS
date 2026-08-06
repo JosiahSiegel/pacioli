@@ -1,3 +1,24 @@
-docs/runbooks/
-!docs/runbooks/
-!docs/runbooks/*.md
+# CODEOWNERS for the Pacioli repository.
+#
+# When a maintainer team is set up on GitHub, replace `ORG/pacioli-maintainers`
+# with the actual team handle. Until then, every PR goes to the global
+# reviewers list and any maintainer can approve.
+#
+# To require a specific maintainer for an area, add a line like:
+#   /scanner/checks/   @ORG/pacioli-maintainers
+# before the more general rule below.
+#
+# Order matters: later rules override earlier ones for the same path.
+
+# Default: all files require review from any maintainer.
+*       @ORG/pacioli-maintainers
+
+# Documentation: anyone can review (no specific owner required).
+/docs/
+
+# CI: anyone can review.
+/.github/
+
+# Safety model: extra-careful review. Two approvals required for changes
+# to lib/safety.sh (enforced by branch protection in repo settings).
+/scanner/lib/safety.sh   @ORG/pacioli-maintainers

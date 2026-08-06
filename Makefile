@@ -1,14 +1,16 @@
 # Pacioli Makefile
 # =============================================================================
-# Targets:
-#   make test            - Run pytest
-#   make lint            - Shell + Python lint
-#   make selftest        - Safety invariant self-test
-#   make install         - Install scanner deps
-#   make clean           - Remove build artifacts
+# Targets (this Makefile is for the scanner repo itself, NOT for consumers):
+#   make help        - Print the target list
+#   make test        - Run pytest (35 tests across 4 files)
+#   make lint        - shellcheck + py_compile
+#   make selftest    - Safety invariant self-test (read-only guard)
+#   make install     - Install scanner deps
+#   make clean       - Remove build artifacts
 #
 # For CONSUMING the scanner from a Terraform repo, see the wrapper Makefile
-# pattern in `examples/Makefile.consumer`.
+# in `examples/Makefile.consumer` (copy it as `Makefile.pacioli` into your
+# Terraform repo, set `PACIOLI_DIR` to point at this checkout).
 # =============================================================================
 
 .PHONY: help test lint selftest install clean
@@ -16,12 +18,21 @@
 SCANNER_DIR := scanner
 
 help:
-	@echo "Pacioli scanner targets:"
+	@echo "Pacioli scanner targets (this Makefile is for the scanner repo):"
 	@echo "  make test            - Run pytest ($(SCANNER_DIR)/tests)"
 	@echo "  make lint            - shellcheck + py_compile"
 	@echo "  make selftest        - Safety invariant self-test"
-	@echo "  make install         - pip install -r requirements"
+	@echo "  make install         - pip install -r requirements + pytest + pyyaml"
 	@echo "  make clean           - Remove __pycache__ and test artifacts"
+	@echo ""
+	@echo "For consuming Pacioli from a Terraform repo, see:"
+	@echo "  examples/Makefile.consumer"
+	@echo ""
+	@echo "Documentation:"
+	@echo "  docs/INDEX.md        - Master table of contents"
+	@echo "  docs/OPERATOR_GUIDE.md"
+	@echo "  docs/DEVELOPER_GUIDE.md"
+	@echo "  docs/CONSUMING_GUIDE.md"
 
 test:
 	cd $(SCANNER_DIR) && PYTHONPATH=. pytest tests/ -v
@@ -41,6 +52,8 @@ lint:
 	@python -m py_compile $(SCANNER_DIR)/aggregate.py
 	@python -m py_compile $(SCANNER_DIR)/rewrite_sarif_help.py
 	@python -m py_compile $(SCANNER_DIR)/checkov_url_overrides.py
+	@python -m py_compile $(SCANNER_DIR)/tfstate_to_plan.py
+	@python -m py_compile $(SCANNER_DIR)/drift_report.py
 	@echo "OK"
 
 selftest:

@@ -13,8 +13,8 @@ abstract: >-
   HCL, severity breakdowns, and a CI gate.
 type: software
 license: Apache-2.0
-license-url: https://github.com/YOUR_ORG/pacioli/blob/main/LICENSE
-repository-code: https://github.com/YOUR_ORG/pacioli
+# repository-code: filled in at first public release; see SUPPORT.md
+# repository-code: https://github.com/ORG/pacioli
 keywords:
   - compliance
   - pci-dss
