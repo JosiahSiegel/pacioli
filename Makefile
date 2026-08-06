@@ -44,7 +44,7 @@ lint:
 	@echo "OK"
 
 selftest:
-	@bash $(SCANNER_DIR)/lib/safety.sh && echo "selftest: PASS"
+	@bash $(SCANNER_DIR)/lib/safety.sh
 
 install:
 	pip install -r $(SCANNER_DIR)/requirements-pinned.txt

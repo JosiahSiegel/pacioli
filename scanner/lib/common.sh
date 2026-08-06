@@ -100,9 +100,6 @@ PCI_REPORTS_CONTAINER="${PCI_REPORTS_CONTAINER:-iac-reports}"
 # Run ID
 # ---------------------------------------------------------------------------
 # Two generation paths:
-#   init_run_dir              Legacy UTC-timestamp-PID (kept for selftest and
-#                             backward compatibility). Example output:
-#                             .checkov/20260804T143000Z-8347
 #   init_pretty_run_dir <pairs_tsv>  [envir-args…]
 #                             Derive a memorable, scope-aware id from the
 #                             content of a (project TAB env) pairs file. The
@@ -151,16 +148,6 @@ resolve_collision_free_dir() {
     n=$((n + 1))
   done
   echo "${full}-${hhmm}-${n}"
-}
-
-# Legacy: UTC basic ISO-8601 + PID. Kept for selftest and any script that
-# still calls it explicitly.
-init_run_dir() {
-  local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  local rid="${ts}-$$"
-  RUN_DIR="${PCI_CACHE_ROOT}/${rid}"
-  mkdir -p "${RUN_DIR}"
-  echo "${RUN_DIR}"
 }
 
 # Derive a scope-aware run id from a tab-separated (project TAB env) pairs
@@ -284,26 +271,12 @@ pci_log() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# redaction
-# ---------------------------------------------------------------------------
-# Wraps a command in `{ set +x; ... ; } 2>/dev/null` blocks to prevent
-# accidental SAS / secret echo by `set -x` or `bash -x`.
-# Usage: redact_cmd "your command here"
-# Returns: the wrapped command as a string for eval (rarely used directly).
-#
-# Most callers should use safe_run_exec instead.
-redact_cmd() {
-  local cmd="$1"
-  printf '{ set +x; } 2>/dev/null; %s; { set -x; } 2>/dev/null' "$cmd"
-}
-
 # safe_run_exec <cmd> [args...]
-# Validates against refuse_if_mutating then executes with redaction.
+# Validates against refuse_if_mutating then executes.
 # This is the ONLY way to run external commands in scan.sh.
 #
-# IMPORTANT: this function does NOT touch xtrace state. Callers may
-# enable/disable -x as needed via the redact_cmd helper.
+# IMPORTANT: this function does NOT touch xtrace state. Callers that
+# enable -x must do so themselves and accept the risk of SAS/secret echo.
 safe_run_exec() {
   local cmd_display="$*"
   pci_log DEBUG "exec: $cmd_display"
@@ -532,90 +505,4 @@ find_aztfexport_files() {
     -name "aztfexportResourceMapping.json" -o \
     -name "aztfexportSkippedResources.txt" \
     \) 2>/dev/null
-}
-
-# ---------------------------------------------------------------------------
-# Self-test
-# ---------------------------------------------------------------------------
-common_selftest() {
-  local failed=0
-  if ! safety_selftest; then
-    echo "FAIL: safety selftest" >&2
-    failed=1
-  fi
-
-  # Test that init_run_dir produces a valid path
-  local rid
-  rid="$(init_run_dir)" || { echo "FAIL: init_run_dir" >&2; failed=1; }
-  if [[ ! -d "$rid" ]]; then
-    echo "FAIL: init_run_dir did not create dir: $rid" >&2
-    failed=1
-  fi
-
-  # Test sanitize_name: illegal chars become -, dashes collapsed, empty
-  # returns the placeholder.
-  local sn
-  sn="$(sanitize_name 'Foo_Bar/Prod v2.0')" || sn=""
-  [[ "$sn" == "Foo_Bar-Prod-v2.0" ]] || {
-    echo "FAIL: sanitize_name: '$sn'" >&2; failed=1; }
-  sn="$(sanitize_name '/leading-and/trailing/')" || sn=""
-  [[ "$sn" == "leading-and-trailing" ]] || {
-    echo "FAIL: sanitize_name (leading/trailing): '$sn'" >&2; failed=1; }
-  sn="$(sanitize_name '')" || sn=""
-  [[ "$sn" == "x" ]] || {
-    echo "FAIL: sanitize_name (empty): '$sn'" >&2; failed=1; }
-
-  # Test init_pretty_run_dir: produces a dir, applies collision logic.
-  local tmp_pairs; tmp_pairs="$(mktemp)"
-  printf 'PROJECT_A\tprod\nPROJECT_B\tprod\n' > "$tmp_pairs"
-  local pretty1 pretty2
-  pretty1="$(init_pretty_run_dir "$tmp_pairs")" || pretty1=""
-  if [[ ! -d "$pretty1" ]]; then
-    echo "FAIL: init_pretty_run_dir did not create dir: $pretty1" >&2
-    failed=1
-  fi
-  # The second call resolves the collision (-HHMM or counter).
-  pretty2="$(init_pretty_run_dir "$tmp_pairs")" || pretty2=""
-  if [[ ! -d "$pretty2" ]]; then
-    echo "FAIL: init_pretty_run_dir (collision) did not create dir: $pretty2" >&2
-    failed=1
-  fi
-  if [[ "$pretty1" == "$pretty2" ]]; then
-    echo "FAIL: init_pretty_run_dir collision handler returned same path: $pretty1 vs $pretty2" >&2
-    failed=1
-  fi
-  rm -rf "$pretty1" "$pretty2" "$tmp_pairs"
-
-  # Test init_run_dir_labeled: honors a user-supplied slug.
-  local labeled
-  unset PCI_RUN_NAME
-  labeled="$(init_run_dir_labeled 'q4-review')" || labeled=""
-  if [[ ! -d "$labeled" ]]; then
-    echo "FAIL: init_run_dir_labeled did not create dir: $labeled" >&2
-    failed=1
-  fi
-  rm -rf "$labeled"
-
-  # Test yaml_to_json on a real file
-  if ! yaml_to_json "$PCI_SCOPE_FILE" >/dev/null 2>&1; then
-    echo "FAIL: yaml_to_json on pci_scope.yaml" >&2
-    failed=1
-  fi
-
-  # Test load_pci_scope
-  local scope
-  scope="$(load_pci_scope)" || { echo "FAIL: load_pci_scope" >&2; failed=1; }
-  if [[ -z "$scope" ]]; then
-    echo "FAIL: load_pci_scope returned empty" >&2
-    failed=1
-  fi
-
-  # Confirm exclusions
-  if [[ "$scope" == *rg-example* ]]; then
-    echo "FAIL: load_pci_scope included rg-example" >&2
-    failed=1
-  fi
-
-  rm -rf "$rid"
-  return $failed
 }

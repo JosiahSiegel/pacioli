@@ -151,3 +151,15 @@ safety_selftest() {
 
   return $failed
 }
+
+# When sourced directly (not imported), run the selftest. When sourced
+# from common.sh (via the __SAFETY_SH_LOADED guard), skip -- callers
+# invoke safety_selftest themselves from the make target.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  if safety_selftest; then
+    echo "safety_selftest: PASS"
+  else
+    echo "safety_selftest: FAIL" >&2
+    exit 1
+  fi
+fi
