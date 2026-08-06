@@ -130,16 +130,27 @@ def get_help_uri(rule_id: str, upstream_help_uri: str | None = None) -> str:
     Args:
       rule_id: The Checkov rule ID (e.g. "CKV_AZURE_13").
       upstream_help_uri: The original helpUri from Checkov's SARIF. Used
-        as the fallback so unmapped rules still surface a URL (even if
-        it's the broken prismacloud one — better than nothing).
+        ONLY for unmapped rules that are not in our override table
+        AND not docs.prismacloud.io (we deliberately do NOT fall
+        back to prismacloud.io, even if Checkov emitted it, because
+        that domain was retired in 2026 and the per-rule deep-links
+        no longer resolve).
 
     Returns:
-      The canonical GitHub URL if mapped, else the upstream URI,
-      else the static Google docs fallback URL.
+      The canonical GitHub URL if mapped. Otherwise, a best-effort
+      GitHub URL or the upstream URI as a last resort.
     """
     if rule_id in RULE_SOURCE_URLS:
         return RULE_SOURCE_URLS[rule_id]
-    if upstream_help_uri:
+    # Upstream fallback: prefer the upstream URL ONLY if it isn't
+    # the broken docs.prismacloud.io domain. If it is, we deliberately
+    # fall through to the GitHub repo root instead of preserving a
+    # dead link.
+    if (
+        upstream_help_uri
+        and "docs.prismacloud.io" not in upstream_help_uri
+        and "prismacloud.io" not in upstream_help_uri
+    ):
         return upstream_help_uri
     # Last-resort fallback: Checkov's GitHub repo root.
     return "https://github.com/bridgecrewio/checkov"

@@ -50,10 +50,21 @@ def test_get_help_uri_uses_override():
     assert url.endswith("StorageAccountHttpsOnly.py")
 
 
-def test_get_help_uri_falls_back_to_upstream():
-    """When a rule is NOT mapped, get_help_uri returns the upstream URI."""
-    upstream = "https://docs.prismacloud.io/some/rule"
+def test_get_help_uri_falls_back_to_upstream_when_not_prismacloud():
+    """When a rule is unmapped and the upstream URL is NOT prismacloud.io,
+    we preserve the upstream URL (the link might be valid)."""
+    upstream = "https://example.com/rule/CKV_UNMAPPED_RULE"
     assert get_help_uri("CKV_UNMAPPED_RULE", upstream) == upstream
+
+
+def test_get_help_uri_replaces_prismacloud_upstream_with_github_root():
+    """When a rule is unmapped AND the upstream URL is prismacloud.io, we
+    deliberately fall through to the GitHub repo root because that
+    domain was retired in 2026 and the per-rule deep-links no longer
+    resolve. Preserving a dead link would be a worse experience than
+    pointing at the repo root."""
+    upstream = "https://docs.prismacloud.io/some/rule"
+    assert get_help_uri("CKV_UNMAPPED_RULE", upstream) == "https://github.com/bridgecrewio/checkov"
 
 
 def test_get_help_uri_no_upstream_returns_github_root():

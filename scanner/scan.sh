@@ -356,16 +356,16 @@ while IFS=$'\t' read -r proj env; do
   plan_json=""
 
   if [[ $SCAN_PLAN -eq 1 ]]; then
-    # Step 0a: whitelist current IP on $PACIOLI_STATE_STORAGE_ACCOUNT (only
+    # Step 0a: whitelist current IP on $PCI_STATE_STORAGE_ACCOUNT (only
     # allowed mutation). Pairs with cleanup_ip_whitelist via the EXIT trap.
     # Tier 2/3 requires the consumer to have set PACIOLI_STATE_STORAGE_ACCOUNT
     # in their environment; lib/common.sh defaults it to empty to force an
     # early failure rather than writing to an unintended storage account.
-    if [[ $DRY_RUN -eq 0 && -z "$PACIOLI_STATE_STORAGE_ACCOUNT" ]]; then
+    if [[ $DRY_RUN -eq 0 && -z "${PCI_STATE_STORAGE_ACCOUNT:-}" ]]; then
       pci_log ERROR "PACIOLI_STATE_STORAGE_ACCOUNT is not set. Export it (e.g. PACIOLI_STATE_STORAGE_ACCOUNT=mystorageaccount) before running --scan-plan or --scan-state."
       continue
     fi
-    pci_log INFO "  whitelist current IP on $PACIOLI_STATE_STORAGE_ACCOUNT storage firewall"
+    pci_log INFO "  whitelist current IP on ${PCI_STATE_STORAGE_ACCOUNT:-unset} storage firewall"
     if [[ $DRY_RUN -eq 1 ]]; then
       echo "[dry-run] whitelist_my_ip"
     else
@@ -420,12 +420,20 @@ while IFS=$'\t' read -r proj env; do
   # no state). Always runs — these checks are static and catch patterns
   # like lifecycle ignore_changes, inline default_action, CMK absence
   # on encryption-bearing resources.
+  #
+  # WORKAROUND for Checkov 3.3.9 on Windows: Checkov's runner calls
+  # `os.path.relpath(full_file_path.file_path)` on every scanned file
+  # and fails with "path is on mount 'C:', start on mount 'S:'" if the
+  # CWD is on a different drive than the scanned file. cd into the
+  # env_dir first, then run Checkov from there. The cd is wrapped in a
+  # subshell + trap to restore the previous CWD on exit, so the rest
+  # of the script's path resolution is unaffected.
   if [[ -d "$PCI_CHECKS_DIR" ]]; then
     pci_log INFO "  checkov --framework terraform (custom PCI checks on .tf)"
     paac_dir="${env_run_dir}/checkov_paac"
     mkdir -p "$paac_dir"
     paac_args=(
-      -d "$env_dir"
+      -d .
       --framework terraform
       --output sarif
       --output-file-path "$paac_dir"
@@ -440,7 +448,8 @@ while IFS=$'\t' read -r proj env; do
     # Pipe checkov's output through the URL rewriter so the operator
     # sees canonical GitHub URLs instead of broken prismacloud.io links.
     # Under set -o pipefail, the pipeline carries checkov's exit code.
-    checkov "${paac_args[@]}" 2>&1 | checkov_stderr_filter
+    # cd into env_dir first (see the Windows relpath workaround above).
+    ( cd "$env_dir" && checkov "${paac_args[@]}" 2>&1 | checkov_stderr_filter )
     paac_rc=${PIPESTATUS[0]}
     if [[ $paac_rc -ne 0 ]]; then
       # Mirror run_cmd's refuse_if_mutating safety check before logging.
@@ -461,7 +470,7 @@ while IFS=$'\t' read -r proj env; do
     terraform_src_dir="${env_run_dir}/checkov_terraform_source"
     mkdir -p "$terraform_src_dir"
     tf_src_args=(
-      -d "$env_dir"
+      -d .
       --framework terraform
       --output sarif
       --output-file-path "$terraform_src_dir"
@@ -472,7 +481,13 @@ while IFS=$'\t' read -r proj env; do
       tf_src_args+=(--soft-fail)
     fi
     [[ ${#skip_paths[@]} -gt 0 ]] && tf_src_args+=("${skip_paths[@]}")
-    run_checkov "${tf_src_args[@]}"
+    # Same Windows relpath workaround as the paac pass above: cd into
+    # the env_dir so Checkov's relpath() doesn't cross drives.
+    ( cd "$env_dir" && checkov "${tf_src_args[@]}" 2>&1 | checkov_stderr_filter )
+    src_rc=${PIPESTATUS[0]}
+    if [[ $src_rc -ne 0 ]]; then
+      pci_log WARN "checkov source returned rc=$src_rc for ${proj}/${env}"
+    fi
     if [[ -f "${terraform_src_dir}/results_sarif.sarif" ]]; then
       mv "${terraform_src_dir}/results_sarif.sarif" "${env_run_dir}/results_terraform_source.sarif"
       rmdir "$terraform_src_dir" 2>/dev/null || true
@@ -487,7 +502,7 @@ while IFS=$'\t' read -r proj env; do
     mkdir -p "$terraform_plan_dir"
     pci_log INFO "  checkov --framework terraform_plan (source plan)"
     checkov_args=(
-      -d "$env_dir"
+      -d .
       -f "$plan_json"
       --framework terraform_plan
       --output sarif
@@ -500,7 +515,12 @@ while IFS=$'\t' read -r proj env; do
     fi
     [[ ${#skip_paths[@]} -gt 0 ]] && checkov_args+=("${skip_paths[@]}")
     [[ ${#external_check_args[@]} -gt 0 ]] && checkov_args+=("${external_check_args[@]}")
-    run_checkov "${checkov_args[@]}"
+    # Same Windows relpath workaround as the other passes above.
+    ( cd "$env_dir" && checkov "${checkov_args[@]}" 2>&1 | checkov_stderr_filter )
+    plan_rc=${PIPESTATUS[0]}
+    if [[ $plan_rc -ne 0 ]]; then
+      pci_log WARN "checkov plan returned rc=$plan_rc for ${proj}/${env}"
+    fi
     if [[ -f "${terraform_plan_dir}/results_sarif.sarif" ]]; then
       mv "${terraform_plan_dir}/results_sarif.sarif" "${env_run_dir}/results_terraform_plan.sarif"
       rmdir "$terraform_plan_dir" 2>/dev/null || true
@@ -514,7 +534,7 @@ while IFS=$'\t' read -r proj env; do
   secrets_dir="${env_run_dir}/checkov_secrets"
   mkdir -p "$secrets_dir"
   secrets_args=(
-    -d "$env_dir"
+    -d .
     --framework secrets
     --output sarif
     --output-file-path "$secrets_dir"
@@ -526,7 +546,12 @@ while IFS=$'\t' read -r proj env; do
   fi
     [[ ${#skip_paths[@]} -gt 0 ]] && secrets_args+=("${skip_paths[@]}")
     [[ ${#external_check_args[@]} -gt 0 ]] && secrets_args+=("${external_check_args[@]}")
-    run_checkov "${secrets_args[@]}"
+    # Same Windows relpath workaround as the paac/source passes above.
+    ( cd "$env_dir" && checkov "${secrets_args[@]}" 2>&1 | checkov_stderr_filter )
+    secrets_rc=${PIPESTATUS[0]}
+    if [[ $secrets_rc -ne 0 ]]; then
+      pci_log WARN "checkov secrets returned rc=$secrets_rc for ${proj}/${env}"
+    fi
     if [[ -f "${secrets_dir}/results_sarif.sarif" ]]; then
       mv "${secrets_dir}/results_sarif.sarif" "${env_run_dir}/results_secrets.sarif"
       rmdir "$secrets_dir" 2>/dev/null || true
@@ -580,7 +605,7 @@ while IFS=$'\t' read -r proj env; do
         state_dir="${env_run_dir}/checkov_state"
         mkdir -p "$state_dir"
         state_args=(
-          -d "$env_dir"
+          -d .
           -f "$state_plan_json"
           --framework terraform_plan
           --output sarif
@@ -592,7 +617,12 @@ while IFS=$'\t' read -r proj env; do
           state_args+=(--soft-fail)
         fi
         [[ ${#skip_paths[@]} -gt 0 ]] && state_args+=("${skip_paths[@]}")
-        run_checkov "${state_args[@]}"
+        # Same Windows relpath workaround as the other passes above.
+        ( cd "$env_dir" && checkov "${state_args[@]}" 2>&1 | checkov_stderr_filter )
+        state_rc=${PIPESTATUS[0]}
+        if [[ $state_rc -ne 0 ]]; then
+          pci_log WARN "checkov state returned rc=$state_rc for ${proj}/${env}"
+        fi
         if [[ -f "${state_dir}/results_sarif.sarif" ]]; then
           mv "${state_dir}/results_sarif.sarif" "${env_run_dir}/results_state.sarif"
           rmdir "$state_dir" 2>/dev/null || true

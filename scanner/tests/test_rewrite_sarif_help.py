@@ -49,9 +49,24 @@ def test_rewrite_replaces_prismacloud_with_github(tmp_path):
     assert "StorageAccountHttpsOnly.py" in uri
 
 
-def test_rewrite_keeps_unmapped_rule_uri(tmp_path):
-    """An unmapped rule keeps its upstream helpUri."""
+def test_rewrite_replaces_prismacloud_for_unmapped_rule(tmp_path):
+    """An unmapped rule whose upstream URL is prismacloud.io gets
+    replaced with the GitHub repo root, not left as a dead link."""
     upstream = "https://docs.prismacloud.io/whatever/CKV_FAKE_99"
+    path = _write_sarif(tmp_path, [
+        {"id": "CKV_FAKE_99", "helpUri": upstream},
+    ])
+    rewritten, skipped = rewrite_sarif(path)
+    assert rewritten == 1
+    assert skipped == 0
+    data = json.loads(path.read_text())
+    assert data["runs"][0]["tool"]["driver"]["rules"][0]["helpUri"] == "https://github.com/bridgecrewio/checkov"
+
+
+def test_rewrite_keeps_unmapped_rule_with_valid_upstream(tmp_path):
+    """An unmapped rule whose upstream URL is NOT prismacloud.io gets
+    the upstream URL preserved (it might be a valid link)."""
+    upstream = "https://example.com/rule/CKV_FAKE_99"
     path = _write_sarif(tmp_path, [
         {"id": "CKV_FAKE_99", "helpUri": upstream},
     ])
@@ -84,20 +99,23 @@ def test_rewrite_handles_missing_runs(tmp_path):
 
 
 def test_rewrite_handles_mixed_rules(tmp_path):
-    """A mix of mapped, unmapped, and already-correct rules."""
+    """A mix of mapped, unmapped-with-valid-upstream, unmapped-with-prismacloud,
+    and already-correct rules."""
     path = _write_sarif(tmp_path, [
         {"id": "CKV_AZURE_212", "helpUri": "https://docs.prismacloud.io/x"},
         {"id": "CKV_FAKE_99", "helpUri": "https://docs.prismacloud.io/y"},
         {"id": "CKV_AZURE_44", "helpUri": "https://github.com/bridgecrewio/checkov/blob/main/checkov/terraform/checks/resource/azure/StorageAccountMinTlsVersion.py"},
+        {"id": "CKV_FAKE_100", "helpUri": "https://example.com/rule/CKV_FAKE_100"},
     ])
     rewritten, skipped = rewrite_sarif(path)
-    assert rewritten == 1  # CKV_AZURE_212 only
-    assert skipped == 2  # CKV_FAKE_99 (unmapped) + CKV_AZURE_44 (already correct)
+    assert rewritten == 2  # CKV_AZURE_212 + CKV_FAKE_99 (both had prismacloud upstream)
+    assert skipped == 2  # CKV_AZURE_44 (already correct) + CKV_FAKE_100 (valid upstream)
     data = json.loads(path.read_text())
     rules = data["runs"][0]["tool"]["driver"]["rules"]
-    assert rules[0]["helpUri"].startswith("https://github.com/")
-    assert rules[1]["helpUri"] == "https://docs.prismacloud.io/y"
-    assert rules[2]["helpUri"].startswith("https://github.com/")
+    assert rules[0]["helpUri"].startswith("https://github.com/bridgecrewio/checkov/blob/main/")
+    assert rules[1]["helpUri"] == "https://github.com/bridgecrewio/checkov"
+    assert rules[2]["helpUri"].startswith("https://github.com/bridgecrewio/checkov/blob/main/")
+    assert rules[3]["helpUri"] == "https://example.com/rule/CKV_FAKE_100"
 
 
 def test_main_with_no_args(tmp_path, monkeypatch, capsys):

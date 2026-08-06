@@ -3476,16 +3476,24 @@ def main() -> int:
     out_dir = Path(args.out).resolve() if args.out else run_dir / "aggregate"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Locate the three PCI config files. Default to repo root (= parent of .checkov).
-    # Walk up looking for a .git directory (any repo) — never hardcode a
-    # specific repo name. Falls back to the run_dir's parent if no .git
-    # is found (e.g. when running in a CI artifact without a checkout).
-    repo_root = run_dir
-    while repo_root.parent != repo_root and not (repo_root / ".git").exists():
-        repo_root = repo_root.parent
-    if repo_root.parent == repo_root:
-        # No .git found — fall back to run_dir's parent.
-        repo_root = run_dir.parent
+    # Locate the three PCI config files. Priority order:
+    #   1. PACIOLI_TARGET_REPO env var (set by scan.sh, the consumer's
+    #      Terraform repo where the scope/baseline live)
+    #   2. CLI --scope/--mapping/--baseline absolute path
+    #   3. Walk up from run_dir looking for a .git directory (legacy
+    #      fallback for callers who don't set the env var)
+    # The default values for --scope/--mapping/--baseline are bare
+    # filenames, which are resolved relative to the resolved root.
+    env_target = os.environ.get("PACIOLI_TARGET_REPO", "").strip()
+    if env_target and Path(env_target).is_dir():
+        repo_root = Path(env_target).resolve()
+    else:
+        repo_root = run_dir
+        while repo_root.parent != repo_root and not (repo_root / ".git").exists():
+            repo_root = repo_root.parent
+        if repo_root.parent == repo_root:
+            # No .git found — fall back to run_dir's parent.
+            repo_root = run_dir.parent
     scope_path = repo_root / args.scope
     mapping_path = repo_root / args.mapping
     baseline_path = repo_root / args.baseline
