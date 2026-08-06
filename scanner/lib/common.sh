@@ -51,9 +51,11 @@ export LANG="${LANG:-C.UTF-8}"
 # Backward compat: if PCI_REPO_ROOT is set in the environment, use it.
 # ---------------------------------------------------------------------------
 PACIOLI_TARGET_REPO="${PACIOLI_TARGET_REPO:-${PCI_REPO_ROOT:-$(pwd)}}"
-# Resolve to absolute path
+# Resolve to absolute path. MSYS Git Bash on Windows mangles S:/ paths into
+# /s/ via pwd, so we canonicalize via cd in a subshell. We do NOT use
+# realpath because it does not resolve S:/ paths correctly on Windows.
 if [[ -d "$PACIOLI_TARGET_REPO" ]]; then
-  PACIOLI_TARGET_REPO="$(cd "$PACIOLI_TARGET_REPO" && pwd -W 2>/dev/null || cd "$PACIOLI_TARGET_REPO" && pwd)"
+  PACIOLI_TARGET_REPO="$(cd "$PACIOLI_TARGET_REPO" && pwd)"
 fi
 if [[ ! -d "$PACIOLI_TARGET_REPO" ]]; then
   echo "FATAL: PACIOLI_TARGET_REPO does not exist: $PACIOLI_TARGET_REPO" >&2
@@ -62,7 +64,11 @@ fi
 
 # Mapping file location. Default: <pacioli install>/mappings/pci_dss_4.0.1.yaml.
 # Allow override via --mapping or PACIOLI_MAPPING.
-PACIOLI_INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The mapping pack lives at <repo>/mappings/, NOT <repo>/scanner/mappings/.
+# We compute PACIOLI_INSTALL_DIR from the location of common.sh (lib/common.sh),
+# so the install root is ../../ not ../.
+# Do not use realpath; see PACIOLI_TARGET_REPO above.
+PACIOLI_INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PACIOLI_DEFAULT_MAPPING="${PACIOLI_INSTALL_DIR}/mappings/pci_dss_4.0.1.yaml"
 PACIOLI_MAPPING="${PACIOLI_MAPPING:-${PACIOLI_DEFAULT_MAPPING}}"
 
@@ -73,10 +79,9 @@ PCI_MAPPING_FILE="$PACIOLI_MAPPING"
 PCI_BASELINE_FILE="${PACIOLI_TARGET_REPO}/pci_baseline.yaml"
 
 # Local cache root for scan artifacts (never in git; see .gitignore).
-# Default: under the repo as .checkov/ (same drive as the .tf code, so
-# checkov doesn't choke on cross-drive paths). Override with PCI_CACHE_ROOT
-# for production / central artifact storage.
-PCI_CACHE_ROOT="${PCI_CACHE_ROOT:-${PCI_REPO_ROOT}/.checkov}"
+# Default: under the consumer's Terraform repo as .checkov/ (same drive as
+# the .tf code, so checkov doesn't choke on cross-drive paths).
+PCI_CACHE_ROOT="${PCI_CACHE_ROOT:-${PACIOLI_TARGET_REPO}/.checkov}"
 
 # ---------------------------------------------------------------------------
 # Azure storage account for state-file archive + IP whitelist

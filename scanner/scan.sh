@@ -636,10 +636,10 @@ done < "$SCOPE_PAIRS_FILE"
 SCAN_RC=0
 if [[ "$MODE" == "report" && $NO_AGGREGATE -eq 0 ]]; then
   if [[ $DRY_RUN -eq 1 ]]; then
-    pci_log INFO "aggregation (dry-run): python .scripts/checkov/aggregate_pci.py --run-dir $RUN_DIR"
+    pci_log INFO "aggregation (dry-run): python "${SCRIPT_DIR}/aggregate.py" --run-dir $RUN_DIR"
   else
     pci_log INFO "aggregating $RUN_DIR (coverage matrix + HTML report)"
-    if python .scripts/checkov/aggregate_pci.py --run-dir "$RUN_DIR"; then
+    if python "${SCRIPT_DIR}/aggregate.py" --run-dir "$RUN_DIR"; then
       AGG_RC=0
     else
       AGG_RC=$?
