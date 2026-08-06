@@ -211,7 +211,7 @@ run_checkov() {
 # deep-links now redirect to a generic landing page (no per-rule context).
 # We rewrite the URLs to the canonical GitHub source files so any
 # downstream tooling that ingests the SARIF (CI scanners, the
-# aggregate.py HTML report, the iac-reports archive) sees URLs
+# aggregate.py HTML report, the pacioli-reports archive) sees URLs
 # that actually resolve to the rule definition.
 #
 # Usage:
@@ -356,9 +356,16 @@ while IFS=$'\t' read -r proj env; do
   plan_json=""
 
   if [[ $SCAN_PLAN -eq 1 ]]; then
-    # Step 0a: whitelist current IP on $PCI_STATE_STORAGE_ACCOUNT (only allowed
-    # mutation). Pairs with cleanup_ip_whitelist via the EXIT trap.
-    pci_log INFO "  whitelist current IP on $PCI_STATE_STORAGE_ACCOUNT storage firewall"
+    # Step 0a: whitelist current IP on $PACIOLI_STATE_STORAGE_ACCOUNT (only
+    # allowed mutation). Pairs with cleanup_ip_whitelist via the EXIT trap.
+    # Tier 2/3 requires the consumer to have set PACIOLI_STATE_STORAGE_ACCOUNT
+    # in their environment; lib/common.sh defaults it to empty to force an
+    # early failure rather than writing to an unintended storage account.
+    if [[ $DRY_RUN -eq 0 && -z "$PACIOLI_STATE_STORAGE_ACCOUNT" ]]; then
+      pci_log ERROR "PACIOLI_STATE_STORAGE_ACCOUNT is not set. Export it (e.g. PACIOLI_STATE_STORAGE_ACCOUNT=mystorageaccount) before running --scan-plan or --scan-state."
+      continue
+    fi
+    pci_log INFO "  whitelist current IP on $PACIOLI_STATE_STORAGE_ACCOUNT storage firewall"
     if [[ $DRY_RUN -eq 1 ]]; then
       echo "[dry-run] whitelist_my_ip"
     else
@@ -626,8 +633,8 @@ done < "$SCOPE_PAIRS_FILE"
 # Gate mode: skip. CI ingests raw SARIF / junit artifacts directly via
 #   Pipeline.PublishBuildArtifact and does NOT need to spend cycles re-
 #   walking every per-env SARIF on each test run.
-# Audit mode: skip. scan_pci_audit.sh handles aggregation against the
-#   iac-reports archive; this script's --mode audit branch is the wrong
+# Audit mode: skip. scan_audit.sh handles aggregation against the
+#   pacioli-reports archive; this script's --mode audit branch is the wrong
 #   place for that work.
 # Report mode: aggregate.py walks every <env>/results_*.sarif and
 #   emits combined.sarif, coverage_matrix.csv, junit.xml, report.html.

@@ -255,14 +255,14 @@ When a new HIGH/CRITICAL finding appears:
 
 ```yaml
 - check_id: CKV_AZURE_206
-  resource_pattern: "azurerm_storage_account.EXAMPLE_NAME"
-  justification: "REPLACE_ME: legacy storage; migration tracked in TICKET-123"
-  compensating_control: "REPLACE_ME: WAF rule + private endpoint in transit"
-  owner: "TEAM_EMAIL (e.g., security-team@example.org)"
-  ticket_id: "TICKET-123"
-  approved_by: "Approver Name"
-  approved_on: "2026-01-15"
-  expires_on: "2027-01-15"
+  resource_pattern: "azurerm_storage_account.<your-resource-name>"
+  justification: "<reason this is accepted risk>"
+  compensating_control: "<reference to the compensating control>"
+  owner: "<team-or-person-email>"
+  ticket_id: "<ticket-id>"
+  approved_by: "<approver-name>"
+  approved_on: "<YYYY-MM-DD>"
+  expires_on: "<YYYY-MM-DD>"
 ```
 
 **Enforcement rules** (applied by `aggregate.py`):
@@ -283,7 +283,7 @@ line:
 
 ```hcl
 resource "azurerm_storage_account" "example" {
-  enable_https_traffic_only = false  # checkov:skip=CKV_AZURE_206:PR_OWNER=team:PR_EXPIRES=2027-01-01|justification="legacy migration"
+  enable_https_traffic_only = false  # checkov:skip=CKV_AZURE_206:PR_OWNER=<team>:PR_EXPIRES=<YYYY-MM-DD>|justification="<reason>"
 }
 ```
 
@@ -413,7 +413,8 @@ az storage account network-rule remove \
 ```
 
 The storage account name is set via `PACIOLI_STATE_STORAGE_ACCOUNT`
-(default: `iacsa`).
+(no default; the scanner refuses tier 2/3 and audit-mode runs if it
+is unset).
 
 ## Adding a new project to scope
 

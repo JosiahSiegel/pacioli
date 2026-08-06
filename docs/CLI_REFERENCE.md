@@ -50,8 +50,8 @@ bash scanner/scan.sh [--mode MODE] [--project P] [--env E]
 |---|---|---|
 | `PACIOLI_TARGET_REPO` | `${PCI_REPO_ROOT}` or `$(pwd)` | The consumer's Terraform repo (where `pci_scope.yaml`, `pci_baseline.yaml`, and `env/` live). |
 | `PACIOLI_MAPPING` | `${PACIOLI_INSTALL_DIR}/mappings/pci_dss_4.0.1.yaml` | The framework mapping pack. Override with `--mapping <file>` (see `aggregate.py`). |
-| `PACIOLI_STATE_STORAGE_ACCOUNT` | `iacsa` | Azure storage account for tier 2/3 state-blob access. |
-| `PACIOLI_REPORTS_CONTAINER` | `iac-reports` | Azure storage container for the iac-reports archive. |
+| `PACIOLI_STATE_STORAGE_ACCOUNT` | (empty) | Azure storage account for tier 2/3 state-blob access. **Required** for tier 2/3 and `scan_audit.sh`; the scanner refuses to run without it. |
+| `PACIOLI_REPORTS_CONTAINER` | (empty) | Azure storage container for the `pacioli-reports` archive. **Required** for `scan_audit.sh`; refused if unset. |
 | `PCI_CACHE_ROOT` | `${PACIOLI_TARGET_REPO}/.checkov` | Where the run dir is created. |
 | `PCI_VERBOSE` | unset | Same as `--verbose`. |
 | `PCI_DEBUG` | unset | Even more verbose (DEBUG level). |
@@ -84,7 +84,7 @@ bash scanner/scan.sh --mode report --label pre-deploy --project myapp --env prod
 
 ## `scan_audit.sh`
 
-Re-emits a prior report from the iac-reports archive. No re-scan.
+Re-emits a prior report from the `pacioli-reports` archive. No re-scan.
 
 ### Synopsis
 
@@ -97,7 +97,7 @@ bash scanner/scan_audit.sh [--run-id ID | --latest] [--out PATH] [--dry-run]
 | Argument | Description |
 |---|---|
 | `--run-id <id>` | Specific run id to fetch (e.g. `20260804T153407Z-2455`). |
-| `--latest` | Fetch the most recent run from the `iac-reports` container. |
+| `--latest` | Fetch the most recent run from the `pacioli-reports` container. |
 | `--out <path>` | Optional destination for `report.html`. |
 | `--dry-run` | Print the blob-download commands without executing. |
 | `--help` / `-h` | Show usage. |
@@ -106,8 +106,8 @@ bash scanner/scan_audit.sh [--run-id ID | --latest] [--out PATH] [--dry-run]
 
 | Variable | Default | Description |
 |---|---|---|
-| `PACIOLI_STATE_STORAGE_ACCOUNT` | `iacsa` | Storage account. |
-| `PACIOLI_REPORTS_CONTAINER` | `iac-reports` | Container holding the archived reports. |
+| `PACIOLI_STATE_STORAGE_ACCOUNT` | (empty) | Storage account. **Required** — the scanner refuses to run if unset. |
+| `PACIOLI_REPORTS_CONTAINER` | (empty) | Container holding the archived reports (typically `pacioli-reports`). **Required** — refused if unset. |
 
 ## `scan_baseline_init.sh`
 

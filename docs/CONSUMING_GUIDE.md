@@ -30,7 +30,11 @@ scanning your Terraform code with Pacioli.
 2. **Python 3.12+**.
 3. **`jq`** (used by `scan.sh` for JSON queries).
 4. **Azure CLI** (`az`) — only for tier 2 and tier 3 scans (where
-   `terraform plan` or `.tfstate` download is required).
+   `terraform plan` or `.tfstate` download is required). The
+   scanner also requires the consumer to set
+   `PACIOLI_STATE_STORAGE_ACCOUNT` and (for audit mode)
+   `PACIOLI_REPORTS_CONTAINER` in the environment; there are no
+   tenant-agnostic defaults.
 5. **A copy of Pacioli** — either:
    - As a sibling directory: `git clone https://github.com/ORG/pacioli.git ../pacioli`, or
    - As a git submodule: `git submodule add https://github.com/ORG/pacioli.git`, or
@@ -245,13 +249,13 @@ env under `.checkov/<run-id>/<project>/<env>/*.sarif`; your CI
 runner should upload these as build artifacts for the security team
 to ingest.
 
-## Step 9: set up the iac-reports archive (optional but recommended)
+## Step 9: set up the pacioli-reports archive (optional but recommended)
 
 For audit prep and historical record, set up a second Azure
-storage container called `iac-reports`. After each scan, the
+storage container called `pacioli-reports`. After each scan, the
 aggregator's output (`coverage_matrix.csv`, `combined.sarif`,
 `junit.xml`, `report.html`) should be uploaded to
-`iac-reports/<run-id>/` in that container.
+`pacioli-reports/<run-id>/` in that container.
 
 This is usually a separate pipeline step:
 
@@ -259,7 +263,7 @@ This is usually a separate pipeline step:
 # After scan.sh completes, upload aggregate
 az storage blob upload \
     --account-name "$PACIOLI_STATE_STORAGE_ACCOUNT" \
-    --container-name iac-reports \
+    --container-name pacioli-reports \
     --name "<run-id>/report.html" \
     --file ".checkov/<run-id>/aggregate/report.html"
 ```
@@ -267,6 +271,10 @@ az storage blob upload \
 With this archive in place, anyone with read access to the
 container can re-emit a prior report at any time using
 `scan_audit.sh --latest` or `scan_audit.sh --run-id <run-id>`.
+
+`scan_audit.sh` requires `PACIOLI_REPORTS_CONTAINER` to be set;
+the default in `lib/common.sh` is empty, so you must export it
+explicitly.
 
 ## Step 10: commit your config
 

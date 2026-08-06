@@ -90,7 +90,9 @@ Sourced by every driver script. Sets up:
   `lib/common.sh`).
 - `PACIOLI_MAPPING` (default: `mappings/pci_dss_4.0.1.yaml`).
 - `PCI_STATE_STORAGE_ACCOUNT` and `PCI_REPORTS_CONTAINER` (Azure
-  storage for tier 2/3 and the iac-reports archive).
+  storage for tier 2/3 and the `pacioli-reports` archive; both
+  required — the scanner refuses tier 2/3 and audit-mode runs
+  when either is unset).
 - `pci_log` (timestamped logging; respects `PCI_VERBOSE`, `PCI_DEBUG`).
 - `safe_run_exec` (gates external commands through the safety guard).
 - `whitelist_my_ip` / `cleanup_ip_whitelist` (paired Azure mutation +
@@ -183,8 +185,8 @@ After the driver finishes, the aggregator:
 
 ### Layer 4 — `scan_audit.sh` and `scan_baseline_init.sh` (post-scan tools)
 
-`scan_audit.sh` re-emits a prior report from the iac-reports archive
-(no re-scan). `scan_baseline_init.sh` reads a combined SARIF and
+`scan_audit.sh` re-emits a prior report from the `pacioli-reports`
+archive (no re-scan). `scan_baseline_init.sh` reads a combined SARIF and
 emits stub baseline entries with TBD for `owner`, `ticket_id`,
 `expires_on` so the team can triage top-N by `hit_count`.
 
@@ -295,7 +297,7 @@ filter UI syncs across all routes via `applyAll()` + `syncAllFilterUIs()`.
 | File | Purpose | Read this when… |
 |---|---|---|
 | `scanner/scan.sh` | Driver; orchestrates Checkov per env | Changing the per-env flow |
-| `scanner/scan_audit.sh` | Re-emit prior report from iac-reports archive | Adding a new audit tier |
+| `scanner/scan_audit.sh` | Re-emit prior report from the `pacioli-reports` archive | Adding a new audit tier |
 | `scanner/scan_baseline_init.sh` | Bulk-generate baseline stubs | Changing the baseline schema |
 | `scanner/aggregate.py` | SARIF → HTML/CSV/JUnit | Changing the report layout, adding a new aggregate output, fixing coverage math |
 | `scanner/rewrite_sarif_help.py` | Rewrite helpUri in SARIF on disk | Adding a new consumer of the URL override table |

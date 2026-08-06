@@ -86,15 +86,22 @@ PCI_CACHE_ROOT="${PCI_CACHE_ROOT:-${PACIOLI_TARGET_REPO}/.checkov}"
 # ---------------------------------------------------------------------------
 # Azure storage account for state-file archive + IP whitelist
 # ---------------------------------------------------------------------------
-# Override these for any Azure tenant. The defaults are placeholder values
-# (originally seeded from the project's first deployment). For any other
-# tenant, set:
-#   export PCI_STATE_STORAGE_ACCOUNT=mystorage
-#   export PCI_REPORTS_CONTAINER=iac-reports
-# before invoking the scanner.
+# These MUST be set by the consumer for any tier 2/3 scan or audit
+# download. We deliberately ship no default — the empty string forces
+# an early failure rather than writing to an unintended storage account
+# (or, worse, a storage account that some other project happens to own).
+#
+# Required env vars:
+#   PACIOLI_STATE_STORAGE_ACCOUNT    e.g. "mystorageaccount"
+#   PACIOLI_REPORTS_CONTAINER        e.g. "pacioli-reports"
+#
+# Set in your shell (or the wrapper Makefile) before invoking the
+# scanner:
+#   export PACIOLI_STATE_STORAGE_ACCOUNT=mystorageaccount
+#   export PACIOLI_REPORTS_CONTAINER=pacioli-reports
 # ---------------------------------------------------------------------------
-PCI_STATE_STORAGE_ACCOUNT="${PCI_STATE_STORAGE_ACCOUNT:-iacsa}"
-PCI_REPORTS_CONTAINER="${PCI_REPORTS_CONTAINER:-iac-reports}"
+PCI_STATE_STORAGE_ACCOUNT="${PACIOLI_STATE_STORAGE_ACCOUNT:-}"
+PCI_REPORTS_CONTAINER="${PCI_REPORTS_CONTAINER:-}"
 
 # ---------------------------------------------------------------------------
 # Run ID

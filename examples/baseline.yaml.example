@@ -10,14 +10,14 @@
 # - justification:        human-readable why this is accepted risk
 # - compensating_control: reference to other control (e.g., "WAF rule abc123")
 # - owner:                team or person accountable (string)
-# - ticket_id:            ticket ID authorizing the suppression (e.g. "TICKET-123")
-# - approved_by:          approver name (e.g., "Approver Name")
+# - ticket_id:            ticket ID authorizing the suppression
+# - approved_by:          approver name
 # - approved_on:          ISO date — when this was approved
 # - expires_on:           ISO date — after this, the suppression is invalid
 #                         and the aggregator will re-surface the finding
 #
 # ENFORCEMENT:
-#   aggregator suppresses ONLY if expires_on >= today AND owner != TBD.
+#   aggregator suppresses ONLY if expires_on >= today AND owner is set.
 #   Otherwise, the finding is emitted as ACTIVE.
 #
 # AUDIT TRAIL:
@@ -26,33 +26,33 @@
 #
 # INITIAL POPULATION:
 #   This file is intentionally empty. After the first scan, run:
-#     make scan-baseline-init RUN_DIR=.checkov/<run_id>/
+#     make -f Makefile.pacioli scan-baseline-init RUN_DIR=.checkov/<run_id>/
 #   which generates stub entries for every finding. Triage top-50 by
 #   count * severity_weight; populate the schema fields. Remaining
 #   entries stay as TBD and surface in the report as "requires triage".
 #
 # NOTE on the example entries below:
-#   - All values are obvious placeholders (REPLACE_ME, TICKET-123, etc).
-#     Replace them with your real ticket system + team contacts before use.
+#   - All values are placeholders wrapped in angle brackets (<...>).
+#     Replace them with your real ticket IDs + team contacts before use.
 #   - There are intentionally no real names, real emails, or real
 #     ticket IDs in this file. Anyone copy-pasting these values into
 #     production will notice and fix them.
 
 - check_id: CKV_AZURE_59
-  resource_pattern: "azurerm_storage_account.EXAMPLE_NAME"
-  justification: "REPLACE_ME: explain why this resource is accepted risk"
-  compensating_control: "REPLACE_ME: reference to the compensating control"
-  owner: "TEAM_EMAIL (e.g., security-team@example.org)"
-  ticket_id: "TICKET-123"
-  approved_by: "Approver Name"
-  approved_on: "2026-01-15"
-  expires_on: "2027-01-15"
+  resource_pattern: "azurerm_storage_account.<your-resource-name>"
+  justification: "<explain why this resource is accepted risk>"
+  compensating_control: "<reference to the compensating control>"
+  owner: "<team-or-person-email>"
+  ticket_id: "<ticket-id>"
+  approved_by: "<approver-name>"
+  approved_on: "<YYYY-MM-DD>"
+  expires_on: "<YYYY-MM-DD>"
 - check_id: CKV_AZURE_3
-  resource_pattern: "azurerm_storage_account.EXAMPLE_NAME"
-  justification: "REPLACE_ME: legacy resource pending migration"
-  compensating_control: "REPLACE_ME: WAF rule or other mitigation"
-  owner: "TEAM_EMAIL (e.g., security-team@example.org)"
-  ticket_id: "TICKET-456"
-  approved_by: "Approver Name"
-  approved_on: "2026-02-01"
-  expires_on: "2027-02-01"
+  resource_pattern: "azurerm_storage_account.<your-resource-name>"
+  justification: "<legacy resource pending migration>"
+  compensating_control: "<WAF rule or other mitigation>"
+  owner: "<team-or-person-email>"
+  ticket_id: "<ticket-id>"
+  approved_by: "<approver-name>"
+  approved_on: "<YYYY-MM-DD>"
+  expires_on: "<YYYY-MM-DD>"

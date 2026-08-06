@@ -139,10 +139,10 @@ loader; the manual list lives at the top of
     this family and rely on the runtime controls listed
     under evidence_link.
   control_owner: Security team -- Vulnerability Management
-  approved_by: Approver Name                          # Optional
-  approved_on: '2026-08-01'
-  expires_on: '2027-08-01'
-  evidence_link: 'https://www.pcisecuritystandards.org/document_library/'
+  approved_by: <approver-name>                       # Optional
+  approved_on: '<YYYY-MM-DD>'
+  expires_on: '<YYYY-MM-DD>'
+  evidence_link: '<resolvable URL or ticket ID>'
 ```
 
 | Field | Required | Format | Description |

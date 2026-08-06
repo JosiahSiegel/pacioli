@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# scan_pci_audit.sh — Re-emit a prior PCI report from the iac-reports archive.
+# scan_audit.sh — Re-emit a prior Pacioli report from the pacioli-reports
+# archive.
 #
 # Workflow:
-#   1. Identify the run directory (--run-id) OR query the iac-reports
-#      container for the most recent run.
+#   1. Identify the run directory (--run-id) OR query the
+#      pacioli-reports container for the most recent run.
 #   2. Download the four aggregate files (coverage_matrix.csv,
 #      combined.sarif, junit.xml, report.html) from
-#      iacsa/iac-reports/<run_id>/.
+#      <PACIOLI_STATE_STORAGE_ACCOUNT>/<PACIOLI_REPORTS_CONTAINER>/<run_id>/.
 #   3. Place them under .checkov/<run_id>/aggregate/ locally.
 #   4. If --out is given, copy report.html there.
 #
 # This is a READ-ONLY operation. No terraform, no Azure mutations.
 #
 # Usage:
-#   scan_pci_audit.sh --run-id <run_id> [--out <path>]
-#   scan_pci_audit.sh --latest
+#   scan_audit.sh --run-id <run_id> [--out <path>]
+#   scan_audit.sh --latest
 #
 # Args:
 #   --run-id   The run ID to fetch (e.g. 20260804T153407Z-2455).
-#   --latest   Fetch the most recent run_id from the iac-reports listing.
+#   --latest   Fetch the most recent run_id from the pacioli-reports
+#              listing.
 #   --out      Optional destination for report.html. Default: stdout path.
 #   --dry-run  Print actions without downloading.
+#
+# Required env:
+#   PACIOLI_STATE_STORAGE_ACCOUNT   Storage account holding the archive
+#   PACIOLI_REPORTS_CONTAINER       Container name (default suggestion:
+#                                  "pacioli-reports")
 
 set -uo pipefail
 
@@ -32,10 +39,12 @@ RUN_ID=""
 LATEST=0
 OUT_PATH=""
 DRY_RUN=0
-# Storage account + container for the iac-reports archive. Override
-# with PCI_STATE_STORAGE_ACCOUNT and PCI_REPORTS_CONTAINER env vars.
-STORAGE_ACCOUNT="${PCI_STATE_STORAGE_ACCOUNT:-iacsa}"
-CONTAINER_NAME="${PCI_REPORTS_CONTAINER:-iac-reports}"
+# Storage account + container for the pacioli-reports archive. Both
+# must be set by the consumer (lib/common.sh defaults to empty strings
+# to force an early failure rather than writing to an unintended
+# storage account).
+STORAGE_ACCOUNT="${PACIOLI_STATE_STORAGE_ACCOUNT:-}"
+CONTAINER_NAME="${PACIOLI_REPORTS_CONTAINER:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     --help|-h) cat <<EOF
 Usage: $0 [--run-id <id> | --latest] [--out <path>] [--dry-run]
 
-Re-emits a prior PCI report from the iac-reports archive. No re-scan.
+Re-emits a prior Pacioli report from the pacioli-reports archive. No re-scan.
 EOF
       exit 0 ;;
     *) pci_log ERROR "unknown argument: $1"; exit 64 ;;
@@ -55,6 +64,20 @@ done
 
 if [[ -z "$RUN_ID" && $LATEST -eq 0 ]]; then
   LATEST=1
+fi
+
+# Validate required env vars before any Azure call. We require the
+# consumer to explicitly set PACIOLI_STATE_STORAGE_ACCOUNT and
+# PACIOLI_REPORTS_CONTAINER (lib/common.sh defaults to empty strings
+# to force this check). Run in both dry-run and real modes so a
+# dry-run doesn't print empty container names.
+if [[ -z "$STORAGE_ACCOUNT" ]]; then
+  pci_log ERROR "PACIOLI_STATE_STORAGE_ACCOUNT is not set. Export it (e.g. PACIOLI_STATE_STORAGE_ACCOUNT=mystorageaccount) before running scan_audit.sh."
+  exit 2
+fi
+if [[ -z "$CONTAINER_NAME" ]]; then
+  pci_log ERROR "PACIOLI_REPORTS_CONTAINER is not set. Export it (e.g. PACIOLI_REPORTS_CONTAINER=pacioli-reports) before running scan_audit.sh."
+  exit 2
 fi
 
 # Discover the run id.
