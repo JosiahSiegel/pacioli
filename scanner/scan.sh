@@ -258,7 +258,7 @@ checkov_stderr_filter() {
 # Audit mode: re-emit from archive (no re-scan).
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "audit" ]]; then
-  pci_log ERROR "audit mode not implemented yet (Phase 8)"
+  pci_log ERROR "audit mode not implemented yet"
   exit 1
 fi
 

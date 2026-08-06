@@ -1,7 +1,7 @@
 # lib/safety.sh — Hard refusals for any operation that mutates Azure.
 #
 # This file is sourced by scan.sh and aggregate.py. It enforces the
-# Phase 2 safety invariants: the scanner is READ-ONLY against Azure. The ONLY
+# Safety invariants: the scanner is READ-ONLY against Azure. The ONLY
 # Azure mutations permitted are the storage firewall IP whitelist additions
 # done by tf_init.sh, and they MUST be paired with cleanup in a trap.
 #

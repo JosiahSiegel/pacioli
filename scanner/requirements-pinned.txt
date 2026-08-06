@@ -1,18 +1,19 @@
-# Pinned dependencies for the PCI Checkov scanner.
+# Pinned dependencies for the Pacioli Checkov scanner.
 #
-# Purpose (defect P2-02): the audit-grade-quarterly-review cadence
-# relies on deterministic Checkov rule output. Without a pin, a
-# fresh runner may pull a newer Checkov that renumbers or removes
-# rules, silently invalidating pci_mapping.yaml mappings
-# (e.g., CKV_AZURE_211 mapped to "PCI 10.7 audit log retention" is
-# only correct on Checkov 3.3.x — see bg_508b61a8 audit trail).
+# Why an exact pin: the audit-grade quarterly-review cadence
+# (see docs/OPERATOR_GUIDE.md -> "Quarterly review") relies on
+# deterministic Checkov rule output. Without a pin, a fresh runner
+# may pull a newer Checkov that renumbers or removes rules,
+# silently invalidating pci_mapping.yaml mappings (e.g.,
+# CKV_AZURE_211 mapped to "PCI 10.7 audit log retention" is only
+# correct on Checkov 3.3.x). The mapping file is the contract;
+# the Checkov version is the reference frame.
 #
 # This file is the regeneration seed, NOT the install source.
 # Install with: pip install -r scanner/requirements-pinned.txt
-# Quarterly verification: compare `checkov --version` against the
-# pinned version; if Checkov upstream shipped a new release AND our
-# pci_mapping.yaml row counts diverge, schedule a PCI mapping
-# refresh PR with the CKV_AZURE_* IDs added/removed/deprecated.
+# Bumping policy: see docs/DEVELOPER_GUIDE.md -> "What to do when
+# Checkov upstream changes". A bump to e.g. 3.4.x requires a
+# pci_mapping.yaml refresh PR.
 
 checkov==3.3.9
 

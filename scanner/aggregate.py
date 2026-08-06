@@ -132,17 +132,18 @@ class EnvResult:
 #   - Network segmentation / private endpoint / NSG / public access = HIGH
 #   - Logging / monitoring / retention = MEDIUM
 #   - Tagging / naming / diagnostic destination = LOW
-#   - Anything not in the table = MEDIUM (default; review in Phase 6)
+#   - Anything not in the table = MEDIUM (default; review and add an entry)
 #
 # Re-evaluate per PCI scope. To extend: add a check_id to SEVERITY_OVERRIDE
 # below; commit as a PR titled "PCI severity: add <check_id>".
 #
-# PCI REQ ANCHORING (v4.0.1, cross-validated Aug 4 2026):
-#   Severity values unchanged across this commit (HIGH/MEDIUM/LOW).
-#   ONLY per-key comments were corrected. Each comment now matches
-#   the verbatim rule description from `checkov -l` in pinned
-#   Checkov 3.3.9 (live probe bg_508b61a8) and the PCI req anchor
-#   in pci_mapping.yaml. Defect P0-10.
+# PCI REQ ANCHORING (v4.0.1, cross-validated against pinned
+# Checkov 3.3.9 on 2026-08-04): Each entry's severity and PCI req
+# anchor matches the verbatim rule description from
+# `checkov --list` against the pinned Checkov version AND the
+# requirement text in pci_mapping.yaml. To re-validate after a
+# Checkov bump: see docs/DEVELOPER_GUIDE.md -> "What to do when
+# Checkov upstream changes".
 #
 # Re-anchored PCI req families per pci_mapping.yaml:
 #   1.2.1 / 1.3 (network, CDE access)
@@ -208,7 +209,7 @@ SEVERITY_OVERRIDE: dict[str, str] = {
 DEFAULT_SEVERITY = "MEDIUM"
 
 # ---------------------------------------------------------------------------
-# PCI_NOTE_TOKENS allow-list (commit 30, Batch C1)
+# PCI_NOTE_TOKENS allow-list (see PCI_NOTE_TOKENS docstring)
 # ---------------------------------------------------------------------------
 # Some PCI reqs in pci_mapping.yaml have no working Checkov 3.3.9 coverage.
 # Rather than map a Checkov rule that does not actually evaluate the control
@@ -246,11 +247,11 @@ PCI_NOTE_TOKENS: set[str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Chain-of-custody ledger (Defect P1-05 + auditor Round-4 concession)
+# Chain-of-custody ledger
 # ---------------------------------------------------------------------------
-# The auditor requires every PCI req row in coverage_matrix.csv to carry
-# an explicit `chain_of_custody_complete` cell. The cell value semantics
-# (Round-4 auditor concession):
+# Every PCI req row in coverage_matrix.csv carries an explicit
+# `chain_of_custody_complete` cell so an auditor can verify each
+# framework citation is live. The cell value semantics:
 #
 #   "True"   -> pci_source_url slot live-verified at write time:
 #              HEAD 2xx, fingerprint match, retrieval date documented.
@@ -261,23 +262,19 @@ PCI_NOTE_TOKENS: set[str] = {
 #   ""       -> out-of-scope row (no pci_source_url slot; the OOS row's
 #              evidence_link is a separate slot).
 #
-# Live-verified anchor (Aug 4 2026): the PCI SSC Summary-of-Changes
-# v3.2.1->v4.0 PDF returns HEAD 200, application/pdf, 477973 bytes.
-# Frozen Wayback mirror (full standard PDF): documented in
-# .omo/plans/audit-grade-link-ledger.md. Every in-scope PCI req shares
-# this single PCI SSC anchor; no per-req sub-anchor is required for
+# Live-verified anchor (verified 2026-08-04): the PCI SSC
+# Summary-of-Changes v3.2.1->v4.0 PDF returns HEAD 200,
+# application/pdf, 477973 bytes. The full standard PDF is mirrored
+# at the Wayback Machine URL stored in pci_mapping.yaml's
+# `doc_anchor_wayback_full_pdf`. Every in-scope PCI req shares this
+# single PCI SSC anchor; no per-req sub-anchor is required for
 # v4.0.1 because the document is a single PDF.
 #
-# Verified-by: lead-evidence probe (HEAD/GET against the live URL on
-# Aug 4 2026) + link-provenance-auditor pre-shipped verification.
-#
-# Truth table below MUST match the in-scope ids in pci_mapping.yaml. If
-# a new PCI req row is added to pci_mapping.yaml without extending this
-# dict, the operator will see an empty cell in coverage_matrix.csv and
-# the verification gate will fail. The Quarterly-review (commit 7)
-# prompt 7 includes a `checkov -l | grep CKV_AZURE_` diff step; the
-# equivalent PCI req add/remove diff belongs in the next quarterly
-# review too.
+# Truth table below MUST match the in-scope ids in pci_mapping.yaml.
+# If a new PCI req row is added to pci_mapping.yaml without extending
+# this dict, the operator will see an empty cell in
+# coverage_matrix.csv. See docs/OPERATOR_GUIDE.md -> "Quarterly
+# review" for the re-validation cadence.
 PCI_SOURCE_VERIFIED_AT = "2026-08-05"
 PCI_REQ_CHAIN_OF_CUSTODY: dict[str, str] = {
     # Req 1 (network segmentation) -- live anchor verified
@@ -316,23 +313,25 @@ PCI_REQ_CHAIN_OF_CUSTODY: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Audit-traceability ledger (Defect P3.1.5 -- coverage_gaps.csv audit row)
+# Audit-traceability ledger
 # ---------------------------------------------------------------------------
-# The coverage gaps report must let a compliance auditor REPRODUCE the
-# "no findings" verdict for each missing check_id. The librarian probe
-# (HEAD/GET against the PCI SSC anchor) ran at the same instant as the
-# chain-of-custody probe, with the following observation captured.
+# The coverage_gaps.csv report must let a compliance auditor
+# REPRODUCE the "no findings" verdict for each missing check_id.
+# The probe below was a HEAD/GET against the PCI SSC anchor; the
+# captured observation is:
 #
 #   fingerprint            : 477973-byte body, application/pdf
 #   url                    : PCI SSC v3.2.1->v4.0 Summary-of-Changes PDF
-#   wayback mirror         : captured in .omo/plans/audit-grade-link-ledger.md
+#   wayback mirror         : pci_mapping.yaml `doc_anchor_wayback_full_pdf`
 #   retry-policy           : HEAD -> GET on redirect; --max-time 30s; pause
 #                            1.5s between probes; max 2 retries on 5xx
-#   past-90d-availability  : >= 99% (single incident on 2025-03-04, see ledger)
+#   past-90d-availability  : >= 99% (one operator-reported incident on
+#                            2025-03-04; document in your team's
+#                            incident log)
 #
-# These constants are emitted on EVERY coverage_gaps row so that the CSV
-# is self-describing even when the operator has no access to the run
-# directory's intermediate files.
+# These constants are emitted on EVERY coverage_gaps row so that the
+# CSV is self-describing even when the operator has no access to the
+# run directory's intermediate files.
 # ---------------------------------------------------------------------------
 LIBRARIAN_VERIFIED_AT = "2026-08-05"
 LIBRARIAN_VERIFIED_FINGERPRINT = {
@@ -341,9 +340,8 @@ LIBRARIAN_VERIFIED_FINGERPRINT = {
     "content_type": "application/pdf",
     "http_status": 200,
     "fingerprint_match": True,
-    # Past-90d availability comes from the link-provenance-auditor
-    # team's monitoring probe (see .omo/plans/audit-grade-link-ledger.md
-    # "availability" subsection).
+    # Past-90d availability estimate. Replace with your team's
+    # monitoring data when you re-verify.
     "past_90d_availability_pct": 99.0,
 }
 
@@ -362,9 +360,9 @@ def parse_sarif(sarif_path: Path, project: str, env: str, framework: str) -> lis
     `ruleIndex` join resolves each result against the exact rule
     entry the SARIF producer attached.
 
-    Defect P1-05 fixes the ruleIndex map; this commit is the
-    refactor only. Render to the report HTML/CSV is added in
-    commit 12 (azure_doc_url).
+    The rendered per-finding `helpUri` is propagated to
+    combined.sarif via `write_combined_sarif` (see also the
+    SARIF rewriter at scanner/rewrite_sarif_help.py).
     """
     findings = []
     try:
@@ -509,7 +507,7 @@ def load_pci_baseline(path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Canonical remediation loader (Phase 3 -- task 18)
+# Canonical remediation loader
 # ---------------------------------------------------------------------------
 # terraform_remediation.yaml is the auditor-facing reference of canonical
 # azurerm 4.x HCL fixes for every fired Checkov rule. We ingest it once
@@ -861,7 +859,7 @@ def build_coverage_matrix(
     # independent of whether they fired. Used for coverage gaps.
     # Note tokens (CKV_AZURE_PCI_NOTE_*) are NOT included here: they are
     # symbolic placeholders that the mapping author uses to flag a req
-    # with no working Checkov 3.3.9 coverage (commit 30, Batch C1). They
+    # with no working Checkov 3.3.9 coverage (see PCI_NOTE_TOKENS docstring). They
     # are filtered out so `expected_count` and `missing_count` in
     # coverage_gaps.csv stay zero for note-only reqs, which is the
     # documented semantics in the plan.
@@ -975,7 +973,7 @@ def compute_coverage_gaps(
     or non-covered. The data here is a starting point for the
     investigation, not a verdict.
 
-    PCI_NOTE_TOKENS integration (commit 30, Batch C1): a req whose
+    PCI_NOTE_TOKENS integration (see PCI_NOTE_TOKENS docstring): a req whose
     `checks:` list contains a note token is filtered out of
     `expected_by_req` upstream (see build_coverage_matrix), so the
     record's `expected_count`, `fired_count`, and `missing_count` are
@@ -997,7 +995,7 @@ def compute_coverage_gaps(
             "missing_check_ids": sorted(missing),
         }
         if note_by_req and rid in note_by_req:
-            # Note-token req (commit 30, Batch C1): expected/fired/missing
+            # Note-token req (see PCI_NOTE_TOKENS docstring): expected/fired/missing
             # are all zero by construction (tokens were filtered out of
             # `expected_by_req` in build_coverage_matrix). Carry the
             # `note:` text in the record so write_coverage_gaps_csv can
@@ -1041,8 +1039,7 @@ def write_coverage_gaps_csv(
     Audit-traceability columns (librarian_verified_at, pci_anchor_url,
     evidence_byte_size, evidence_content_type, link_pass) are emitted
     on EVERY row so the CSV is a self-contained reproducibility record.
-    Defect anchor: P3.1.5. Truth ledger:
-    .omo/plans/audit-grade-link-ledger.md.
+    See PCI_REQ_CHAIN_OF_CUSTODY + LIBRARIAN_VERIFIED_FINGERPRINT above.
     """
     title_by_req = {
         r["id"]: r.get("title", "")
@@ -1071,7 +1068,7 @@ def write_coverage_gaps_csv(
             fired = r["fired_count"]
             expected = r["expected_count"]
             missing = r["missing_count"]
-            # Note-token req (commit 30, Batch C1): the caller passed
+            # Note-token req (see PCI_NOTE_TOKENS docstring): the caller passed
             # a precomputed `triage_hint` carrying the pci_mapping.yaml
             # `note:` text. Use it verbatim so the auditor sees the
             # rationale instead of a generic "complete" / "1 check
@@ -1361,13 +1358,13 @@ def write_combined_sarif(
                     r["properties"]["pci_env"] = er.env
                     r["properties"]["pci_source_sarif"] = Path(sarif_path).name
                     # Inject result-level helpUri for SIEM / GitHub
-                    # code-scanning dashboards. Defect P1-05 second
+                    # code-scanning dashboards.
                     # half: without this, the SARIF 2.1.0 result-level
                     # helpUri is omitted from the combined output even
                     # though the rules array carries helpUri. SIEM
                     # dashboards that don't walk the rules array see
                     # no link at all. Resolve via the same ruleIndex
-                    # integer join as parse_sarif (commit 11); fall
+                    # integer join as parse_sarif (see parse_sarif); fall
                     # back to ruleId for SARIF v2.0.x tools.
                     rules_list = (
                         r.get("tool", {}).get("driver", {}).get("rules", [])
@@ -1630,7 +1627,7 @@ def write_html_report(
     Stale exclusions (expires_on < today) get a STALE badge so the
     auditor can immediately see which need re-approval.
 
-    The optional `remediation_by_check_id` map (Phase 3, task 18) adds
+    The optional `remediation_by_check_id` map adds
     the canonical azurerm 4.x fix block inline below the chain-of-custody
     badge for every finding. When empty (YAML missing), the report still
     renders cleanly -- the per-finding remediation block is skipped.
@@ -1639,7 +1636,7 @@ def write_html_report(
     if not supplied. Falls back to ("PCI DSS", "4.0.1") for backward
     compatibility with the original PCI-only deployment.
 
-    The optional `drift_findings` list (Phase 3 follow-up -- tasks 14-16)
+    The optional `drift_findings` list (tier 3 only)
     is rendered as a Drift Findings table before "Findings by Environment".
     Pass [] (or None) for tier 1/2 runs to silently skip the section.
     """
@@ -1648,7 +1645,7 @@ def write_html_report(
     if drift_findings is None:
         drift_findings = []
     failed_envs = [er for er in env_results if er.scan_status != "ok"]
-    # Per-req URL lookups (commit 16 -- PCI source URL slot).
+    # Per-req URL lookups .
     # PCI v4.0.1 has a single shared PCI SSC anchor across all in-scope
     # requirements (the v3.2.1->v4.0 Summary-of-Changes PDF returning
     # HEAD 200/application/pdf/477973 bytes on 2026-08-04). The URL is
@@ -1656,7 +1653,7 @@ def write_html_report(
     # there is no per-requirement pci_source_url field. We populate
     # pci_source_url_by_req with that anchor for every req id so the
     # per-finding renderer can resolve the right URL in O(1).
-    # The chain-of-custody lookup (commit 17's render relies on this
+    # The chain-of-custody lookup (the render relies on this
     # too) is read-only here so both renders share one dict build.
     pci_anchor = str(pci_data.get("doc_anchor", "") or "")
     pci_source_url_by_req: dict[str, str] = {}
@@ -2244,7 +2241,7 @@ def write_html_report(
         # Coverage-gap data: which mapped check_ids never fired.
         missing_ids = (missing_per_req or {}).get(rid, [])
         missing_count = len(missing_ids)
-        # PCI_NOTE_TOKENS (commit 30, Batch C1) are filtered from
+        # PCI_NOTE_TOKENS (see PCI_NOTE_TOKENS docstring) are filtered from
         # expected_by_req in build_coverage_matrix so the gap record's
         # expected_count is 0; mirror that here so the HTML tooltip
         # and tip pick the right branch.
@@ -2267,7 +2264,7 @@ def write_html_report(
                 #   SARIF omits passes). Operator triages via the
                 #   tooltip + coverage_gaps.csv.
                 # - missing == 0 but expected == 0: PCI_NOTE_TOKENS
-                #   req (commit 30, Batch C1). The mapping author
+                #   req (see PCI_NOTE_TOKENS docstring). The mapping author
                 #   declared a symbolic note token + `note:` text to
                 #   flag a req with no working Checkov 3.3.9 coverage.
                 #   Show the note inline + as the tooltip so the
@@ -2429,7 +2426,7 @@ def write_html_report(
         )
 
     body += "</table>\n</section>  <!-- /route-oos -->\n"
-    # Phase 3 (pr330 follow-up -- tasks 14-16): Drift Findings section.
+    # Drift Findings section.
     # Tier 3 only. Reads drift_report.json files emitted by drift_report.py
     # under each <run-dir>/<project>/<env>/drift_report.json. Tier 1/2
     # runs don't produce drift_report.json; _render_drift_section returns
@@ -2441,7 +2438,7 @@ def write_html_report(
     body += f"<div class=\"meta\">Tier 3 only · {len(drift_findings)} drift item{'' if len(drift_findings)==1 else 's'}</div></div>\n"
     body += _render_drift_section(drift_findings)
     body += "</section>  <!-- /route-drift -->\n"
-    # Phase 2 (pr330 follow-up): client-side filter UI block. Renders
+    # Client-side filter UI block. Renders
     # BEFORE the first finding row so the search box + severity buttons
     # + PCI-req dropdown + fix-only toggle + live count badge are
     # immediately adjacent to the finding list. The JS that wires the
@@ -2490,7 +2487,7 @@ def write_html_report(
                 f.pci_requirements[0] if f.pci_requirements else ""
             )
             pci_src_url = pci_source_url_by_req.get(primary_req, "")
-            # Phase 2 (pr330 follow-up): wrap each finding in an outer
+            # Wrap each finding in an outer
             # `.finding-row` div carrying the data-attributes the JS
             # filter needs. The inner `.finding-body` keeps the original
             # `.finding.<SEVERITY>` styling so the CSS (border-left,
@@ -2559,7 +2556,7 @@ def write_html_report(
                 )
             if links:
                 body += "<div>" + " | ".join(links) + "</div>"
-            # Chain-of-custody badge (commit 17, P1-05). Render only
+            # Chain-of-custody badge. Render only
             # for findings with a PCI mapping. The cell value
             # "True" means the pci_source_url was live-verified at
             # PCI_SOURCE_VERIFIED_AT; "partial" means historical
@@ -2582,7 +2579,7 @@ def write_html_report(
                     f'availability={LIBRARIAN_VERIFIED_FINGERPRINT["past_90d_availability_pct"]:.0f}%/90d).'
                     f'</div>'
                 )
-            # Inline remediation block (Phase 3, task 19). Renders the
+            # Inline remediation block. Renders the
             # canonical azurerm 4.x fix HCL + verification step pulled
             # from terraform_remediation.yaml. Skip the block entirely
             # when (a) no canonical remediation exists for this check_id,
@@ -2623,7 +2620,7 @@ def write_html_report(
             body += "</div></div>\n"
     body += "</section>  <!-- /route-findings -->\n"
 
-    # Phase 2 (pr330 follow-up): client-side filter logic. Vanilla JS,
+    # Client-side filter logic. Vanilla JS,
     # no dependencies. Reads data-attributes from each `.finding-row`,
     # applies search/severity/PCI-req/fix-only filters, hides non-matching
     # rows, and updates the live count badge. Held as a plain string
@@ -3192,7 +3189,7 @@ def write_html_report(
 
 
 # ---------------------------------------------------------------------------
-# Developer-facing fix list (Phase 3 -- task 20)
+# Developer-facing fix list (--emit-fix-list)
 # ---------------------------------------------------------------------------
 # Emits <run-dir>/fix_list.md: a markdown file with one section per
 # finding, sorted HIGH -> MEDIUM -> LOW, containing the canonical
@@ -3411,7 +3408,7 @@ def load_findings(results: list[EnvResultFull]) -> None:
     results_terraform_source.sarif). Those findings account for the
     vast majority of what a tier 1 (source-only) operator scan
     produces, so dropping them made the coverage matrix under-report
-    by 90%+. See PR #330 commit that adds the four new fields.
+    by 90%+. See docs/MAPPING_SCHEMA.md for the field schema.
     """
     for r in results:
         if r.scan_status != "ok":
@@ -3507,7 +3504,7 @@ def main() -> int:
     pci_data = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
     baseline = load_pci_baseline(baseline_path)
 
-    # Task 18 (Phase 3): load canonical remediation HCL map once at startup.
+    # Load canonical remediation HCL map once at startup.
     # Used by the per-finding HTML render and by write_fix_list_md().
     # Returns {} on missing/malformed YAML (degraded mode -- see loader).
     remediation_by_check_id = load_remediation_map()
@@ -3586,7 +3583,7 @@ def main() -> int:
     # Compute coverage gaps so the operator can tell "no relevant
     # resources" from "we didn't evaluate this at all" for any req
     # whose status ends up as not_applicable or "No matching resources in scope".
-    # Thread `note_by_req` so PCI_NOTE_TOKENS reqs (commit 30, Batch C1)
+    # Thread `note_by_req` so PCI_NOTE_TOKENS reqs (see PCI_NOTE_TOKENS docstring)
     # carry the pci_mapping.yaml `note:` text as their triage_hint.
     note_by_req: dict[str, str] = {
         r["id"]: r["note"]
@@ -3617,8 +3614,7 @@ def main() -> int:
     missing_per_req = {
         g["req_id"]: g["missing_check_ids"] for g in gap_records
     }
-    # Phase 3 (pr330 follow-up -- tasks 14-16): collect per-env drift
-    # reports (tier 3 only). Tier 1/2 envs have no drift_report.json;
+    # Collect per-env drift reports (tier 3 only). Tier 1/2 envs have no drift_report.json;
     # _collect_drift_findings walks each env's plan_dir and silently
     # skips missing files. Returns [] for tier 1/2 runs so the
     # write_html_report renders no Drift Findings section.
@@ -3642,7 +3638,7 @@ def main() -> int:
         drift_findings,
     )
 
-    # Task 28 (Phase 3): emit the developer-facing fix_list.md on
+    # Emit the developer-facing fix_list.md on
     # --emit-fix-list. Additive -- does NOT replace report.html. Written
     # to the run-dir ROOT (not the aggregate subdir) so the Makefile
     # target can locate it via `$(RUN_DIR)/fix_list.md` without knowing

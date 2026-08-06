@@ -85,7 +85,7 @@ requirements:
   - CKV_AZURE_137
   out_of_scope: false
   approach: defined
-  note: CKV_AZURE_PCI_001 (lifecycle_ignore_changes on security-sensitive attrs) is anchored here as drift-management evidence; docstring citation 11.3.4 is corrected in commit 6 to 6.5.5/2.2.6.
+  note: CKV_AZURE_PCI_001 (lifecycle.ignore_changes on security-sensitive attrs) anchored here as drift-management evidence. The verbatim PCI SSC v4.0.1 controlling requirement is 6.5.5 (changes to system components are managed), with 2.2.6 (system security parameters) as a related control.
 - id: '3.4'
   title: Access to displays of full PAN and the ability to copy PAN is restricted
   checks:
@@ -215,13 +215,13 @@ requirements:
   - CKV2_AZURE_38
   out_of_scope: false
   approach: defined
-  note: PCI 10.7 (audit log retention 12 months) has no working Checkov 3.3.9 coverage; CKV_AZURE_211 is App Service plan production-use, not retention. Custom PaaC check scoped for follow-up PR.
+  note: PCI 10.7 (audit log retention 12 months) has no working Checkov 3.3.9 coverage; CKV_AZURE_211 is App Service plan production-use, not retention. Tracked as a note token (CKV_AZURE_PCI_NOTE_10_7).
 - id: 11.6.1
   title: Change- and tamper-detection mechanism for payment-page HTTP headers and content
   checks: []
   out_of_scope: false
   approach: defined
-  note: 'IaC coverage is indirect: WAF policy (azurerm_application_gateway) and App Service site_config. Custom PaaC check is scoped for the follow-up PR (commit 4 expands).'
+  note: 'IaC coverage is indirect: WAF policy (azurerm_application_gateway) and App Service site_config. Tracked as a note token (CKV_AZURE_PCI_NOTE_11_4_5).'
 - id: 1.3.1
   title: Inbound traffic to the CDE is restricted
   checks:
@@ -286,7 +286,7 @@ requirements:
   - CKV_AZURE_110
   out_of_scope: false
   approach: defined
-  note: CKV_AZURE_PCI_005 (kv_purge_protection) anchored here; the docstring cite '3.6/8.6' is corrected in commit 6 to 3.6.5/8.6.3.
+  note: CKV_AZURE_PCI_005 (Key Vault purge protection) anchored here. The verbatim PCI SSC v4.0.1 controlling sub-requirements are 3.6.5 (procedures for the secure destruction of cryptographic keys) and 8.6.3 (least-privilege for application and system accounts).
 - id: 11.4.5
   title: Failures of (and unauthorized changes to) critical security control systems (including audit log files) are detected and responded to
   checks:
@@ -354,17 +354,17 @@ out_of_scope_requirements:
 - id: 11.x (excluding 11.6.1)
   title: Test security of systems and networks regularly
   rationale: 'PCI 11.x covers runtime vulnerability scanning (internal/external scans 11.2, ASV, penetration testing 11.3, IDS 11.4/11.5). IaC scanners cannot evaluate running-system posture, so we exclude
-    this family and rely on the runtime controls listed under evidence_link. Defect: P0-09 -- 11.6.1 (change- and tamper-detection mechanism for payment-page HTTP headers and content) was previously in
-    this family but became MANDATORY on 31 March 2025 and is now re-anchored as an in-scope IaC row above.'
+    this family and rely on the runtime controls listed under evidence_link. Note: 11.6.1 (change- and tamper-detection mechanism for payment-page HTTP headers and content) became MANDATORY on 31 March 2025
+    and is re-anchored as an in-scope IaC row above.'
   control_owner: Security team -- Vulnerability Management
   approved_on: '2026-08-01'
   expires_on: '2027-08-01'
   evidence_link: https://www.pcisecuritystandards.org/document_library/
 - id: 6.2.4
   title: Software-engineering techniques for secure development
-  rationale: 'Defect: P0-11. PCI SSC 6.2.4 enumerates software-engineering techniques (threat modeling, code review, secure coding standards) for in-house custom software. These are PROCESS controls exercised
-    by the development team''s SDLC, not artifacts of any Terraform module. IaC scanning cannot validate them. The CKV_AZURE_* rules previously incorrectly anchored here (web app client cert / TLS / FTPS)
-    are re-anchored under the new in-scope 6.4.2 (TLS minimum version for public-facing apps) and 6.4.3 (attack-prevention automation) rows added in commit 4.'
+  rationale: 'PCI SSC 6.2.4 enumerates software-engineering techniques (threat modeling, code review, secure coding standards) for in-house custom software. These are PROCESS controls exercised
+    by the development team''s SDLC, not artifacts of any Terraform module. IaC scanning cannot validate them. The v4.0.1 re-anchoring moved the related CKV_AZURE_* rules (web app client cert / TLS / FTPS)
+    into the in-scope 6.4.2 (TLS minimum version for public-facing apps) and 6.4.3 (attack-prevention automation) rows above.'
   control_owner: Engineering -- Application Security team + Security Engineering (joint)
   approved_on: '2026-08-01'
   expires_on: '2027-08-01'

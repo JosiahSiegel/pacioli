@@ -1,13 +1,12 @@
 """Test schema + coverage for terraform_remediation.yaml.
 
-Per the original plan (PR #330, Batch D):
-the YAML must have >= 68 entries, every block must have all 5 required
+The YAML must have >= 68 entries, every block must have all 5 required
 fields, and the CKV_AZURE_PCI_* / CKV_SECRET_* / CKV_TF_1 intentional
 absences must be enforced.
 
-This is a pytest wrapper around the original script-style test. It uses
-stdlib + pyyaml only (no hcl2 dependency). The hcl2 gate is optional
-and skipped if hcl2 is not installed.
+This is a pytest wrapper. It uses stdlib + pyyaml only (no hcl2
+dependency). The hcl2 gate is optional and skipped if hcl2 is not
+installed.
 """
 from __future__ import annotations
 
@@ -80,7 +79,7 @@ def test_yaml_has_remediations_key(remediation_data):
 
 
 def test_minimum_remediation_count(remediation_data):
-    """At least 68 entries per the plan (commit 33, plan F8)."""
+    """At least 68 entries (see docs/CHECK_AUTHORING.md for the rationale)."""
     rems = remediation_data.get("remediations", {})
     assert len(rems) >= 68, f"only {len(rems)} entries; minimum is 68"
 
