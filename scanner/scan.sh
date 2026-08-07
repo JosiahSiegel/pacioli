@@ -764,7 +764,13 @@ if [[ "$MODE" != "audit" && $NO_AGGREGATE -eq 0 ]]; then
       fi
     done
     if [[ -n "$REPORT_HTML" ]]; then
-      pci_log INFO "report: $REPORT_HTML"
+      # Always print the report path on stdout so consumers following the
+      # consumption guide can `open` it directly. This is the line the
+      # guide documents ("You should see output ending in: report:
+      # .checkov/.../aggregate/report.html"). Other INFO lines stay
+      # gated on PCI_VERBOSE; this one is the operator's primary signal
+      # that a fresh report is ready and where to find it.
+      echo "report: $REPORT_HTML"
     fi
     # Propagate aggregator's exit code to SCAN_RC.
     #

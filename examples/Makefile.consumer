@@ -25,7 +25,7 @@ export PACIOLI_STATE_STORAGE_ACCOUNT
 # Tell the scanner where to find this repo.
 export PACIOLI_TARGET_REPO := $(CURDIR)
 
-.PHONY: scan scan-plan scan-state scan-gate scan-baseline-init scan-cleanup scan-fix-list test help
+.PHONY: scan scan-plan scan-state scan-gate scan-audit scan-baseline-init scan-cleanup scan-fix-list test help
 
 help:
 	@echo "Pacioli scan targets:"
@@ -33,10 +33,12 @@ help:
 	@echo "  make scan-plan               - + terraform plan layer (needs Azure auth)"
 	@echo "  make scan-state              - + state blob download + drift diff"
 	@echo "  make scan-gate               - CI gate (exits non-zero on HIGH/CRITICAL)"
+	@echo "  make scan-audit              - Re-emit a prior report from the pacioli-reports archive"
 	@echo "  make scan-baseline-init      - Generate stub baseline entries from a run"
 	@echo "  make scan-fix-list           - Re-emit fix_list.md from a run"
 	@echo ""
 	@echo "Common args: PROJECT=<p> ENV=<e> RUN_DIR=.checkov/<run_id>"
+	@echo "Audit args:  RUN_ID=<run_id> OUT=<path>  (default: --latest, no out copy)"
 
 scan:
 	@bash $(PACIOLI_SCANNER)/scan.sh --mode report \
@@ -58,6 +60,11 @@ scan-gate:
 	@bash $(PACIOLI_SCANNER)/scan.sh --mode gate \
 		$(if $(PROJECT),--project $(PROJECT)) \
 		$(if $(ENV),--env $(ENV))
+
+scan-audit:
+	@bash $(PACIOLI_SCANNER)/scan_audit.sh \
+		$(if $(RUN_ID),--run-id $(RUN_ID),--latest) \
+		$(if $(OUT),--out $(OUT))
 
 scan-baseline-init:
 	@bash $(PACIOLI_SCANNER)/scan_baseline_init.sh \
