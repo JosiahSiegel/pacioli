@@ -174,6 +174,40 @@ trap_on_exit() {
 trap trap_on_exit EXIT INT TERM
 
 # ---------------------------------------------------------------------------
+# Scan exit code
+# ---------------------------------------------------------------------------
+# Initialize the cumulative exit code BEFORE the scan loop so checkov
+# invocations inside the loop can record their non-zero rc (in gate mode)
+# via accumulate_checkov_rc. In report mode, this stays 0 and the final
+# SCAN_RC is set from aggregate.py's rc (with rc=7 — "findings present",
+# which is the whole point of a report — suppressed per the comment near
+# the aggregation step).
+SCAN_RC=0
+
+# accumulate_checkov_rc <rc>
+#   Update SCAN_RC to the maximum of the current SCAN_RC and the new
+#   checkov exit code. Only meaningful in gate mode: report mode runs
+#   checkov with --soft-fail and any non-zero rc there is a tool error
+#   worth logging but not worth failing the run for (the report.html
+#   still gets emitted; the operator can read it).
+#
+#   In gate mode, checkov is invoked with --hard-fail-on HIGH,CRITICAL.
+#   That flag's behavior is currently a no-op for SARIF/JSON output (see
+#   the comment at the aggregation step below) but we keep it on for
+#   defense in depth: if a future checkov version preserves severity to
+#   the SARIF, the gate tightens for free. Either way, the real gate
+#   is aggregate.py's rc=7 ("HIGH/CRITICAL findings present"), which
+#   we propagate separately at the aggregation step.
+accumulate_checkov_rc() {
+  local new_rc="$1"
+  if [[ "$MODE" == "gate" && $new_rc -ne 0 ]]; then
+    if [[ $new_rc -gt $SCAN_RC ]]; then
+      SCAN_RC=$new_rc
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Dry-run helper
 # ---------------------------------------------------------------------------
 run_cmd() {
@@ -455,6 +489,7 @@ while IFS=$'\t' read -r proj env; do
       # Mirror run_cmd's refuse_if_mutating safety check before logging.
       pci_log WARN "checkov paac returned rc=$paac_rc for ${proj}/${env}"
     fi
+    accumulate_checkov_rc "$paac_rc"
     if [[ -f "${paac_dir}/results_sarif.sarif" ]]; then
       mv "${paac_dir}/results_sarif.sarif" "${env_run_dir}/results_paac.sarif"
       rmdir "$paac_dir" 2>/dev/null || true
@@ -488,6 +523,7 @@ while IFS=$'\t' read -r proj env; do
     if [[ $src_rc -ne 0 ]]; then
       pci_log WARN "checkov source returned rc=$src_rc for ${proj}/${env}"
     fi
+    accumulate_checkov_rc "$src_rc"
     if [[ -f "${terraform_src_dir}/results_sarif.sarif" ]]; then
       mv "${terraform_src_dir}/results_sarif.sarif" "${env_run_dir}/results_terraform_source.sarif"
       rmdir "$terraform_src_dir" 2>/dev/null || true
@@ -521,6 +557,7 @@ while IFS=$'\t' read -r proj env; do
     if [[ $plan_rc -ne 0 ]]; then
       pci_log WARN "checkov plan returned rc=$plan_rc for ${proj}/${env}"
     fi
+    accumulate_checkov_rc "$plan_rc"
     if [[ -f "${terraform_plan_dir}/results_sarif.sarif" ]]; then
       mv "${terraform_plan_dir}/results_sarif.sarif" "${env_run_dir}/results_terraform_plan.sarif"
       rmdir "$terraform_plan_dir" 2>/dev/null || true
@@ -552,6 +589,7 @@ while IFS=$'\t' read -r proj env; do
     if [[ $secrets_rc -ne 0 ]]; then
       pci_log WARN "checkov secrets returned rc=$secrets_rc for ${proj}/${env}"
     fi
+    accumulate_checkov_rc "$secrets_rc"
     if [[ -f "${secrets_dir}/results_sarif.sarif" ]]; then
       mv "${secrets_dir}/results_sarif.sarif" "${env_run_dir}/results_secrets.sarif"
       rmdir "$secrets_dir" 2>/dev/null || true
@@ -623,6 +661,7 @@ while IFS=$'\t' read -r proj env; do
         if [[ $state_rc -ne 0 ]]; then
           pci_log WARN "checkov state returned rc=$state_rc for ${proj}/${env}"
         fi
+        accumulate_checkov_rc "$state_rc"
         if [[ -f "${state_dir}/results_sarif.sarif" ]]; then
           mv "${state_dir}/results_sarif.sarif" "${env_run_dir}/results_state.sarif"
           rmdir "$state_dir" 2>/dev/null || true
@@ -658,20 +697,38 @@ while IFS=$'\t' read -r proj env; do
 done < "$SCOPE_PAIRS_FILE"
 
 # ---------------------------------------------------------------------------
-# Final aggregation (report mode only, unless --no-aggregate)
+# Final aggregation (gate + report mode, unless --no-aggregate)
 # ---------------------------------------------------------------------------
-# Gate mode: skip. CI ingests raw SARIF / junit artifacts directly via
-#   Pipeline.PublishBuildArtifact and does NOT need to spend cycles re-
-#   walking every per-env SARIF on each test run.
+# Why aggregation runs in BOTH gate and report mode (not just report):
+#   Gate mode is the CI gate target. The consumer's wrapper Makefile's
+#   `scan-gate` target documents that it "exits non-zero on HIGH/CRITICAL
+#   findings" (CONSUMING_GUIDE.md step 8, OPERATOR_GUIDE.md). For that
+#   exit code to be correct, we need a source of truth on what severity
+#   each finding is.
+#
+#   Checkov 3.3.9 does NOT preserve severity to its SARIF output (every
+#   finding is `level: "error"` in the SARIF, and the JSON output's
+#   `severity` field is None for every check). That means checkov's
+#   own --hard-fail-on HIGH,CRITICAL flag is effectively a no-op when
+#   the output format is SARIF/JSON — there's nothing for it to match
+#   severity against. We keep --hard-fail-on in the checkov invocation
+#   (line ~474 etc.) for documentation and defense-in-depth (if a future
+#   checkov version starts preserving severity, the gate tightens for
+#   free), but the REAL gate is aggregate.py.
+#
+#   aggregate.py reads every per-env SARIF, applies the SEVERITY_OVERRIDE
+#   table (cross-validated against pinned Checkov 3.3.9 — see comment
+#   near that table), and returns rc=7 if any HIGH/CRITICAL findings are
+#   present (or any per-env scan failed). Propagating that rc via SCAN_RC
+#   is what makes the gate actually gate.
+#
 # Audit mode: skip. scan_audit.sh handles aggregation against the
 #   pacioli-reports archive; this script's --mode audit branch is the wrong
 #   place for that work.
-# Report mode: aggregate.py walks every <env>/results_*.sarif and
-#   emits combined.sarif, coverage_matrix.csv, junit.xml, report.html.
-#   Without this step, operators would have to run a second command.
+# Report mode: same as gate — aggregate.py produces the coverage matrix
+#   + HTML report the operator reads.
 
-SCAN_RC=0
-if [[ "$MODE" == "report" && $NO_AGGREGATE -eq 0 ]]; then
+if [[ "$MODE" != "audit" && $NO_AGGREGATE -eq 0 ]]; then
   if [[ $DRY_RUN -eq 1 ]]; then
     pci_log INFO "aggregation (dry-run): python "${SCRIPT_DIR}/aggregate.py" --run-dir $RUN_DIR"
   else
@@ -680,7 +737,19 @@ if [[ "$MODE" == "report" && $NO_AGGREGATE -eq 0 ]]; then
       AGG_RC=0
     else
       AGG_RC=$?
-      pci_log ERROR "aggregate.py failed (rc=$AGG_RC); raw SARIFs are still in $RUN_DIR"
+      # aggregate.py uses rc=7 as gate semantics ("HIGH/CRITICAL findings
+      # present"). In report mode that's the whole point of the report —
+      # the report.html carries the findings and the operator reads it
+      # to triage. In gate mode the rc=7 is what we propagate to SCAN_RC
+      # so the wrapper exit code blocks the CI gate. Either way the
+      # aggregate itself worked correctly; log it as INFO so the
+      # operator doesn't panic. Other non-zero rcs (1, 2, 3, etc.)
+      # are real failures (missing files, schema errors) and stay ERROR.
+      if [[ $AGG_RC -eq 7 ]]; then
+        pci_log INFO "aggregate.py finished with rc=7 (HIGH/CRITICAL findings present); raw SARIFs are still in $RUN_DIR"
+      else
+        pci_log ERROR "aggregate.py failed (rc=$AGG_RC); raw SARIFs are still in $RUN_DIR"
+      fi
     fi
 
     # aggregate.py default --out is <run-dir>/aggregate (it preserves
@@ -697,14 +766,26 @@ if [[ "$MODE" == "report" && $NO_AGGREGATE -eq 0 ]]; then
     if [[ -n "$REPORT_HTML" ]]; then
       pci_log INFO "report: $REPORT_HTML"
     fi
-    # Don't mask the scan RC if it was already non-zero.
-    # NOTE: aggregator's rc=7 means "HIGH/CRITICAL findings present" (gate
-    # semantics). In report mode that's the WHOLE POINT of the report; the
-    # report.html carries the findings. Suppress rc=7 here so the manual
-    # scan target can be "never blocks" as documented in the Makefile and
-    # CLAUDE.md. The block-level gate target is `make scan-pci` (no -report).
-    if [[ $AGG_RC -ne 0 && $AGG_RC -ne 7 ]]; then
-      SCAN_RC=$AGG_RC
+    # Propagate aggregator's exit code to SCAN_RC.
+    #
+    # Gate mode: rc=7 means "HIGH/CRITICAL findings present" → propagate
+    #   so the wrapper exits non-zero and the consumer's CI gate target
+    #   (`make scan-pci` or `make -f Makefile.pacioli scan-gate`) blocks.
+    #   Any other non-zero rc (1, 2, etc.) is a real aggregation failure
+    #   (missing files, schema errors) — also propagate.
+    #
+    # Report mode: rc=7 means "HIGH/CRITICAL findings present" → that's
+    #   the WHOLE POINT of the report; the operator reads report.html
+    #   to triage. Suppress rc=7 so the manual `make scan-pci-report`
+    #   target "never blocks" as documented. Other non-zero rcs are real
+    #   failures and are propagated.
+    if [[ $AGG_RC -ne 0 ]]; then
+      if [[ "$MODE" == "report" && $AGG_RC -eq 7 ]]; then
+        # Suppressed — see above.
+        :
+      else
+        SCAN_RC=$AGG_RC
+      fi
     fi
   fi
 fi
