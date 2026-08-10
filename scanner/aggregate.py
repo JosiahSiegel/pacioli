@@ -42,6 +42,7 @@ import csv
 import html
 import os
 import re
+import importlib.resources
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -3505,7 +3506,40 @@ def main() -> int:
     print(f"baseline:{baseline_path}")
 
     if not mapping_path.exists():
-        print(f"ERROR: pci mapping not found: {mapping_path}", file=sys.stderr)
+        # Default-resolution fallback: when the user did NOT pass --mapping
+        # explicitly (i.e. args.mapping is still the bare default
+        # "pci_mapping.yaml" resolved relative to repo_root), fall back
+        # to the install-bundled mapping shipped via importlib.resources.
+        # Mirrors the precedence pattern in scanner/paths.py:resolve_mapping.
+        # Use Traversable.is_file() — works for both editable installs and
+        # wheel installs (Python 3.9+).
+        #
+        # CRITICAL: this fallback MUST only fire for the default. If the
+        # user passed --mapping <explicit-bad-path> and that file is
+        # missing, we must surface the error rather than silently swap in
+        # the install-bundled mapping (which would report against the
+        # wrong framework and mask the user error).
+        if args.mapping == "pci_mapping.yaml":
+            try:
+                bundled = importlib.resources.files("scanner").joinpath(
+                    "mappings/pci_dss_4.0.1.yaml"
+                )
+                if bundled.is_file():
+                    print(f"mapping: (install-bundled fallback) {bundled}")
+                    mapping_path = Path(str(bundled))
+            except (ModuleNotFoundError, AttributeError, OSError):
+                # Traversable lookup can fail in raw-tree execution where the
+                # scanner package isn't installed yet; surface the original
+                # mapping_path in the error below.
+                pass
+
+    if not mapping_path.exists():
+        print(
+            f"ERROR: pci mapping not found: {mapping_path}\n"
+            f"  Hint: pass --mapping <path-to-mapping.yaml> explicitly, or\n"
+            f"        run `pip install -e .` to bundle the default mapping.",
+            file=sys.stderr,
+        )
         return 2
 
     pci_mapping = load_pci_mapping(mapping_path)

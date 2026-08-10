@@ -460,3 +460,32 @@ def test_resolve_paths_target_repo_env_var_when_no_cli_flag(
 
     assert target.path == repo.resolve()
     assert target.exists is True
+
+
+# ---------------------------------------------------------------------------
+# install-bundled mapping shipped via importlib.resources
+# ---------------------------------------------------------------------------
+
+
+def test_install_bundled_mapping_is_shipped_via_importlib_resources() -> None:
+    """``importlib.resources.files("scanner").joinpath("mappings/pci_dss_4.0.1.yaml")``
+    must resolve to a real file from the installed ``scanner`` package.
+
+    This guards against future refactors that drop ``mappings/*.yaml``
+    from ``[tool.setuptools.package-data]`` in ``pyproject.toml`` —
+    without that entry, the wheel omits the mapping and the
+    aggregate's install-bundled fallback silently fails to find the
+    file at runtime. The aggregate tests in ``test_aggregate_pci.py``
+    will also fail, but this test gives a focused regression message
+    pointing at the exact configuration knob.
+    """
+    import importlib.resources
+
+    bundled = importlib.resources.files("scanner").joinpath(
+        "mappings/pci_dss_4.0.1.yaml"
+    )
+    assert bundled.is_file(), (
+        f"install-bundled mapping not found at {bundled}; "
+        "check [tool.setuptools.package-data] in pyproject.toml "
+        "(requires 'mappings/*.yaml' under the 'scanner' entry)"
+    )

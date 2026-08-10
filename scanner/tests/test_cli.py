@@ -18,13 +18,11 @@ Test inventory (mirrors the plan's MUST-DO contract for this file):
 
 NOTE on the aggregate bug
 -------------------------
-``scanner/cli.py`` line 391 references ``args.output`` but the aggregate
-subparser declares ``--out`` (not ``--output``). That dispatch bug is
-out of scope for this test file (the plan's MUST-NOT contract forbids
-modifying ``cli.py``); the corresponding test is therefore marked
-``xfail`` with a pointer at the broken line. The bug must be fixed in
-``cli.py`` and the xfail lifted once ``pacioli aggregate <run-dir>``
-returns rc=0 and re-emits ``report.html``.
+The ``pacioli aggregate <run-dir>`` subcommand now falls back to the
+install-bundled mapping via ``importlib.resources`` when the default
+``pci_mapping.yaml`` is not found alongside the run-dir. This test
+runs without ``--mapping`` to exercise that fallback as a regression
+guard.
 """
 from __future__ import annotations
 
@@ -203,23 +201,16 @@ def test_pacioli_gate_nonexistent_target_exits_nonzero(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Aggregate subcommand needs --mapping to be passed explicitly; the "
-        "default produces a 'pci_mapping.yaml not found' error when the run-dir "
-        "is in a tmpdir. The fix is in the aggregate handler (default to the "
-        "install-bundled mapping when none is provided). Lifting the xfail "
-        "requires both that fix and the install-bundled mapping to be "
-        "discoverable from the orchestrator's resolve_paths."
-    ),
-    strict=False,
-)
 def test_pacioli_aggregate_reemits_report(tmp_path: Path) -> None:
     """``pacioli aggregate <run-dir>`` re-emits ``aggregate/report.html``.
 
     Builds a run-dir via the scan, deletes the produced
-    ``aggregate/report.html``, then runs ``pacioli aggregate`` to
-    confirm it re-emits the HTML report without re-running checkov.
+    ``aggregate/report.html``, then runs ``pacioli aggregate`` (no
+    ``--mapping``) to confirm it re-emits the HTML report without
+    re-running checkov. Exercises the install-bundled fallback path:
+    when the run-dir is in a tmpdir there's no ``.git`` ancestor and
+    no ``pci_mapping.yaml`` alongside, so the aggregator must fall
+    back to the mapping shipped via ``importlib.resources``.
     """
     target_repo = _make_minimal_tf_repo(tmp_path / "repo")
     output_dir = tmp_path / "runs"
@@ -249,13 +240,11 @@ def test_pacioli_aggregate_reemits_report(tmp_path: Path) -> None:
     report_path.unlink()
     assert not report_path.exists(), "setup: failed to delete report.html"
 
-    # Pass --mapping explicitly so the aggregator can find the install-bundled
-    # mapping when the run-dir is in a tmpdir (the default
-    # <run-dir>/pci_mapping.yaml does not exist for ephemeral runs).
-    install_mapping = REPO_ROOT / "mappings" / "pci_dss_4.0.1.yaml"
+    # No --mapping flag — exercises the install-bundled fallback in
+    # scanner/aggregate.py main() (the default must resolve to the
+    # mapping shipped via importlib.resources.files("scanner")).
     agg_result = _run_cli(
         "aggregate", str(output_dir),
-        "--mapping", str(install_mapping),
         timeout=60,
     )
     assert agg_result.returncode == 0, (
