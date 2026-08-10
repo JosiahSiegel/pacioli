@@ -87,7 +87,7 @@ jobs:
               for e in errors:
                   print('  -', e)
               exit(1)
-          print(f'OK: {len(mapping)} checks mapped to {len(data["requirements"])} requirements')
+          print(f'OK: {len(mapping)} checks mapped to {len(data[\"requirements\"])} requirements')
           "
 
   lint:
