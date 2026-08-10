@@ -41,10 +41,12 @@ For the read-only invariant, see [Safety Model](SAFETY_MODEL.md).
 ├── mappings/
 │   └── pci_dss_4.0.1.yaml            # The shipped PCI mapping pack
 ├── scanner/
-│   ├── scan.sh                       # Driver
-│   ├── scan_audit.sh                 # Audit (re-emit from archive)
-│   ├── scan_baseline_init.sh         # Bulk-generate baseline stubs
-│   ├── aggregate.py                  # Aggregator
+│   ├── cli.py                        # CLI entry point (`pacioli` / `python -m scanner.cli`)
+│   ├── orchestrator.py               # Driver; orchestrates Checkov per env
+│   ├── aggregate.py                  # Aggregator (SARIF → HTML/CSV/JUnit)
+│   ├── baseline_init.py              # Bulk-generate baseline stubs
+│   ├── safety.py                     # Read-only invariant (`SafetyGuard`)
+│   ├── trap.py                       # Signal/atexit cleanup (IP + plan shred)
 │   ├── rewrite_sarif_help.py         # SARIF helpUri rewriter
 │   ├── checkov_url_overrides.py      # Canonical rule-URL table
 │   ├── tfstate_to_plan.py            # .tfstate → plan-JSON shape
@@ -57,9 +59,6 @@ For the read-only invariant, see [Safety Model](SAFETY_MODEL.md).
 │   │   ├── CKV_AZURE_PCI_003__tls_min_version.py
 │   │   ├── CKV_AZURE_PCI_004__cmk_required.py
 │   │   └── CKV_AZURE_PCI_005__kv_purge_protection.py
-│   ├── lib/                          # Bash helpers
-│   │   ├── common.sh
-│   │   └── safety.sh
 │   └── tests/                        # pytest suite
 │       ├── conftest.py
 │       ├── test_aggregate_html.py            (new)
@@ -101,17 +100,11 @@ cd pacioli
 python -m pip install -r scanner/requirements-pinned.txt
 python -m pip install pytest pyyaml
 
-# jq (used by scan.sh for JSON queries)
+# ruff (optional, for `make lint`)
 # macOS:
-brew install jq
+brew install ruff
 # Debian / Ubuntu:
-sudo apt-get install -y jq
-
-# shellcheck (optional, for `make lint`)
-# macOS:
-brew install shellcheck
-# Debian / Ubuntu:
-sudo apt-get install -y shellcheck
+pip install ruff
 ```
 
 ## The test suite
@@ -136,25 +129,26 @@ make selftest
 | `test_rewrite_sarif_help.py` | SARIF rewrite, idempotency, missing-file handling, mixed rules |
 | `test_terraform_remediation_yaml.py` | YAML schema, minimum entry count, required fields |
 
-`make selftest` runs `lib/safety.sh` directly. It tests that the
+`make selftest` runs `scanner/safety.py` directly via
+`python -m scanner.safety`. It tests that the
 read-only invariant refuses every command on the
 `should_refuse` list and accepts every command on the
-`should_allow` list. The script is run via:
+`should_allow` list. The selftest is run via:
 
 ```bash
-bash scanner/lib/safety.sh
+python -m scanner.safety
 ```
 
-When sourced from `lib/common.sh` (which is what `scan.sh` does),
-the `__SAFETY_SH_LOADED` guard prevents the test from running
-automatically; only an explicit invocation of `make selftest`
-runs it.
+The selftest runs only when the module is invoked directly
+(`python -m scanner.safety`); importing `scanner/safety.py` from
+`scanner/orchestrator.py` does not trigger it. CI runs the
+selftest explicitly via `make selftest`.
 
 ## Code style
 
 ### Python
 
-- 3.12+ syntax. `from __future__ import annotations` at the top of
+- 3.13+ syntax. `from __future__ import annotations` at the top of
   every module.
 - Type hints on every public function signature (private helpers can
   omit them).
@@ -174,23 +168,20 @@ runs it.
   sequences), and Checkov's `.tf` parser does not override the
   encoding.
 
-### Bash
+### Python (process-spawn conventions)
 
-- `set -uo pipefail` at the top of every executable script
-  (not `-e` — we want to handle failures explicitly and continue past
-  a non-critical step).
-- Always run external commands through `run_cmd` (driver) or
-  `safe_run_exec` (`common.sh`) so the safety guard is enforced.
-- Quote everything. `[[ -n "$x" ]]`, not `[[ -n $x ]]`.
-- Use `pci_log INFO|WARN|ERROR` instead of bare `echo`.
-- Source `lib/common.sh` first (which sources `lib/safety.sh`).
-- The `__SOMETHING_SH_LOADED` source guard pattern prevents
-  double-sourcing and is required on `lib/safety.sh` and
-  `lib/common.sh`.
-- `SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"` at the
-  top so helpers can find each other regardless of CWD.
-- No `realpath` — it does not resolve `S:/` paths on Windows MSYS
-  Git Bash. Use the `cd && pwd` idiom instead.
+- Every external command MUST go through
+  `scanner/orchestrator.py`'s `safe_run_exec(cmd)` or
+  `_run_guarded(cmd, *, dry_run=False)` helper. Both call
+  `SafetyGuard.refuse_if_mutating(cmd)` first; a refusal raises
+  `scanner.safety.MutatingOperationRefused` and the scanner exits
+  with code 99.
+- Do not invoke `subprocess.run` (or `os.system`, or
+  `subprocess.Popen`) directly from driver code — you will bypass
+  the safety guard.
+- For dry-run support, route the call through `_run_guarded` and
+  pass `dry_run=True` (or set `DRY_RUN=1` in the environment);
+  the helper prints the command instead of executing it.
 
 ### Commit messages
 
@@ -207,7 +198,7 @@ runs it.
   - `refactor:` — no behavior change
   - `severity:` — new entry in `SEVERITY_OVERRIDE`
   - `mapping:` — change to `mappings/*.yaml`
-  - `safety:` — change to `lib/safety.sh`
+  - `safety:` — change to `scanner/safety.py`
 
 ### Branches
 
@@ -277,24 +268,22 @@ The pytest test `test_terraform_remediation_yaml.py` enforces:
 
 See [Safety Model](SAFETY_MODEL.md#extending). The short version:
 
-```bash
-# in scanner/lib/safety.sh
-declare -a REFUSE_PATTERN+=(  # note the += to append, not =
-  'terraform[[:space:]]+console\b'
+```python
+# in scanner/safety.py
+REFUSE_PATTERN = REFUSE_PATTERN + (   # tuple, so use + (not += for tuple)
+    r"terraform\s+console\b",
 )
-declare -A REFUSE_REASON+=(
-  ['terraform[[:space:]]+console\b']='Terraform console is interactive. Forbidden.'
-)
+REFUSE_REASON[r"terraform\s+console\b"] = "Terraform console is interactive. Forbidden."
 ```
 
 Add a test case in `safety_selftest`:
 
-```bash
-local -a should_refuse=(
-  "terraform apply -auto-approve"
-  ...
-  "terraform console"   # <-- new
-)
+```python
+should_refuse = [
+    "terraform apply -auto-approve",
+    # ...
+    "terraform console",   # <-- new
+]
 ```
 
 Then verify with `make selftest`.
@@ -325,7 +314,7 @@ version (`checkov==3.3.9`). When a new Checkov release is published:
    `chore: bump checkov <old> -> <new>`.
 2. Run `make test` — many pytest tests will fail if rules have
    been renumbered.
-3. Run `bash scanner/scan.sh --mode report --project <test-env> --env prod`
+3. Run `pacioli scan --project <test-env> --env prod <test-env>`
    against the golden env.
 4. Diff the SARIF against the prior run:
    - New rule IDs that fired → add to `mappings/pci_dss_4.0.1.yaml`.
@@ -345,9 +334,8 @@ The CI pipeline (`.github/workflows/ci.yml`) runs on every push to
 `main` and every PR. It has three jobs:
 
 1. **test** — `pytest` on Python 3.12.
-2. **shellcheck** — `shellcheck` over the four shell scripts +
-   `lib/common.sh` + `lib/safety.sh`, plus `make selftest` for the
-   safety invariants.
+2. **lint + selftest** — `ruff check scanner/` over the Python
+   package, plus `make selftest` for the safety invariants.
 3. **mapping-lint** — validates the `mappings/pci_dss_4.0.1.yaml`
    schema and OOS entries.
 

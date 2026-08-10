@@ -47,10 +47,12 @@ By participating, you agree to abide by its terms.
 ├── mappings/
 │   └── pci_dss_4.0.1.yaml           # The shipped PCI mapping pack
 ├── scanner/
-│   ├── scan.sh                      # Driver; orchestrates Checkov
-│   ├── scan_audit.sh                # Audit (re-emit from archive)
-│   ├── scan_baseline_init.sh        # Bulk-generate baseline stubs
+│   ├── cli.py                       # CLI entry point (`pacioli` / `python -m scanner.cli`)
+│   ├── orchestrator.py              # Driver; orchestrates Checkov per env
 │   ├── aggregate.py                 # SARIF → HTML/CSV/JUnit
+│   ├── baseline_init.py             # Bulk-generate baseline stubs
+│   ├── safety.py                    # Read-only invariant (`SafetyGuard`)
+│   ├── trap.py                      # Signal/atexit cleanup (IP + plan shred)
 │   ├── rewrite_sarif_help.py        # Post-processor: fixes helpUri
 │   ├── checkov_url_overrides.py     # Canonical rule-URL table
 │   ├── tfstate_to_plan.py           # .tfstate → plan-JSON shape
@@ -63,9 +65,6 @@ By participating, you agree to abide by its terms.
 │   │   ├── CKV_AZURE_PCI_003__tls_min_version.py
 │   │   ├── CKV_AZURE_PCI_004__cmk_required.py
 │   │   └── CKV_AZURE_PCI_005__kv_purge_protection.py
-│   ├── lib/                         # Bash helpers
-│   │   ├── safety.sh                # READ-ONLY invariant
-│   │   └── common.sh                # Paths, run-id, IP whitelist helpers
 │   └── tests/                       # pytest suite
 └── .github/
     ├── workflows/ci.yml             # CI: test + lint + selftest
@@ -110,7 +109,7 @@ above for the full grammar.)
 
 - `feat(severity):` or `fix(severity):` — change to `SEVERITY_OVERRIDE`
 - `feat(mapping):` or `fix(mapping):` — change to `mappings/*.yaml`
-- `feat(safety):` or `fix(safety):` — change to `lib/safety.sh`
+- `feat(safety):` or `fix(safety):` — change to `scanner/safety.py`
 - `feat(scanner):` or `fix(scanner):` — change to the `scanner/`
   Python package
 - `feat(release):` or `fix(release):` — change to the release
@@ -289,7 +288,7 @@ All three must pass before a PR is mergeable.
 
 ## Style guide
 
-- **Python**: 3.12+ syntax. Type hints on every public function.
+- **Python**: 3.13+ syntax. Type hints on every public function.
   Use `pathlib.Path`, `dataclasses`, and `argparse`. 4-space indent,
   double-quoted strings, trailing commas in multi-line container
   literals. The UTF-8 env-var bootstrap (`PYTHONIOENCODING=utf-8`,

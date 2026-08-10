@@ -67,8 +67,4 @@ The maintainers can be reached via:
 
 - The GitHub private vulnerability reporting feature (for
   security issues — see [SECURITY.md](SECURITY.md)).
-- A public GitHub issue (for everything else).
-- The `pacioli@local.invalid` contact address listed in git
-  commit history (note: this is a placeholder; real contact
-  info will be updated when the repository is published to its
-  final home).
+- A public GitHub issue (for general questions; security issues go through the GitHub Security tab → "Report a vulnerability" — see [SECURITY.md](SECURITY.md)).

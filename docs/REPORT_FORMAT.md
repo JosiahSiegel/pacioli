@@ -10,13 +10,13 @@ section below](#html-report-routes).
 
 ## Run dir layout
 
-A run is everything under `.checkov/<run-id>/`. The run-id is
+A run is everything under `~/.pacioli/runs/<run-id>/`. The run-id is
 derived from the scope (project, env filters, `--label` value) plus
 the UTC date and a collision-counter. See [Operator Guide → Where
 do scan outputs live?](OPERATOR_GUIDE.md#where-do-scan-outputs-live).
 
 ```
-.checkov/<run-id>/
+~/.pacioli/runs/<run-id>/
 ├── .scope_pairs.tsv                    # (project TAB env) pairs scanned
 ├── .whitelist_ip                       # IP added to the firewall (tier 2/3 only)
 ├── <project>/<env>/
@@ -248,7 +248,7 @@ list.
 
 ```bash
 # Generate (or regenerate) without re-scanning
-python scanner/aggregate.py --run-dir .checkov/<run_id> --emit-fix-list
+python scanner/aggregate.py --run-dir ~/.pacioli/runs/<run_id> --emit-fix-list
 ```
 
 Sections:

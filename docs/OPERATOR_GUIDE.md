@@ -26,28 +26,27 @@ complete invariant.
 ```bash
 # Install dependencies
 pip install -r scanner/requirements-pinned.txt
-brew install jq   # or apt-get install jq
 
 # Source-only scan — fastest, no Azure calls, no init, no plan
-bash scanner/scan.sh --mode report
+pacioli scan
 
 # Open the report
-open .checkov/<run-id>/aggregate/report.html
+open ~/.pacioli/runs/<run-id>/aggregate/report.html
 ```
 
 For a single project + env:
 
 ```bash
-bash scanner/scan.sh --mode report --project myapp --env prod
+pacioli scan --project myapp --env prod
 ```
 
 ## Three scan tiers
 
 | Tier | Command | What it does | When to use |
 |---|---|---|---|
-| 1. Source | `scan.sh --mode report` | Static `.tf` parse. Runs Checkov's `terraform` + `secrets` framework + the custom `CKV_AZURE_PCI_*` checks. **Seconds.** No init, no plan, no storage. | Pre-commit, day-to-day CI, fast feedback. |
-| 2. Plan | `scan.sh --mode report --scan-plan` | Adds `terraform init` + `terraform plan -out=tfplan.binary` so Checkov can inspect *resolved* values (catches things the source can't see, like CMK buried in a module output). | Monthly deep reviews, audit prep. |
-| 3. State | `scan.sh --mode report --scan-state` | Adds `.tfstate` blob download from Azure Storage and emits a `drift_report.json` comparing source plan vs state plan. Catches `ignore_changes` drift. | Triage drift incidents, after manual Azure changes. |
+| 1. Source | `pacioli scan` | Static `.tf` parse. Runs Checkov's `terraform` + `secrets` framework + the custom `CKV_AZURE_PCI_*` checks. **Seconds.** No init, no plan, no storage. | Pre-commit, day-to-day CI, fast feedback. |
+| 2. Plan | `pacioli scan --tier plan` | Adds `terraform init` + `terraform plan -out=tfplan.binary` so Checkov can inspect *resolved* values (catches things the source can't see, like CMK buried in a module output). | Monthly deep reviews, audit prep. |
+| 3. State | `pacioli scan --tier state` | Adds `.tfstate` blob download from Azure Storage and emits a `drift_report.json` comparing source plan vs state plan. Catches `ignore_changes` drift. | Triage drift incidents, after manual Azure changes. |
 
 Tier 1 is the right default. Tier 2/3 cost minutes per env (provider
 download + state refresh + storage firewall IP) and require the runner
@@ -57,12 +56,12 @@ to be authenticated to Azure.
 
 ```bash
 # CI gate. Exits non-zero on HIGH/CRITICAL findings. Use in PR checks.
-scan.sh --mode gate
+pacioli gate
 ```
 
-`--mode gate` does **not** auto-aggregate. CI ingests the per-env SARIF
+`pacioli gate` does **not** auto-aggregate. CI ingests the per-env SARIF
 artifacts directly. For human runs and audit prep, prefer
-`--mode report` (the default), which runs `aggregate.py` at the end
+`pacioli scan` (the default), which runs the aggregator at the end
 and prints the `report.html` path.
 
 The full argument list is in [CLI Reference](CLI_REFERENCE.md).
@@ -71,14 +70,16 @@ The full argument list is in [CLI Reference](CLI_REFERENCE.md).
 
 Run dirs are auto-named from the scan scope so past runs are easy to
 find. The UTC calendar date is always suffixed for chronological
-ordering:
+ordering. The default run-dir root is `~/.pacioli/runs/current/`
+(overridable with `--output-dir`); individual run dirs are timestamped
+subdirectories under it.
 
 | Command | Run dir name (example) |
 |---|---|
-| `scan.sh --mode report` (no filter) | `all-prod-2026-08-06/` |
-| `scan.sh --mode report --env prod` | `all-prod-2026-08-06/` |
-| `scan.sh --mode report --project myapp` | `myapp-prod-2026-08-06/` |
-| `scan.sh --mode report --project myapp --env prod` | `myapp-prod-2026-08-06/` |
+| `pacioli scan` (no filter) | `all-prod-2026-08-06/` |
+| `pacioli scan --env prod` | `all-prod-2026-08-06/` |
+| `pacioli scan --project myapp` | `myapp-prod-2026-08-06/` |
+| `pacioli scan --project myapp --env prod` | `myapp-prod-2026-08-06/` |
 
 Re-running the same scope the same day auto-appends `-HHMM`, then
 `-2`, `-3`, etc. so previous reports are never overwritten.
@@ -90,8 +91,8 @@ scans you want to find later:
 
 ```bash
 # Memo-tag a pre-deploy check
-bash scanner/scan.sh --mode report --label pre-deploy --project myapp --env prod
-# -> .checkov/pre-deploy-2026-08-06/
+pacioli scan --label pre-deploy --project myapp --env prod
+# -> ~/.pacioli/runs/current/pre-deploy-2026-08-06/
 ```
 
 The label is sanitized to `[A-Za-z0-9_.-]`. Illegal characters become
@@ -102,16 +103,16 @@ falls back to `x`.
 
 ```bash
 # All runs today
-ls .checkov/*-2026-08-06/
+ls ~/.pacioli/runs/current/*-2026-08-06/
 
 # All "redis" runs ever
-ls .checkov/ | grep -i redis
+ls ~/.pacioli/runs/ | grep -i redis
 
 # The 5 most recent runs (any scope)
-ls -1t .checkov/ | head -5
+ls -1t ~/.pacioli/runs/current/ | head -5
 
 # The 5 most recent "all-prod" bulk runs
-ls -1dt .checkov/all-prod-* | head -5
+ls -1dt ~/.pacioli/runs/current/all-prod-* | head -5
 ```
 
 ## Run-dir layout
@@ -119,7 +120,7 @@ ls -1dt .checkov/all-prod-* | head -5
 After a successful scan, the run dir contains:
 
 ```
-.checkov/<run_id>/
+~/.pacioli/runs/current/<run_id>/
   .scope_pairs.tsv                # Tab-separated (project TAB env) pairs scanned
   .whitelist_ip                  # IP added to the storage firewall (tier 2/3 only)
   <project>/<env>/
@@ -129,7 +130,7 @@ After a successful scan, the run dir contains:
     results_terraform_plan.sarif      # Tier 2/3 only
     results_state.sarif               # Tier 3 only
     drift_report.json                 # Tier 3 only
-  aggregate/                     # Only present in --mode report after aggregation
+  aggregate/                     # Only present after aggregation
     coverage_matrix.csv
     coverage_gaps.csv
     combined.sarif
@@ -204,7 +205,7 @@ Each layer produces its own SARIF file; the aggregator walks all five
 5. **State-as-plan scan** (`--framework terraform_plan` on state JSON,
    tier 3 only)
    - Downloads the encrypted state blob from Azure Storage.
-   - Converts to plan-JSON shape via `tfstate_to_plan.py`.
+   - Converts to plan-JSON shape via `scanner/tfstate_to_plan.py`.
    - Runs Checkov against the post-attribute, post-`ignore_changes`
      view.
    - Generates `drift_report.json` comparing source-plan vs state-plan
@@ -265,7 +266,7 @@ When a new HIGH/CRITICAL finding appears:
   expires_on: "<YYYY-MM-DD>"
 ```
 
-**Enforcement rules** (applied by `aggregate.py`):
+**Enforcement rules** (applied by `scanner/aggregate.py`):
 
 | Field | Rule |
 |---|---|
@@ -309,16 +310,16 @@ After the first scan across all envs:
 
 ```bash
 # Run the scan
-bash scanner/scan.sh --mode report --label initial-baseline
+pacioli scan --label initial-baseline
 
 # Re-emit a fix list (no re-scan; reads the existing aggregate)
-python scanner/aggregate.py --run-dir .checkov/initial-baseline-2026-08-06 --emit-fix-list
+pacioli aggregate ~/.pacioli/runs/current/initial-baseline-2026-08-06 --emit-fix-list
 
 # Bulk-generate stub baseline entries
-bash scanner/scan_baseline_init.sh --run-dir .checkov/initial-baseline-2026-08-06
+pacioli baseline init ~/.pacioli/runs/current/initial-baseline-2026-08-06
 ```
 
-The baseline init script reads `combined.sarif` and emits stub entries
+The baseline init command reads `combined.sarif` and emits stub entries
 (TBD for owner/ticket/expires) for every finding. The team then:
 
 1. Sorts entries by `hit_count` desc.
@@ -335,11 +336,11 @@ output matches Azure reality for the canonical golden env:
 
 ```bash
 # 1. Run scan
-bash scanner/scan.sh --mode report --project myapp --env prod
+pacioli scan --project myapp --env prod
 
 # 2. Capture findings
-RUN_DIR=$(ls -td .checkov/*/ | head -1)
-python scanner/aggregate.py --run-dir "$RUN_DIR"
+RUN_DIR=$(ls -td ~/.pacioli/runs/current/*/ | head -1)
+pacioli aggregate "$RUN_DIR"
 
 # 3. For each HIGH/CRITICAL finding, verify against Azure Portal:
 #    - Go to the resource
@@ -421,7 +422,7 @@ is unset).
 1. Edit `pci_scope.yaml` — copy an existing entry, change `project` to
    the new one, set `status: in_scope`, add the data-classification
    attestation (cite a ticket).
-2. Run `bash scanner/scan.sh --mode report --project <new_proj> --env prod` to validate.
+2. Run `pacioli scan --project <new_proj> --env prod` to validate.
 3. Verify against Azure Portal (Golden env workflow above).
 4. Commit `pci_scope.yaml` as a PR titled "PCI scope: add <new_proj>".
 

@@ -23,7 +23,7 @@ jump directly to the section that matches your role.
 - **[Check Authoring](CHECK_AUTHORING.md)** — how to add a custom
   `CKV_AZURE_PCI_*` Checkov check.
 - **[Report Format](REPORT_FORMAT.md)** — every file in
-  `.checkov/<run-id>/`, the HTML report routes, and the SARIF/CSV
+  `~/.pacioli/runs/<run-id>/`, the HTML report routes, and the SARIF/CSV
   schemas.
 
 ## Project documents
@@ -48,7 +48,7 @@ jump directly to the section that matches your role.
 ## Other places documentation lives
 
 - The **per-module docstrings** in `scanner/aggregate.py`,
-  `scanner/scan.sh`, `scanner/lib/safety.sh`, etc. carry detailed
+  `scanner/orchestrator.py`, `scanner/safety.py`, etc. carry detailed
   implementation notes. Read them; they explain *why* the code is the
   way it is.
 - The **HTML report** itself (`report.html`) is self-documenting — hover

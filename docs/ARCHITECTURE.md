@@ -23,20 +23,19 @@ This document is for both — read it once to understand the model.
     ┌────────────────────────────────────────────────────────────────┐
     │  Pacioli install (this repo)                                   │
     │  scanner/                                                      │
-    │  ├── scan.sh          ◄── driver, orchestrates Checkov         │
-    │  ├── scan_audit.sh        Re-emit a prior report from archive  │
-    │  ├── scan_baseline_init.sh  Bulk-generate stub baselines       │
-    │  ├── aggregate.py     ◄── aggregator (SARIF → HTML/CSV/JUnit)  │
+    │  ├── cli.py               ◄── entry point (pacioli <sub>)      │
+    │  ├── orchestrator.py      ◄── driver, per-(project, env) loop  │
+    │  ├── aggregate.py         ◄── SARIF → HTML/CSV/JUnit           │
+    │  ├── baseline_init.py     ◄── bulk-generate stub baselines     │
+    │  ├── safety.py            ◄── READ-ONLY invariant (refuse)     │
     │  ├── rewrite_sarif_help.py  Post-processor: fixes helpUri      │
-    │  ├── checkov_url_overrides.py  Canonical rule-URL table         │
-    │  ├── tfstate_to_plan.py    .tfstate → plan-JSON shape          │
-    │  ├── drift_report.py       Plan-vs-state diff                  │
+    │  ├── checkov_url_overrides.py  Canonical rule-URL table        │
+    │  ├── tfstate_to_plan.py       .tfstate → plan-JSON shape       │
+    │  ├── drift_report.py          Plan-vs-state diff               │
     │  ├── terraform_remediation.yaml  Canonical azurerm 4.x fixes   │
-    │  ├── checks/            CKV_AZURE_PCI_001..005 (custom PaaC)    │
-    │  ├── lib/                                                      │
-    │  │   ├── safety.sh    ◄── READ-ONLY invariant (refuse)         │
-    │  │   └── common.sh    ◄── paths, run-id, IP whitelist helpers  │
-    │  ├── tests/            pytest suite                            │
+    │  ├── checks/             CKV_AZURE_PCI_001..005 (custom PaaC)   │
+    │  ├── trap.py             Signal/atexit cleanup (IP + plan)     │
+    │  ├── tests/              pytest suite                          │
     │  └── requirements-pinned.txt  Pinned deps                      │
     │  mappings/                                                     │
     │  └── pci_dss_4.0.1.yaml   Framework requirement → check_id     │
@@ -48,7 +47,8 @@ This document is for both — read it once to understand the model.
                                        │
                                        ▼
                     ┌─────────────────────────────────────┐
-                    │  Output: .checkov/<run-id>/         │
+                    │  Output: ~/.pacioli/runs/current/   │
+                    │          <run-id>/                  │
                     │  ├── <project>/<env>/*_source.sarif │
                     │  ├── <project>/<env>/*_plan.sarif   │
                     │  ├── <project>/<env>/*_state.sarif  │
@@ -69,47 +69,48 @@ This document is for both — read it once to understand the model.
 
 Pacioli is built in five layers, each with a single responsibility:
 
-### Layer 0 — `lib/safety.sh` (read-only guard)
+### Layer 0 — `scanner/safety.py` (read-only guard)
 
-The first thing every Bash script sources is `lib/safety.sh`, which
-defines the read-only invariant. Every external command the scanner
-runs is gated through `refuse_if_mutating` (or `safe_run_exec`, which
-calls it). The full pattern list and extension procedure are in
-[Safety Model](SAFETY_MODEL.md).
+The first module `scanner/orchestrator.py` imports is `safety.py`,
+which defines the read-only invariant. Every external command the
+scanner runs is gated through `SafetyGuard.refuse_if_mutating()` (or
+the `safe_run_exec` helper that calls it). The full pattern list and
+extension procedure are in [Safety Model](SAFETY_MODEL.md).
 
-### Layer 1 — `lib/common.sh` (paths + run-id + helpers)
+### Layer 1 — `scanner/orchestrator.py` (paths + run-id + helpers)
 
-Sourced by every driver script. Sets up:
+Holds the per-(project, env) driver loop and all the helpers it
+needs:
 
-- `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1` so Python child
+- UTF-8 env-var bootstrap (`PYTHONIOENCODING=utf-8`,
+  `PYTHONUTF8=1`, `sys.stdout.reconfigure`) so Python child
   processes (Checkov, `aggregate.py`) don't crash on Windows cp1252
   encodings of multi-byte UTF-8 (the `⏳` / `⚠` glyphs embedded in KQL
   workbook titles).
 - `PACIOLI_TARGET_REPO` (the consumer's Terraform repo; default: CWD).
-- `PACIOLI_INSTALL_DIR` (this repo; resolved from the location of
-  `lib/common.sh`).
+- `PACIOLI_INSTALL_DIR` (this repo).
 - `PACIOLI_MAPPING` (default: `mappings/pci_dss_4.0.1.yaml`).
-- `PCI_STATE_STORAGE_ACCOUNT` and `PCI_REPORTS_CONTAINER` (Azure
+- `PACIOLI_STATE_STORAGE_ACCOUNT` and `PACIOLI_REPORTS_CONTAINER` (Azure
   storage for tier 2/3 and the `pacioli-reports` archive; both
   required — the scanner refuses tier 2/3 and audit-mode runs
   when either is unset).
-- `pci_log` (timestamped logging; respects `PCI_VERBOSE`, `PCI_DEBUG`).
-- `safe_run_exec` (gates external commands through the safety guard).
-- `whitelist_my_ip` / `cleanup_ip_whitelist` (paired Azure mutation +
-  removal, with a 5-retry verification).
-- `shred_plan_artifacts` (PCI 10.7 hygiene for plan files).
-- `yaml_to_json` / `load_pci_scope` (scope parsing).
-- `init_pretty_run_dir` / `init_run_dir_labeled` (run-dir naming).
-- `find_aztfexport_files` (returns the set of files that must be
-  excluded from scanning because they are aztfexport-generated).
+- `_log` (timestamped logging; respects `PACIOLI_VERBOSE`,
+  `PACIOLI_DEBUG`).
+- `_whitelist_my_ip` / `cleanup_ip_whitelist` (paired Azure mutation
+  + removal, with a 5-retry verification; cleanup runs via the
+  signal/atexit trap in `scanner/trap.py`).
+- Plan-artifact shredding (PCI 10.7 hygiene for plan files).
+- Scope parsing (`pci_scope.yaml`).
+- Run-dir naming and labeling.
+- aztfexport file exclusion.
 
-### Layer 2 — `scan.sh` (driver)
+### Layer 2 — `scanner/orchestrator.py` `Orchestrator.run()` (driver)
 
 The driver is a per-(project, env) loop. For each env, it does, in
 order:
 
-1. **Validate the env dir** (`require_env_dir`).
-2. **Whitelist the runner IP** if tier 2 or 3 (`whitelist_my_ip`).
+1. **Validate the env dir**.
+2. **Whitelist the runner IP** if tier 2 or 3 (`_whitelist_my_ip`).
 3. **`terraform init -input=false`** (tier 2+).
 4. **`terraform plan -out=tfplan.binary`** (tier 2+).
 5. **`terraform show -json tfplan.binary > plan.json`** (tier 2+).
@@ -132,13 +133,14 @@ Each step's SARIF output is renamed to a canonical filename
 (`results_<layer>.sarif`) so the aggregator finds it without
 per-tier logic.
 
-The driver traps `EXIT INT TERM` to:
+The driver registers an EXIT-equivalent cleanup (via
+`scanner/trap.py`) that:
 
-- Call `cleanup_ip_whitelist` (removes the IP we added in step 2).
-- Call `shred_plan_artifacts` (destroys tfplan.binary + plan.json).
-- Remove the staging dir for the pairs file.
+- Calls `cleanup_ip_whitelist` (removes the IP we added in step 2).
+- Shreds plan artifacts (destroys `tfplan.binary` + `plan.json`).
+- Removes the staging dir for the pairs file.
 
-### Layer 3 — `aggregate.py` (per-run → per-org → per-framework)
+### Layer 3 — `scanner/aggregate.py` (per-run → per-org → per-framework)
 
 After the driver finishes, the aggregator:
 
@@ -183,11 +185,11 @@ After the driver finishes, the aggregator:
    - `fix_list.md` (opt-in via `--emit-fix-list`) — developer-friendly
      markdown sorted by severity.
 
-### Layer 4 — `scan_audit.sh` and `scan_baseline_init.sh` (post-scan tools)
+### Layer 4 — `pacioli audit` and `pacioli baseline init` (post-scan tools)
 
-`scan_audit.sh` re-emits a prior report from the `pacioli-reports`
-archive (no re-scan). `scan_baseline_init.sh` reads a combined SARIF and
-emits stub baseline entries with TBD for `owner`, `ticket_id`,
+`pacioli audit` re-emits a prior report from the `pacioli-reports`
+archive (no re-scan). `pacioli baseline init` reads a combined SARIF
+and emits stub baseline entries with TBD for `owner`, `ticket_id`,
 `expires_on` so the team can triage top-N by `hit_count`.
 
 ### Layer 5 — `checkov_url_overrides.py` and `rewrite_sarif_help.py` (the URL problem)
@@ -203,13 +205,13 @@ redirect to a generic landing page. We solve this in three places:
 - `rewrite_sarif_help.py` uses it to rewrite the `helpUri` in every
   per-env SARIF on disk so the SARIF artifacts are correct on their
   own.
-- `scan.sh`'s `checkov_stderr_filter` rewrites Checkov's CLI output
-  in the operator's terminal so they don't see broken
-  `prismacloud.io` links as Checkov runs.
+- The orchestrator's stderr filter rewrites Checkov's CLI output in
+  the operator's terminal so they don't see broken `prismacloud.io`
+  links as Checkov runs.
 
 Adding a new rule? One entry in `checkov_url_overrides.py` is
-enough — the aggregator, the SARIF rewriter, and the shell filter
-all pick it up.
+enough — the aggregator, the SARIF rewriter, and the orchestrator's
+stderr filter all pick it up.
 
 ## The mapping pack
 
@@ -272,7 +274,7 @@ is no build step, no bundler, no framework. The full
 `<style>...{CSS}...</style>` block and the full `<script>...{JS}...</script>`
 block are emitted in-line by `aggregate.py`'s
 `write_html_report` function. The CSS is held as a plain
-triple-quoted string (NOT inside an f-string) because Python 3.12+
+triple-quoted string (NOT inside an f-string) because Python 3.13+
 parses `{...}` greedily inside f-strings — and CSS has braces.
 
 Routes:
@@ -296,34 +298,34 @@ filter UI syncs across all routes via `applyAll()` + `syncAllFilterUIs()`.
 
 | File | Purpose | Read this when… |
 |---|---|---|
-| `scanner/scan.sh` | Driver; orchestrates Checkov per env | Changing the per-env flow |
-| `scanner/scan_audit.sh` | Re-emit prior report from the `pacioli-reports` archive | Adding a new audit tier |
-| `scanner/scan_baseline_init.sh` | Bulk-generate baseline stubs | Changing the baseline schema |
+| `scanner/cli.py` | CLI entry point (`pacioli` / `python -m scanner.cli`) | Adding a new subcommand, changing flag parsing |
+| `scanner/orchestrator.py` | Driver; orchestrates Checkov per env | Changing the per-env flow |
 | `scanner/aggregate.py` | SARIF → HTML/CSV/JUnit | Changing the report layout, adding a new aggregate output, fixing coverage math |
+| `scanner/baseline_init.py` | Bulk-generate baseline stubs | Changing the baseline schema |
 | `scanner/rewrite_sarif_help.py` | Rewrite helpUri in SARIF on disk | Adding a new consumer of the URL override table |
 | `scanner/checkov_url_overrides.py` | The URL override table | Adding a new rule, fixing a wrong URL |
 | `scanner/tfstate_to_plan.py` | `.tfstate` → plan-JSON shape | Adding a new state-shape converter |
 | `scanner/drift_report.py` | Plan vs state attribute diff | Changing the drift signal |
+| `scanner/safety.py` | Read-only invariant (`SafetyGuard`) | Adding a new refusal pattern, changing the safety guarantee |
+| `scanner/trap.py` | Signal/atexit cleanup (IP whitelist + plan shred) | Changing the cleanup guarantees |
 | `scanner/terraform_remediation.yaml` | Canonical azurerm 4.x HCL fixes | Adding a new remediation, fixing a wrong HCL block |
 | `scanner/checks/*.py` | The custom PaaC checks | Adding a new `CKV_AZURE_PCI_*` check |
-| `scanner/lib/common.sh` | Paths, run-id, IP helpers, scope loader | Adding a new path or env var |
-| `scanner/lib/safety.sh` | Read-only invariant | Adding a new refusal pattern, changing the safety guarantee |
 | `scanner/tests/*.py` | pytest suite | Running the tests, fixing a test |
 | `mappings/pci_dss_4.0.1.yaml` | Framework requirement → check_id | Adding a new mapping row, validating an OOS exclusion |
 | `examples/*` | Runnable templates | Onboarding a new consumer |
 
-## Why bash + Python instead of pure Python?
+## Why pure Python?
 
-The driver is bash for one reason: `set -uo pipefail` + an EXIT trap
-gives you a clean, *guaranteed* cleanup story for the storage firewall
-IP whitelist. Pure-Python equivalents require explicit `try/finally`
-*and* `atexit` registration *and* signal-handler coverage to match
-the same guarantee. The bash trap is shorter, more obvious, and has
-been in production for 90+ days without a single missed cleanup.
+The driver is Python for one reason: `atexit.register` + signal
+handlers give you a clean, *guaranteed* cleanup story for the
+storage firewall IP whitelist. The original bash implementation
+needed explicit `trap EXIT INT TERM` plus an EXIT handler; the
+Python equivalent (`scanner/trap.py`) handles SIGINT, SIGTERM, and
+normal exit, with `atexit` as a backstop. Same guarantee, no shell.
 
 The aggregator and post-processors are Python because the work is
 data-join (rule + mapping + baseline + suppression + coverage),
-which is awkward in bash and natural in Python.
+which is natural in Python.
 
 The custom checks are Python because they have to be — Checkov
 loads them as Python modules.

@@ -28,7 +28,7 @@ Pacioli installs as a single Python CLI. Point it at any Terraform
 repo and it emits a self-contained HTML report.
 
 ```bash
-# Install (Python 3.12+)
+# Install (Python 3.13+)
 pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pacioli-X.Y.Z-py3-none-any.whl
 
 # Replace X.Y.Z with the desired release tag.

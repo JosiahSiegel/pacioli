@@ -45,7 +45,7 @@ for all scan modes and options.
    ├── modules/
    │   └── ...
    ```
-2. **Python 3.12+**.
+2. **Python 3.13+**.
 3. **`jq`** (used for JSON queries).
 4. **Azure CLI** (`az`) — only for tier 2 and tier 3 scans (where
    `terraform plan` or `.tfstate` download is required). The
@@ -281,7 +281,7 @@ Or for the standard Azure DevOps pipeline:
 
 The `--mode gate` option exits non-zero on HIGH/CRITICAL findings.
 SARIF artifacts are emitted per env under
-`.checkov/<run-id>/<project>/<env>/*.sarif`; your CI runner should
+`~/.pacioli/runs/<run-id>/<project>/<env>/*.sarif`; your CI runner should
 upload these as build artifacts for the security team to ingest.
 
 ## Step 8: set up the pacioli-reports archive (optional but recommended)
@@ -300,7 +300,7 @@ az storage blob upload \
     --account-name "$PACIOLI_STATE_STORAGE_ACCOUNT" \
     --container-name pacioli-reports \
     --name "<run-id>/report.html" \
-    --file ".checkov/<run-id>/aggregate/report.html"
+    --file "~/.pacioli/runs/<run-id>/aggregate/report.html"
 ```
 
 With this archive in place, anyone with read access to the
@@ -314,9 +314,9 @@ operations; there is no tenant-agnostic default.
 
 Commit `pci_scope.yaml`, `pci_baseline.yaml`, and the CI wiring to
 your Terraform repo. If you also use the legacy wrapper, commit
-`Makefile.pacioli` (or the merged `Makefile` targets). Do NOT commit
-the `.checkov/` directory — it's already in the standard `.gitignore`
-patterns.
+`Makefile.pacioli` (or the merged `Makefile` targets). Run outputs
+live under `~/.pacioli/runs/` (outside the repo), so nothing in your
+target repo needs to be gitignored.
 
 ```bash
 git add pci_scope.yaml pci_baseline.yaml .gitignore

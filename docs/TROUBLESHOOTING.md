@@ -28,7 +28,8 @@ checkov --version
 
 ### `jq: command not found`
 
-The driver uses `jq` for JSON queries. Install it:
+Pacioli's Python CLI does not require `jq`. If you have an older
+shell-based integration that still references `jq`, install it:
 
 ```bash
 # macOS
@@ -43,11 +44,11 @@ choco install jq
 
 ### `python: command not found` or wrong version
 
-The driver and aggregator require Python 3.12+.
+The driver and aggregator require Python 3.13+.
 
 ```bash
 python --version
-# Python 3.12.x
+# Python 3.13.x
 ```
 
 If `python` is older or absent:
@@ -84,7 +85,7 @@ The safety guard caught a command. The message names the refused
 pattern and the reason:
 
 ```
-REFUSED: Terraform apply mutates Azure. Forbidden in scan.sh. Use scan.sh for read-only scans only.
+REFUSED: Terraform apply mutates Azure. Forbidden by the scanner's read-only safety guard. Use the scanner for read-only scans only.
          Command: terraform apply
 ```
 
@@ -114,11 +115,11 @@ This usually means:
 2. The runner does not have the `Storage Account Contributor` role
    on `$PACIOLI_STATE_STORAGE_ACCOUNT`.
 3. Network connectivity to `api.ipify.org` (the IP-detection
-   service) is blocked. The `whitelist_my_ip` function uses
-   `https://api.ipify.org` to detect the public IP. If your
-   environment blocks this, the function fails. There is no
-   alternative IP-detection path today; open an issue if you
-   need one.
+   service) is blocked. The storage firewall whitelist logic in
+   `scanner/orchestrator.py` uses `https://api.ipify.org` to detect
+   the public IP. If your environment blocks this, the whitelist
+   fails. There is no alternative IP-detection path today; open an
+   issue if you need one.
 
 ### `terraform init failed for <project>/<env>; skipping plan layer`
 
@@ -126,7 +127,7 @@ This usually means:
 Checkov / Terraform output:
 
 ```bash
-bash scanner/scan.sh --mode report --scan-plan --project <p> --env <e> --verbose
+pacioli scan --tier plan --project <p> --env <e> --verbose
 ```
 
 Common causes:
@@ -157,7 +158,7 @@ The plan failed. Common causes:
 
 The runner is not in the storage-account firewall allow list. The
 scanner adds the runner IP automatically when you pass
-`--scan-state`, but the add is asynchronous (Azure propagation
+`--tier state`, but the add is asynchronous (Azure propagation
 takes 30-60 seconds). If the runner IP rotated mid-scan, the
 download fails.
 
@@ -166,15 +167,15 @@ log. If the problem persists, set
 `PACIOLI_STATE_STORAGE_ACCOUNT` to a storage account that allows
 your CI runner's outbound IP permanently.
 
-### `combined.sarif not found in <run-dir>/aggregate/ — run aggregate.py first`
+### `combined.sarif not found in <run-dir>/aggregate/ — run aggregate first`
 
-You ran `scan_baseline_init.sh` before `aggregate.py`. Order
+You ran `pacioli baseline init` before `pacioli aggregate`. Order
 matters:
 
-1. `scan.sh --mode report` → produces per-env SARIFs.
-2. `aggregate.py --run-dir ...` (or `--mode report` which calls
+1. `pacioli scan` → produces per-env SARIFs.
+2. `pacioli aggregate <run_dir>` (or `pacioli scan` which calls
    it automatically) → produces `combined.sarif`.
-3. `scan_baseline_init.sh --run-dir ...` → reads `combined.sarif`
+3. `pacioli baseline init <run_dir>` → reads `combined.sarif`
    to generate stub baseline entries.
 
 ## Aggregate-time failures
@@ -271,12 +272,12 @@ The most common failures:
 
 ### `make selftest` fails
 
-`lib/safety.sh` rejected one of the `should_refuse` test
+`scanner/safety.py` rejected one of the `should_refuse` test
 cases (or accepted one of the `should_allow` cases). The
 selftest is the most reliable safety net — if it fails, a
 recent change likely weakened the safety guard.
 
-1. Run `bash scanner/lib/safety.sh` for the full error.
+1. Run `python -m scanner.safety` for the full error.
 2. Identify which command was misclassified.
 3. Either add the new pattern to `REFUSE_PATTERN` (and a test
    case to `should_refuse`), or remove the misclassified pattern.
@@ -321,13 +322,13 @@ the scanner can fix.
 
 ### `no module.tfstate` — backend key not found
 
-`scan.sh` derives the state blob name from the env's
+The orchestrator derives the state blob name from the env's
 `terraform.aztfexport.tf` `key = "..."` line. If the line is
 missing, it falls back to a synthesized name
 (`CR_<Env-prefix>_<project>.tfstate`). If neither works, the
 state blob cannot be downloaded.
 
-The default key format expected by `scan.sh`:
+The default key format expected by the orchestrator:
 
 ```hcl
 # in env/<project>/<env>/terraform.aztfexport.tf
@@ -341,7 +342,8 @@ terraform {
 ```
 
 If your keys have a different naming convention, edit the
-fallback in `scan.sh` (search for `CR_$(echo "${env}"`).
+fallback in `scanner/orchestrator.py` (search for
+`CR_<Env-prefix>`).
 
 ### Drift report is empty but the operator knows there is drift
 
@@ -351,7 +353,7 @@ attributes as they were at the last `terraform apply`; if a
 manual Azure change was made AFTER the last apply, the state
 blob does not reflect it until the next `terraform refresh`.
 
-Solution: re-run `scan.sh --scan-state` after a fresh
+Solution: re-run `pacioli scan --tier state` after a fresh
 `terraform refresh` in the env.
 
 ## Still stuck?
