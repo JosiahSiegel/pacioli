@@ -946,3 +946,306 @@ def test_handle_baseline_passes_append_top_dry_run(
     )
     assert "--append" in argv, f"--append missing; argv={argv!r}"
     assert "--dry-run" in argv, f"--dry-run missing; argv={argv!r}"
+
+
+# ---------------------------------------------------------------------------
+# Section E (--no-open flag + _maybe_open_report helper coverage)
+# ---------------------------------------------------------------------------
+#
+# These tests cover the ``--no-open`` CLI flag (added by Section A) and
+# the module-level ``_maybe_open_report`` helper (added by Section C,
+# invoked by the audit handlers). Mirrors scanner/tests/test_orchestrator.py
+# additions for ``Orchestrator._open_report``.
+
+
+def test_no_open_flag_accepted_on_scan_and_gate() -> None:
+    """``--no-open`` parses cleanly on both ``pacioli scan`` and ``pacioli gate``.
+
+    Regression guard: argparse strips any flag it does not recognise,
+    so the only way the option text reaches stdout is if the subparser
+    registered it.
+    """
+    for sub in ("scan", "gate"):
+        result = _run_cli(sub, "--help")
+        assert result.returncode == 0, (
+            f"{sub} --help failed; rc={result.returncode}; stderr={result.stderr!r}"
+        )
+        assert "--no-open" in result.stdout, (
+            f"{sub} --help should advertise --no-open; got stdout={result.stdout!r}"
+        )
+
+
+def test_audit_accepts_no_open_flag() -> None:
+    """``--no-open`` parses cleanly on ``pacioli audit``.
+
+    Mirrors :func:`test_no_open_flag_accepted_on_scan_and_gate` but for
+    the audit subcommand. The audit subparser is built independently
+    of scan/gate, so it gets its own acceptance test.
+    """
+    result = _run_cli("audit", "--help")
+    assert result.returncode == 0, (
+        f"audit --help failed; rc={result.returncode}; stderr={result.stderr!r}"
+    )
+    assert "--no-open" in result.stdout, (
+        f"audit --help should advertise --no-open; got stdout={result.stdout!r}"
+    )
+
+
+def test_audit_local_out_triggers_maybe_open_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_audit_local --out`` calls ``_maybe_open_report`` with the resolved path.
+
+    Builds a hermetic run-dir under ``tmp_path / ".pacioli" / "runs" /
+    test-run / aggregate / report.html`` and patches ``cli.Path.home``
+    so the handler reads from ``tmp_path`` instead of the real ``~``.
+    ``_maybe_open_report`` is replaced with a capturing fake so we can
+    assert on its (positional ``path``, keyword ``no_open``) without
+    touching any real browser.
+
+    Also exercises the parallel ``no_open=True`` case to prove the
+    flag propagates from args all the way to the helper.
+    """
+    from scanner import cli
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+
+    runs_root = tmp_path / ".pacioli" / "runs" / "test-run"
+    (runs_root / "aggregate").mkdir(parents=True)
+    (runs_root / "aggregate" / "report.html").write_bytes(b"<html>x</html>\n")
+
+    captured: list[tuple[Path, bool]] = []
+
+    def fake_maybe_open_report(path: Path, *, no_open: bool) -> None:
+        captured.append((path, no_open))
+
+    monkeypatch.setattr(cli, "_maybe_open_report", fake_maybe_open_report)
+
+    out_path = tmp_path / "out" / "report.html"
+
+    # Case A: ``no_open=False`` (default) — the helper is invoked with
+    # ``no_open=False`` so an operator running interactively gets the
+    # auto-open behaviour.
+    args_default = argparse.Namespace(
+        latest=False,
+        run_id="test-run",
+        out=str(out_path),
+        no_open=False,
+    )
+    rc = cli._handle_audit_local(args_default)
+    assert rc == 0, f"_handle_audit_local(no_open=False) returned {rc}; expected 0"
+    assert len(captured) == 1, (
+        f"_maybe_open_report should be called exactly once; got {captured!r}"
+    )
+    path_a, no_open_a = captured[0]
+    assert path_a == Path(str(out_path)), (
+        f"_maybe_open_report path arg mismatch; expected {out_path!r}, got {path_a!r}"
+    )
+    assert no_open_a is False, (
+        f"_maybe_open_report no_open kwarg should be False; got {no_open_a!r}"
+    )
+
+    # Case B: ``no_open=True`` — same flow, helper receives
+    # ``no_open=True`` so a CI / scripted invocation stays quiet.
+    captured.clear()
+    args_quiet = argparse.Namespace(
+        latest=False,
+        run_id="test-run",
+        out=str(out_path),
+        no_open=True,
+    )
+    rc = cli._handle_audit_local(args_quiet)
+    assert rc == 0, f"_handle_audit_local(no_open=True) returned {rc}; expected 0"
+    assert len(captured) == 1, (
+        f"_maybe_open_report should be called exactly once; got {captured!r}"
+    )
+    path_b, no_open_b = captured[0]
+    assert path_b == Path(str(out_path)), (
+        f"_maybe_open_report path arg mismatch; expected {out_path!r}, got {path_b!r}"
+    )
+    assert no_open_b is True, (
+        f"_maybe_open_report no_open kwarg should be True; got {no_open_b!r}"
+    )
+
+
+def test_audit_remote_out_triggers_maybe_open_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_audit_remote --out`` calls ``_maybe_open_report`` after download.
+
+    Mirrors the local case but for the remote branch: pre-creates the
+    run-dir under ``tmp_path / ".pacioli" / "runs" / <run_id> /
+    aggregate / report.html`` so ``_resolve_report_html`` finds the
+    source HTML on disk (the fake ``_az_blob_download`` is a no-op),
+    then asserts the helper was called with the resolved ``--out``
+    path.
+    """
+    from scanner import cli
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PACIOLI_STATE_STORAGE_ACCOUNT", "fakeacct")
+
+    run_id = "20260804T153407Z-2455"
+    remote_aggregate_dir = tmp_path / ".pacioli" / "runs" / run_id / "aggregate"
+    remote_aggregate_dir.mkdir(parents=True)
+    (remote_aggregate_dir / "report.html").write_bytes(b"<html>remote</html>\n")
+    # The four other artifacts are referenced by the handler; touch
+    # them so the copy step (which calls ``_resolve_report_html``) finds
+    # every input it expects from the same fake ``_az_blob_download``.
+    for fname in ("coverage_matrix.csv", "combined.sarif", "junit.xml"):
+        (remote_aggregate_dir / fname).write_text("stub", encoding="utf-8")
+
+    def fake_resolve_latest(
+        *, storage_account: str, container_name: str, dry_run: bool
+    ) -> str:
+        assert dry_run is True, "dry_run flag should propagate"
+        assert storage_account == "fakeacct"
+        return run_id
+
+    def fake_az_blob_download(
+        *,
+        storage_account: str,
+        container_name: str,
+        blob_name: str,
+        dest: Path,
+        dry_run: bool,
+    ) -> bool:
+        assert dry_run is True
+        # The handler expects each "downloaded" path to exist already
+        # because the handler copies ``report.html`` from ``dest_dir``
+        # later. Pre-create the file so the subsequent copy succeeds.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            dest.write_bytes(b"<html>remote</html>\n")
+        return True
+
+    monkeypatch.setattr(cli, "_resolve_latest_remote_run_id", fake_resolve_latest)
+    monkeypatch.setattr(cli, "_az_blob_download", fake_az_blob_download)
+
+    captured: list[tuple[Path, bool]] = []
+
+    def fake_maybe_open_report(path: Path, *, no_open: bool) -> None:
+        captured.append((path, no_open))
+
+    monkeypatch.setattr(cli, "_maybe_open_report", fake_maybe_open_report)
+
+    out_path = tmp_path / "audit-out" / "report.html"
+    args = argparse.Namespace(
+        latest=True,
+        run_id=None,
+        out=str(out_path),
+        state_account=None,
+        no_open=False,
+        dry_run=True,
+    )
+    rc = cli._handle_audit_remote(args)
+    assert rc == 0, f"_handle_audit_remote returned {rc}; expected 0"
+
+    assert len(captured) == 1, (
+        f"_maybe_open_report should be called exactly once after remote download; "
+        f"got {captured!r}"
+    )
+    path, no_open = captured[0]
+    assert path == Path(str(out_path)), (
+        f"_maybe_open_report path arg mismatch; expected {out_path!r}, got {path!r}"
+    )
+    assert no_open is False, (
+        f"_maybe_open_report no_open kwarg should be False; got {no_open!r}"
+    )
+
+    # Verify the dest artifact actually landed in the local archive —
+    # pre-condition for the report-copy + open step firing.
+    assert (tmp_path / ".pacioli" / "runs" / run_id / "aggregate" / "report.html").is_file(), (
+        "fake _az_blob_download should have materialised report.html locally"
+    )
+
+
+def test_maybe_open_report_skips_when_no_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_maybe_open_report`` is a silent no-op when ``no_open=True``.
+
+    Mirrors the production behaviour: ``pacioli audit --no-open`` (or
+    any operator who sets the flag explicitly) must NOT trigger a
+    browser open. We patch ``webbrowser.open`` at the module level
+    (where ``cli.py`` imported it) so the open never escapes.
+    """
+    from scanner import cli
+
+    fake_target = tmp_path / "r.html"
+    fake_target.write_text("<html></html>", encoding="utf-8")
+
+    calls: list[str] = []
+
+    def fake_open(url, *a, **k):
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(cli.webbrowser, "open", fake_open)
+
+    cli._maybe_open_report(fake_target, no_open=True)
+
+    assert calls == [], (
+        f"webbrowser.open should NOT be called when no_open=True; got calls={calls!r}"
+    )
+
+
+def test_maybe_open_report_calls_webbrowser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_maybe_open_report`` opens the report when ``no_open=False``.
+
+    Verifies the happy path: a real ``report.html`` on disk triggers
+    exactly one ``webbrowser.open`` call with a URL that ends in
+    ``r.html`` (the ``path.as_uri()`` representation).
+    """
+    from scanner import cli
+
+    fake_target = tmp_path / "r.html"
+    fake_target.write_text("<html></html>", encoding="utf-8")
+
+    calls: list[str] = []
+
+    def fake_open(url, *a, **k):
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(cli.webbrowser, "open", fake_open)
+
+    cli._maybe_open_report(fake_target, no_open=False)
+
+    assert len(calls) == 1, (
+        f"expected exactly one webbrowser.open call; got {len(calls)}: {calls!r}"
+    )
+    assert calls[0].endswith("r.html"), (
+        f"webbrowser.open URL should end with 'r.html'; got {calls[0]!r}"
+    )
+
+
+def test_maybe_open_report_handles_webbrowser_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_maybe_open_report`` swallows ``webbrowser.open`` returning ``False``.
+
+    No-browser-registered scenarios (headless containers, CI runners)
+    cause ``webbrowser.open`` to return ``False`` rather than raise.
+    The helper must not propagate this as an exception — failing to
+    open the report must not mask the successful audit.
+    """
+    from scanner import cli
+
+    fake_target = tmp_path / "r.html"
+    fake_target.write_text("<html></html>", encoding="utf-8")
+
+    def fake_open(*a, **k):
+        return False
+
+    monkeypatch.setattr(cli.webbrowser, "open", fake_open)
+
+    # Assertion: no exception propagates out of the helper.
+    cli._maybe_open_report(fake_target, no_open=False)

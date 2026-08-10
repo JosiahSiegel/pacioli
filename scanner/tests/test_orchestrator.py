@@ -1303,3 +1303,103 @@ def test_register_cleanup_trap_skips_whitelist_when_no_state_account(
     assert call_order == ["shred_plan_artifacts"], (
         f"expected only shred to fire when state_account is None, got: {call_order}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Section E (Orchestrator._open_report --no-open + CI=1 coverage)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the section E tests on ``cli._maybe_open_report`` in
+# test_cli.py. ``Orchestrator._open_report`` is a static helper called
+# once per scan after the report HTML is materialised; the four tests
+# below exercise the four guard / happy-path branches of its body.
+
+
+def test_open_report_no_open_flag_skips_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--no-open`` results in zero ``webbrowser.open`` calls.
+
+    Operator-initiated calls (e.g. via the ORCHESTRATOR flow) honour
+    the ``no_open`` flag passed in: ``True`` short-circuits before the
+    try/except, so any host without a registered browser stays quiet.
+    """
+    calls: list[str] = []
+
+    def fake_open(url, *a, **k):
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(scanner_orchestrator.webbrowser, "open", fake_open)
+
+    Orchestrator._open_report(Path("/tmp/report.html"), no_open=True)
+
+    assert calls == [], (
+        f"webbrowser.open should NOT be called when no_open=True; got {calls!r}"
+    )
+
+
+def test_open_report_ci_env_skips_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CI=1`` results in zero ``webbrowser.open`` calls even without ``--no-open``.
+
+    GitHub Actions / Azure Pipelines / GitLab CI all export ``CI=1``
+    by convention. ``_open_report`` consults ``os.environ['CI']``
+    directly so the open never escapes onto the runner.
+    """
+    monkeypatch.setenv("CI", "1")
+    calls: list[str] = []
+
+    def fake_open(url, *a, **k):
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(scanner_orchestrator.webbrowser, "open", fake_open)
+
+    Orchestrator._open_report(Path("/tmp/report.html"), no_open=False)
+
+    assert calls == [], (
+        f"webbrowser.open should NOT be called when CI=1; got {calls!r}"
+    )
+
+
+def test_open_report_calls_webbrowser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default behaviour calls ``webbrowser.open`` with the report URI.
+
+    With no ``CI`` env var and ``no_open=False`` (the defaults for a
+    workstation operator running ``pacioli scan .``), the helper
+    builds a ``file://`` URI from the resolved report path and hands
+    it to ``webbrowser.open``.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    calls: list[str] = []
+
+    def fake_open(url, *a, **k):
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(scanner_orchestrator.webbrowser, "open", fake_open)
+
+    Orchestrator._open_report(Path("/tmp/report.html"), no_open=False)
+
+    assert len(calls) == 1, (
+        f"expected exactly one webbrowser.open call; got {len(calls)}: {calls!r}"
+    )
+    assert calls[0].endswith("report.html"), (
+        f"webbrowser.open URL should end with 'report.html'; got {calls[0]!r}"
+    )
+
+
+def test_open_report_handles_webbrowser_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``webbrowser.open`` returning ``False`` does not propagate an exception.
+
+    Headless hosts / dev containers with no registered browser cause
+    ``webbrowser.open`` to return ``False`` (not raise). The helper
+    logs WARN and swallows so the scan / gate exit code is preserved.
+    """
+    monkeypatch.delenv("CI", raising=False)
+
+    def fake_open(*a, **k):
+        return False
+
+    monkeypatch.setattr(scanner_orchestrator.webbrowser, "open", fake_open)
+
+    # Assertion: no exception propagates out of the helper.
+    Orchestrator._open_report(Path("/tmp/report.html"), no_open=False)
