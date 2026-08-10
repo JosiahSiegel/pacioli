@@ -54,8 +54,8 @@ for all scan modes and options.
    `PACIOLI_REPORTS_CONTAINER` in the environment; there are no
    tenant-agnostic defaults.
 5. **A copy of Pacioli** — either:
-   - As a sibling directory: `git clone https://github.com/ORG/pacioli.git ../pacioli`, or
-   - As a git submodule: `git submodule add https://github.com/ORG/pacioli.git`, or
+   - As a sibling directory: `git clone https://github.com/JosiahSiegel/pacioli.git ../pacioli`, or
+   - As a git submodule: `git submodule add https://github.com/JosiahSiegel/pacioli.git`, or
    - As a `pip install` (not yet published to PyPI — see [Developer
      Guide → Releasing](DEVELOPER_GUIDE.md#releasing) for the
      release plan).

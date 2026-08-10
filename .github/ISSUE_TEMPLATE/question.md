@@ -31,4 +31,4 @@ The specific thing that didn't work or that you don't understand.
       contents.
 - [ ] [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common
       failures.
-- [ ] [Existing issues](https://github.com/ORG/pacioli/issues?q=is%3Aissue+sort%3Aupdated-desc)
+- [ ] [Existing issues](https://github.com/JosiahSiegel/pacioli/issues?q=is%3Aissue+sort%3Aupdated-desc)

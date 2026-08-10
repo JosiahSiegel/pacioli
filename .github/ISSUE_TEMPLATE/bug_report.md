@@ -48,5 +48,5 @@ resource "azurerm_storage_account" "example" {
 ## Have you checked
 
 - [ ] [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-- [ ] [Existing issues](https://github.com/ORG/pacioli/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc)
+- [ ] [Existing issues](https://github.com/JosiahSiegel/pacioli/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc)
 - [ ] [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md)

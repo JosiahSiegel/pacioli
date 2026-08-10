@@ -25,11 +25,11 @@ contents. The most useful entry points are:
 
 For usage questions or troubleshooting:
 
-1. Check the existing [GitHub issues](https://github.com/ORG/pacioli/issues)
-   and [discussions](https://github.com/ORG/pacioli/discussions).
+1. Check the existing [GitHub issues](https://github.com/JosiahSiegel/pacioli/issues)
+   and [discussions](https://github.com/JosiahSiegel/pacioli/discussions).
 2. Search [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for
    your error message.
-3. If still stuck, open a [GitHub issue](https://github.com/ORG/pacioli/issues/new/choose)
+3. If still stuck, open a [GitHub issue](https://github.com/JosiahSiegel/pacioli/issues/new/choose)
    with:
    - The exact command you ran.
    - The full output (including the `pci_log` lines).
@@ -39,7 +39,7 @@ For usage questions or troubleshooting:
 
 ## Filing Bugs
 
-Use the [GitHub issue tracker](https://github.com/ORG/pacioli/issues).
+Use the [GitHub issue tracker](https://github.com/JosiahSiegel/pacioli/issues).
 Please use the **Bug report** template and include:
 
 - Steps to reproduce.

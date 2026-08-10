@@ -94,7 +94,7 @@ For the read-only invariant, see [Safety Model](SAFETY_MODEL.md).
 
 ```bash
 # Clone
-git clone https://github.com/ORG/pacioli.git
+git clone https://github.com/JosiahSiegel/pacioli.git
 cd pacioli
 
 # Python deps

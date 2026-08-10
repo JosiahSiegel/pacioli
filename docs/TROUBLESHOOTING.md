@@ -356,9 +356,9 @@ Solution: re-run `scan.sh --scan-state` after a fresh
 
 ## Still stuck?
 
-- Search the [GitHub issues](https://github.com/ORG/pacioli/issues)
+- Search the [GitHub issues](https://github.com/JosiahSiegel/pacioli/issues)
   for the symptom.
-- Open a [new issue](https://github.com/ORG/pacioli/issues/new/choose)
+- Open a [new issue](https://github.com/JosiahSiegel/pacioli/issues/new/choose)
   with:
   - The exact command you ran.
   - The full output (including `pci_log` lines).
