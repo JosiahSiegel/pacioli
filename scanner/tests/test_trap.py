@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-import trap
+from scanner import trap
 
 
 # ---------------------------------------------------------------------------
@@ -59,13 +59,13 @@ def test_register_traps_atexit_runs_cleanup_on_normal_exit(tmp_path):
     child's exit.
     """
     marker = tmp_path / "atexit_marker"
-    scanner_dir = str(Path(__file__).resolve().parents[1])
+    scanner_dir = str(Path(__file__).resolve().parents[2])  # project root, not scanner/
 
     program = textwrap.dedent(
         f"""
         import sys
         sys.path.insert(0, {scanner_dir!r})
-        import trap
+        from scanner import trap
 
         marker_path = r"{marker}"
 
@@ -209,7 +209,7 @@ _SEND_SIGNAL_PROGRAM = textwrap.dedent(
     """
     import os, signal, sys, time
     sys.path.insert(0, {scanner_dir!r})
-    import trap
+    from scanner import trap
 
     marker_path = {marker!r}
 
@@ -240,7 +240,7 @@ _SEND_SIGNAL_PROGRAM = textwrap.dedent(
 def test_sigterm_handler_calls_cleanup_and_exits_128_plus_signum(tmp_path):
     """SIGTERM must run cleanup and the child must exit ``128 + SIGTERM``."""
     marker = tmp_path / "sigterm_ran.marker"
-    scanner_dir = str(Path(__file__).resolve().parents[1])
+    scanner_dir = str(Path(__file__).resolve().parents[2])  # project root, not scanner/
     program = _SEND_SIGNAL_PROGRAM.format(
         scanner_dir=scanner_dir, signum=signal.SIGTERM, marker=str(marker)
     )
@@ -273,7 +273,7 @@ def test_sigint_handler_calls_cleanup_and_exits_128_plus_signum(tmp_path):
     signal).
     """
     marker = tmp_path / "sigint_ran.marker"
-    scanner_dir = str(Path(__file__).resolve().parents[1])
+    scanner_dir = str(Path(__file__).resolve().parents[2])  # project root, not scanner/
     program = _SEND_SIGNAL_PROGRAM.format(
         scanner_dir=scanner_dir, signum=signal.SIGINT, marker=str(marker)
     )
@@ -306,13 +306,13 @@ def test_windows_atexit_path_runs_cleanup_on_normal_exit(tmp_path):
     callback must exist after the child exits.
     """
     marker = tmp_path / "atexit_ran.marker"
-    scanner_dir = str(Path(__file__).resolve().parents[1])
+    scanner_dir = str(Path(__file__).resolve().parents[2])  # project root, not scanner/
 
     program = textwrap.dedent(
         f"""
         import sys
         sys.path.insert(0, {scanner_dir!r})
-        import trap
+        from scanner import trap
 
         marker_path = r"{marker}"
 
@@ -357,13 +357,13 @@ def test_cleanup_removes_whitelist_ip_after_sigterm(tmp_path):
     marker.touch()
     assert marker.exists()
 
-    scanner_dir = str(Path(__file__).resolve().parents[1])
+    scanner_dir = str(Path(__file__).resolve().parents[2])  # project root, not scanner/
 
     program = textwrap.dedent(
         f"""
         import os, signal, sys, time
         sys.path.insert(0, {scanner_dir!r})
-        import trap
+        from scanner import trap
 
         marker = r"{marker}"
 

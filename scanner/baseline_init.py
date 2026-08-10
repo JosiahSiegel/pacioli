@@ -324,9 +324,14 @@ def _write_baseline(
     # Resolve against the allow-list BEFORE any path operation so a
     # symlink / ``..`` traversal in ``--baseline`` cannot redirect the
     # write outside the consumer's intended location (S2083).
+    # The allow-list covers:
+    #   - Path.home()           -> ~/.pacioli/..., ~/<repo>/pci_baseline.yaml
+    #   - Path.cwd()            -> <cwd>/pci_baseline.yaml
+    #   - tempfile.gettempdir() -> CI tmp paths (pytest, mktemp, /tmp/...)
+    import tempfile
     safe_path = _validate_safe_path(
         baseline_path,
-        allowed_roots=[Path.home(), Path.cwd()],
+        allowed_roots=[Path.home(), Path.cwd(), Path(tempfile.gettempdir())],
     )
 
     if append:
