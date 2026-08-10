@@ -14,7 +14,7 @@ abstract: >-
 type: software
 license: Apache-2.0
 # repository-code: filled in at first public release; see SUPPORT.md
-# repository-code: https://github.com/ORG/pacioli
+repository-code: https://github.com/JosiahSiegel/pacioli
 keywords:
   - compliance
   - pci-dss

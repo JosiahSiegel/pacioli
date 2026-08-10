@@ -1,0 +1,19 @@
+{
+  "release-type": "python",
+  "package-name": "pacioli",
+  "changelog-path": "CHANGELOG.md",
+  "changelog-sections": [
+    { "type": "feat", "section": "Added", "hidden": false },
+    { "type": "fix", "section": "Fixed", "hidden": false },
+    { "type": "perf", "section": "Changed", "hidden": false },
+    { "type": "refactor", "section": "Changed", "hidden": false },
+    { "type": "revert", "section": "Removed", "hidden": false },
+    { "type": "docs", "section": "Changed", "hidden": true },
+    { "type": "test", "section": "Changed", "hidden": true },
+    { "type": "build", "section": "Changed", "hidden": true },
+    { "type": "ci", "section": "Changed", "hidden": true },
+    { "type": "chore", "section": "Changed", "hidden": true }
+  ],
+  "version-file": "pyproject.toml",
+  "extra-files": ["CITATION.cff"]
+}

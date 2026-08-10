@@ -94,7 +94,7 @@ For the read-only invariant, see [Safety Model](SAFETY_MODEL.md).
 
 ```bash
 # Clone
-git clone https://github.com/ORG/pacioli.git
+git clone https://github.com/JosiahSiegel/pacioli.git
 cd pacioli
 
 # Python deps
@@ -355,16 +355,32 @@ A PR cannot merge unless all three pass.
 
 ## Releasing
 
-Pacioli does not have a tagged-release cadence yet. When the first
-release is cut:
+Releases are automated end-to-end. Contributors write
+[Conventional Commits](../../CONTRIBUTING.md#commit-messages); two
+GitHub Actions workflows do the rest.
 
-1. Pick a version (semver; 0.x.y is OK until 1.0).
-2. Update `version` in `pyproject.toml` and `CITATION.cff`.
-3. Add a `CHANGELOG.md` entry under the new version.
-4. Tag the commit (`git tag v0.1.0`).
-5. Push the tag (`git push origin v0.1.0`).
-6. Optionally, build a sdist/wheel with `python -m build` and
-   upload to PyPI with `python -m twine upload dist/*`.
+**.github/workflows/release-please.yml** runs on every push to
+`main` and opens (or updates) a release PR titled
+`chore(main): release <next-version>`. The PR body is the draft
+changelog grouped by commit type.
+
+Merging the release PR:
+
+- bumps `version` in `pyproject.toml` and `CITATION.cff`,
+- moves `[Unreleased]` entries in `CHANGELOG.md` into a dated
+  `## [X.Y.Z] - <today>` block, and
+- creates the `vX.Y.Z` git tag on the merge commit.
+
+**.github/workflows/release.yml** triggers on any pushed `v*` tag.
+It builds the wheel + sdist with `python -m build`, attaches both
+artifacts to the matching GitHub Release, and signs them with a
+GitHub OIDC provenance attestation via
+`actions/attest-build-provenance@v1`. Consumers verify the wheel
+with `gh attestation verify`.
+
+There's no manual version bump, no manual changelog edit, and no
+manual tag. To cut a release, merge the release PR release-please
+opens.
 
 ## See also
 

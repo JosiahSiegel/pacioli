@@ -29,13 +29,23 @@ repo and it emits a self-contained HTML report.
 
 ```bash
 # Install (Python 3.12+)
-pip install -e .
+pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pacioli-X.Y.Z-py3-none-any.whl
+
+# Replace X.Y.Z with the desired release tag.
 
 # Scan any Terraform repo
 pacioli scan /path/to/target-repo
 ```
 
 The report is written under `<target-repo>/.checkov/<run-id>/aggregate/report.html`.
+
+### From source (dev only)
+
+For local development against this checkout:
+
+```bash
+pip install -e .
+```
 
 ## Why Pacioli?
 

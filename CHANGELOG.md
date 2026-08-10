@@ -68,5 +68,5 @@ This is the first public release, so there is no "what changed
 since the last version" section. The first version reflects the
 state of the scanner after the extraction commit.
 
-[Unreleased]: https://github.com/ORG/pacioli/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ORG/pacioli/releases/tag/v0.1.0
+[Unreleased]: https://github.com/JosiahSiegel/pacioli/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/JosiahSiegel/pacioli/releases/tag/v0.1.0
