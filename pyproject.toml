@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pacioli"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only compliance scanner for Azure Terraform. PCI DSS v4.0.1, SOC 2, CIS Azure, NIST 800-53, ISO 27001."
 readme = "README.md"
 license = {text = "Apache-2.0"}
