@@ -115,6 +115,47 @@ Use one of these so the change shows up correctly in tooling:
 - `mapping:` — change to `mappings/*.yaml`
 - `safety:` — change to `lib/safety.sh`
 
+## Commit messages
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/)
+so release-please can derive the next version and the
+Keep-a-Changelog-style release notes automatically. Every commit
+message MUST start with one of these types:
+
+- `feat:` — new user-facing capability (triggers a minor bump)
+- `fix:` — bug fix (triggers a patch bump)
+- `perf:` — performance improvement (triggers a patch bump)
+- `refactor:` — code change that neither fixes a bug nor adds a
+  feature (patch bump)
+- `docs:` — documentation only (no version bump)
+- `test:` — test additions or corrections (no version bump)
+- `build:` — build system or dependency changes (no version bump)
+- `ci:` — CI configuration changes (no version bump)
+- `chore:` — tooling or maintenance (no version bump)
+- `revert:` — reverts a previous commit
+
+Example `feat:` commit with a body:
+
+```
+feat(scanner): add --tier state flag for .tfstate drift scans
+
+Allows operators to point Pacioli at a Terraform state file blob
+and emit a drift diff alongside the static + plan findings.
+```
+
+A `BREAKING CHANGE:` footer triggers a MAJOR bump:
+
+```
+feat(scanner): rename --gate-threshold to --fail-on
+
+The old flag name is removed. Update CI configs accordingly.
+
+BREAKING CHANGE: --gate-threshold has been replaced with --fail-on.
+```
+
+See <https://www.conventionalcommits.org/en/v1.0.0/#specification>
+for the full grammar.
+
 ## Adding a new Checkov rule → framework mapping
 
 Most contributions happen in `mappings/pci_dss_4.0.1.yaml` (or
