@@ -102,18 +102,26 @@ For security issues, **do not file a public GitHub issue**. See
 5. Use the PR template. Reference any related issue.
 6. Maintainers will review within a few business days.
 
-### Commit message prefixes
+### Project-specific commit scopes
 
-Use one of these so the change shows up correctly in tooling:
+Use a Conventional Commits **scope** when a change is local to a
+specific area of the codebase. (See the "Commit messages" section
+above for the full grammar.)
 
-- `feat:` — new feature
-- `fix:` — bug fix
-- `docs:` — documentation only
-- `chore:` — housekeeping (deps, CI, formatting)
-- `refactor:` — no behavior change
-- `severity:` — new entry in `SEVERITY_OVERRIDE`
-- `mapping:` — change to `mappings/*.yaml`
-- `safety:` — change to `lib/safety.sh`
+- `feat(severity):` or `fix(severity):` — change to `SEVERITY_OVERRIDE`
+- `feat(mapping):` or `fix(mapping):` — change to `mappings/*.yaml`
+- `feat(safety):` or `fix(safety):` — change to `lib/safety.sh`
+- `feat(scanner):` or `fix(scanner):` — change to the `scanner/`
+  Python package
+- `feat(release):` or `fix(release):` — change to the release
+  pipeline (`.github/release-please-config.json`,
+  `.github/workflows/release*.yml`)
+
+Example:
+
+```
+fix(severity): add PCI_REQ_8.3.4 to HIGH-severity override
+```
 
 ## Commit messages
 
