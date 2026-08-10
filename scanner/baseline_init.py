@@ -45,6 +45,8 @@ except ImportError:
     print("ERROR: PyYAML is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
+from scanner.paths import PathResolutionError
+
 
 # ---------------------------------------------------------------------------
 # Defaults — mirror scan_baseline_init.sh.
@@ -80,6 +82,78 @@ class BaselineInitError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def _resolve_uri(result: dict) -> str:
+    """Return the physicalLocation URI of a SARIF result, else ``""``.
+
+    Pure data-shaping helper. Pulled out so ``_collect_stub_pairs`` stays
+    focused on the dedup loop, not on nested ``[0].get(...).get(...)``.
+    """
+    locs = result.get("locations") or []
+    if not locs:
+        return ""
+    first = locs[0] or {}
+    phys = first.get("physicalLocation", {}) or {}
+    artifact = phys.get("artifactLocation", {}) or {}
+    return artifact.get("uri", "") or ""
+
+
+def _collect_stub_pairs(sarif_data: dict) -> dict[tuple[str, str], dict[str, set]]:
+    """Dedup SARIF results into ``(check_id, uri) -> {projects, envs}`` buckets.
+
+    Walks every run/result in ``sarif_data`` and accumulates the
+    ``(pci_project, pci_env)`` tuples that produced each
+    ``(ruleId, physicalLocation.uri)`` pair. Pair with no project or env
+    metadata still receives a bucket so the stub survives.
+    """
+    seen: dict[tuple[str, str], dict[str, set]] = defaultdict(
+        lambda: {"projects": set(), "envs": set()}
+    )
+
+    for run in sarif_data.get("runs", []) or []:
+        props = run.get("properties", {}) or {}
+        project = props.get("pci_project", "") or ""
+        env = props.get("pci_env", "") or ""
+
+        for result in run.get("results", []) or []:
+            check_id = result.get("ruleId", "UNKNOWN") or "UNKNOWN"
+            uri = _resolve_uri(result)
+            bucket = seen[(check_id, uri)]
+            if project:
+                bucket["projects"].add(project)
+            if env:
+                bucket["envs"].add(env)
+
+    return seen
+
+
+def _entry_to_yaml(check_id: str, uri: str, bucket: dict[str, set], today: str) -> dict:
+    """Build one stub YAML dict from a single SARIF bucket.
+
+    Mirrors the dict literal in scan_baseline_init.sh lines 80-95. The
+    ``hit_count`` falls back to ``1`` when no project/env metadata was
+    attached to the bucket — those findings still need a stub so the
+    team can triage them.
+    """
+    projects = bucket["projects"]
+    envs = bucket["envs"]
+    has_metadata = bool(projects or envs)
+
+    return {
+        "check_id": check_id,
+        "resource_pattern": uri or "*",
+        "justification": "TBD",
+        "compensating_control": "TBD",
+        "owner": "TBD",
+        "ticket_id": "TBD",
+        "expires_on": "TBD",
+        "first_seen": sorted(f"{p}/{e}" for p in projects for e in envs),
+        "hit_count": len(projects) * len(envs) if has_metadata else 1,
+        # Bonus metadata: generation timestamp so re-runs can be
+        # detected by downstream tooling.
+        "generated_at": today,
+    }
+
+
 def _build_stub_entries(combined_sarif: Path, top_n: int) -> list[dict]:
     """Read combined.sarif and return one stub dict per (check_id, resource).
 
@@ -108,60 +182,13 @@ def _build_stub_entries(combined_sarif: Path, top_n: int) -> list[dict]:
     except (OSError, json.JSONDecodeError) as exc:
         raise BaselineInitError(f"failed to parse {combined_sarif}: {exc}") from exc
 
-    # (check_id, resource_uri) -> {"projects": set, "envs": set}
-    seen: dict[tuple[str, str], dict[str, set]] = defaultdict(
-        lambda: {"projects": set(), "envs": set()}
-    )
-
-    for run in data.get("runs", []) or []:
-        props = run.get("properties", {}) or {}
-        project = props.get("pci_project", "") or ""
-        env = props.get("pci_env", "") or ""
-        for r in run.get("results", []) or []:
-            cid = r.get("ruleId", "UNKNOWN") or "UNKNOWN"
-            # resource: physical location of the first result, else "".
-            uri = ""
-            locs = r.get("locations") or []
-            if locs:
-                uri = (
-                    (locs[0] or {})
-                    .get("physicalLocation", {})
-                    .get("artifactLocation", {})
-                    .get("uri", "")
-                    or ""
-                )
-            key = (cid, uri)
-            bucket = seen[key]
-            if project:
-                bucket["projects"].add(project)
-            if env:
-                bucket["envs"].add(env)
-
+    pairs = _collect_stub_pairs(data)
     today = date.today().isoformat()
-    out: list[dict] = []
-    for (cid, uri), bucket in seen.items():
-        out.append(
-            {
-                "check_id": cid,
-                "resource_pattern": uri or "*",
-                "justification": "TBD",
-                "compensating_control": "TBD",
-                "owner": "TBD",
-                "ticket_id": "TBD",
-                "expires_on": "TBD",
-                "first_seen": sorted(
-                    f"{p}/{e}"
-                    for p in bucket["projects"]
-                    for e in bucket["envs"]
-                ),
-                "hit_count": len(bucket["projects"]) * len(bucket["envs"])
-                if (bucket["projects"] or bucket["envs"])
-                else 1,
-                # Bonus metadata: generation timestamp so re-runs can be
-                # detected by downstream tooling.
-                "generated_at": today,
-            }
-        )
+
+    out = [
+        _entry_to_yaml(check_id, uri, bucket, today)
+        for (check_id, uri), bucket in pairs.items()
+    ]
     out.sort(key=lambda x: (-x["hit_count"], x["check_id"], x["resource_pattern"]))
     return out
 
@@ -227,6 +254,41 @@ def _merge_append(
     return merged
 
 
+def _validate_safe_path(path: Path, allowed_roots: list[Path]) -> Path:
+    """Ensure ``path`` resolves under one of ``allowed_roots``.
+
+    Guards the file-write sinks (S2083). The CLI accepts ``--baseline``
+    from the user (and via ``$PACIOLI_BASELINE_FILE`` /
+    ``$PACIOLI_TARGET_REPO`` / ``$PCI_REPO_ROOT``), so a symlink or
+    ``..`` traversal could redirect the write outside the consumer's
+    intended location. Resolving and checking against an allow-list
+    catches that.
+
+    Args:
+        path: Caller-supplied destination path (not yet trusted).
+        allowed_roots: Canonical roots the write is permitted to land
+            under. Typically ``Path.home()`` (for the
+            ``~/.pacioli/config.yaml`` family) and ``Path.cwd()``
+            (for ``<run-dir>/pci_baseline.yaml`` style destinations).
+
+    Returns:
+        The resolved absolute ``Path`` on success.
+
+    Raises:
+        PathResolutionError: If the resolved path is not under any
+            allowed root.
+    """
+    resolved = path.expanduser().resolve()
+    for root in allowed_roots:
+        canonical_root = root.expanduser().resolve()
+        if resolved == canonical_root or canonical_root in resolved.parents:
+            return resolved
+    raise PathResolutionError(
+        f"refusing to write outside allow-listed roots: {resolved} "
+        f"not under {[str(r) for r in allowed_roots]}"
+    )
+
+
 def _write_baseline(
     baseline_path: Path,
     entries: list[dict],
@@ -237,14 +299,23 @@ def _write_baseline(
 
     Mirrors scan_baseline_init.sh lines 112-157. Preserves the existing
     comment header when present.
+
+    The destination is validated against an allow-list of roots before
+    any file operation runs. This guards against S2083 (user-controlled
+    path flowing into a file write).
     """
+    safe_path = _validate_safe_path(
+        baseline_path,
+        allowed_roots=[Path.home(), Path.cwd()],
+    )
+
     if append:
-        existing = _load_existing_suppressions(baseline_path)
+        existing = _load_existing_suppressions(safe_path)
         merged = _merge_append(existing, entries)
     else:
         merged = list(entries)
 
-    header = _read_existing_header(baseline_path)
+    header = _read_existing_header(safe_path)
     if not header.lstrip().startswith("#"):
         header = DEFAULT_HEADER.rstrip()
 
@@ -254,9 +325,9 @@ def _write_baseline(
         "suppressions": merged,
     }
 
-    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
     body = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
-    baseline_path.write_text(header + "\n\n" + body, encoding="utf-8")
+    safe_path.write_text(header + "\n\n" + body, encoding="utf-8")
     return len(merged)
 
 

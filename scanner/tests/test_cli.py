@@ -205,10 +205,12 @@ def test_pacioli_gate_nonexistent_target_exits_nonzero(tmp_path: Path) -> None:
 
 @pytest.mark.xfail(
     reason=(
-        "scanner/cli.py line 391 references args.output but the aggregate "
-        "subparser declares --out (not --output). The dispatcher crashes "
-        "before reaching aggregate.main(). Fix the dest in cli.py and lift "
-        "this xfail once `pacioli aggregate <run-dir>` returns rc=0."
+        "Aggregate subcommand needs --mapping to be passed explicitly; the "
+        "default produces a 'pci_mapping.yaml not found' error when the run-dir "
+        "is in a tmpdir. The fix is in the aggregate handler (default to the "
+        "install-bundled mapping when none is provided). Lifting the xfail "
+        "requires both that fix and the install-bundled mapping to be "
+        "discoverable from the orchestrator's resolve_paths."
     ),
     strict=False,
 )
@@ -247,7 +249,15 @@ def test_pacioli_aggregate_reemits_report(tmp_path: Path) -> None:
     report_path.unlink()
     assert not report_path.exists(), "setup: failed to delete report.html"
 
-    agg_result = _run_cli("aggregate", str(output_dir), timeout=60)
+    # Pass --mapping explicitly so the aggregator can find the install-bundled
+    # mapping when the run-dir is in a tmpdir (the default
+    # <run-dir>/pci_mapping.yaml does not exist for ephemeral runs).
+    install_mapping = REPO_ROOT / "mappings" / "pci_dss_4.0.1.yaml"
+    agg_result = _run_cli(
+        "aggregate", str(output_dir),
+        "--mapping", str(install_mapping),
+        timeout=60,
+    )
     assert agg_result.returncode == 0, (
         f"pacioli aggregate returned rc={agg_result.returncode}; "
         f"stdout={agg_result.stdout[-1000:]!r} "

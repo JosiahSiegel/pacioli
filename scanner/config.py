@@ -36,6 +36,13 @@ INTERACTIVE_ENV_VAR: str = "PACIOLI_INTERACTIVE"
 #: Environment variable that overrides the mapping path.
 MAPPING_ENV_VAR: str = "PACIOLI_MAPPING"
 
+#: Operator-facing status string for frameworks not yet bundled with Pacioli.
+#: This literal is rendered directly into the first-run picker menu and is also
+#: interpolated into runtime prompts shown to the user; changing it requires a
+#: corresponding update to the operator-facing docs (CLI_REFERENCE.md,
+#: CONSUMING_GUIDE.md, OPERATOR_GUIDE.md) so treat it as a public contract.
+FRAMEWORK_NOT_SHIPPED_HINT: str = "not yet shipped - provide a custom path"
+
 #: Shipped framework choices shown in the first-run picker.
 #: Each entry: (display name, filename in mappings/, "shipped" | "not shipped")
 BUILTIN_FRAMEWORKS: list[dict[str, str]] = [
@@ -49,25 +56,25 @@ BUILTIN_FRAMEWORKS: list[dict[str, str]] = [
         "key": "soc2",
         "label": "SOC 2",
         "filename": "soc2.yaml",
-        "status": "not yet shipped - provide a custom path",
+        "status": FRAMEWORK_NOT_SHIPPED_HINT,
     },
     {
         "key": "cis_azure",
         "label": "CIS Azure Benchmark",
         "filename": "cis_azure.yaml",
-        "status": "not yet shipped - provide a custom path",
+        "status": FRAMEWORK_NOT_SHIPPED_HINT,
     },
     {
         "key": "nist_800_53",
         "label": "NIST 800-53",
         "filename": "nist_800_53.yaml",
-        "status": "not yet shipped - provide a custom path",
+        "status": FRAMEWORK_NOT_SHIPPED_HINT,
     },
     {
         "key": "iso_27001",
         "label": "ISO 27001",
         "filename": "iso_27001.yaml",
-        "status": "not yet shipped - provide a custom path",
+        "status": FRAMEWORK_NOT_SHIPPED_HINT,
     },
 ]
 
@@ -350,6 +357,7 @@ __all__ = [
     "BUILTIN_FRAMEWORKS",
     "CUSTOM_PATH_KEY",
     "DEFAULT_CONFIG_PATH",
+    "FRAMEWORK_NOT_SHIPPED_HINT",
     "INTERACTIVE_ENV_VAR",
     "MAPPING_ENV_VAR",
     "NoMappingConfigError",

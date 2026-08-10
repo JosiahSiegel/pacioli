@@ -154,35 +154,35 @@ def redirect_stdout_stderr() -> Iterator[tuple[URLRewriteStream, URLRewriteStrea
                 pass
 
 
-def rewrite_sarif_file(path: Path) -> tuple[int, int]:
-    """Rewrite ``helpUri`` fields in a SARIF file.
+def _load_sarif(path: Path) -> dict | None:
+    """Read and parse a SARIF file from disk.
 
-    Self-contained port of ``rewrite_sarif_help.rewrite_sarif()`` so
-    this module can be the single import for all URL rewriting. Logic
-    is identical to the original: walk each run's tool.driver.rules,
-    swap ``helpUri`` for the canonical GitHub source URL via
-    ``get_help_uri(rule_id, old)``, and write back atomically via a
-    ``.tmp`` sibling + ``Path.replace``.
+    Returns the parsed JSON object on success, or ``None`` if the file
+    is not valid JSON (errors are logged to stderr). All other schema
+    validation (presence of ``runs``, etc.) is deferred to the caller
+    so this helper stays focused on the I/O contract.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"  ERROR: {path} is not valid JSON: {exc}", file=sys.stderr)
+        return None
 
-    Args:
-        path: Path to a SARIF (``.sarif``) file on disk.
+
+def _rewrite_rules(runs: object) -> tuple[int, int]:
+    """Mutate ``helpUri`` on every rule in every run's tool driver.
+
+    Walks each run's ``tool.driver.rules`` array, swaps ``helpUri`` for
+    the canonical GitHub source URL via ``get_help_uri(rule_id, old)``,
+    and counts how many rules were rewritten vs. already correct. The
+    runs argument is intentionally typed as ``object`` so the caller
+    can pass anything through — we only act when it is a non-empty list.
 
     Returns:
         ``(rewritten_count, skipped_count)`` — number of rules whose
         ``helpUri`` changed vs. number whose ``helpUri`` was already
-        correct. On parse errors, returns ``(0, 0)`` and logs to stderr.
+        correct.
     """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        print(f"  ERROR: {path} is not valid JSON: {exc}", file=sys.stderr)
-        return 0, 0
-
-    runs = data.get("runs", [])
-    if not isinstance(runs, list) or not runs:
-        print(f"  WARN: {path} has no 'runs' array; skipping", file=sys.stderr)
-        return 0, 0
-
     rewritten = 0
     skipped = 0
     for run in runs:
@@ -200,13 +200,54 @@ def rewrite_sarif_file(path: Path) -> tuple[int, int]:
                     rewritten += 1
                 else:
                     skipped += 1
+    return rewritten, skipped
 
-    # Write back atomically: write to .tmp, then rename.
+
+def _write_sarif_atomic(path: Path, data: dict) -> None:
+    """Write SARIF ``data`` back to ``path`` atomically.
+
+    Serializes to a ``.tmp`` sibling first, then ``Path.replace``s it
+    over the target. This means a crash during write never leaves a
+    half-written SARIF in place — the original is preserved until the
+    rename succeeds.
+    """
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     tmp_path.replace(path)
+
+
+def rewrite_sarif_file(path: Path) -> tuple[int, int]:
+    """Rewrite ``helpUri`` fields in a SARIF file.
+
+    Self-contained port of ``rewrite_sarif_help.rewrite_sarif()`` so
+    this module can be the single import for all URL rewriting. Logic
+    is identical to the original: walk each run's tool.driver.rules,
+    swap ``helpUri`` for the canonical GitHub source URL via
+    ``get_help_uri(rule_id, old)``, and write back atomically via a
+    ``.tmp`` sibling + ``Path.replace``.
+
+    Args:
+        path: Path to a SARIF (``.sarif``) file on disk.
+
+    Returns:
+        ``(rewritten_count, skipped_count)`` — number of rules whose
+        ``helpUri`` changed vs. number whose ``helpUri`` was already
+        correct. On parse errors or missing ``runs`` array, returns
+        ``(0, 0)`` and logs to stderr.
+    """
+    data = _load_sarif(path)
+    if data is None:
+        return 0, 0
+
+    runs = data.get("runs", [])
+    if not isinstance(runs, list) or not runs:
+        print(f"  WARN: {path} has no 'runs' array; skipping", file=sys.stderr)
+        return 0, 0
+
+    rewritten, skipped = _rewrite_rules(runs)
+    _write_sarif_atomic(path, data)
     return rewritten, skipped
 
 

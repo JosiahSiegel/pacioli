@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,12 +28,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
-          pip install pyyaml
-          # Checkov is only needed for the actual scan; CI just
-          # validates code paths and the mapping loader. Skip the
-          # heavy install. Uncomment to run a real scan in CI:
-          #   pip install -r scanner/requirements-pinned.txt
+          pip install -e .
+          # Checkov is needed for the orchestrator's audit-pin enforcement.
+          # Install pinned version so the runtime checkov.__version__ guard is satisfied.
+          pip install -r scanner/requirements-pinned.txt
 
       - name: Run pytest
         run: pytest
@@ -47,7 +45,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
 
       - name: Validate mapping schema
         run: |

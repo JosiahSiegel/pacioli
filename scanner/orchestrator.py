@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -110,6 +111,22 @@ TIER_PASSES: dict[str, tuple[str, ...]] = {
 
 VALID_TIERS: tuple[str, ...] = ("source", "plan", "state")
 VALID_MODES: tuple[str, ...] = ("gate", "report", "audit")
+
+# Azure storage account name validation (Azure naming rules):
+#  - 3-24 characters
+#  - lowercase letters and digits only
+# Used to validate the `--state-account` CLI flag before it reaches
+# `subprocess.run` (S8705 — subprocess invocation with tainted CLI value).
+AZURE_STORAGE_ACCOUNT_PATTERN: str = r"^[a-z0-9]{3,24}$"
+
+# Azure Instance Metadata Service (IMDS) link-local address. Only
+# reachable from inside an Azure VM; used by ``_discover_public_ip`` to
+# fetch the canonical public IP for the storage firewall whitelist.
+AZURE_IMDS_ENDPOINT: str = "169.254.169.254"
+AZURE_IMDS_IPV4_PATH: str = (
+    f"/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress"
+    f"?api-version=2021-02-01&format=text"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +259,16 @@ class Orchestrator:
         output_dir = Path(output_dir).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        # ``label`` (from ``--label``) is an optional slug that
+        # disambiguates run-dirs when the operator wants to keep multiple
+        # scan runs side-by-side under the same parent. When supplied,
+        # per-pair output is written under ``<output_dir>/<label>/<project>/<env>/``
+        # instead of ``<output_dir>/<project>/<env>/``. When ``None`` (the
+        # default), the layout is unchanged.
+        run_root = output_dir / label if label else output_dir
+        if label:
+            run_root.mkdir(parents=True, exist_ok=True)
+
         # Resolve mapping/baseline (CLI > env > install-root fallback).
         try:
             resolved_mapping = self._resolve_mapping_path(mapping_path)
@@ -297,7 +324,7 @@ class Orchestrator:
                 )
                 continue
 
-            env_run_dir = output_dir / proj / env_name
+            env_run_dir = run_root / proj / env_name
             env_run_dir.mkdir(parents=True, exist_ok=True)
 
             _log("INFO", f"scanning {proj}/{env_name}")
@@ -317,7 +344,7 @@ class Orchestrator:
         # -- aggregate ------------------------------------------------
         if not self.no_aggregate and self.mode != "audit":
             agg_rc = self._run_aggregate(
-                run_dir=output_dir,
+                run_dir=run_root,
                 mapping_path=resolved_mapping,
                 baseline_path=resolved_baseline,
             )
@@ -327,7 +354,7 @@ class Orchestrator:
             # <run-dir>/aggregate/, but earlier versions emitted
             # <run-dir>/report.html). Mirrors scan.sh lines 759-774.
             report_html: Optional[Path] = None
-            for candidate in (output_dir / "aggregate" / "report.html", output_dir / "report.html"):
+            for candidate in (run_root / "aggregate" / "report.html", run_root / "report.html"):
                 if candidate.is_file():
                     report_html = candidate
                     break
@@ -353,72 +380,31 @@ class Orchestrator:
         # Tier 2/3: terraform init + plan (acquires state lock, no mutation
         # beyond the firewall whitelist). Mirrors scan.sh lines 388-436.
         if self.tier in ("plan", "state"):
-            if not self.dry_run and not state_account:
-                _log(
-                    "ERROR",
-                    f"PACIOLI_STATE_STORAGE_ACCOUNT is not set; cannot run tier "
-                    f"{self.tier!r} for {state.project}/{state.env}",
-                )
+            tier_rc = self._run_plan_tier(state, state_account)
+            if tier_rc < 0:
                 return pair_rc
-
-            if not self._whitelist_my_ip(state, state_account):
-                _log(
-                    "ERROR",
-                    f"failed to whitelist IP; cannot read remote state; "
-                    f"skipping {state.project}/{state.env}",
-                )
-                return pair_rc
-
-            if not self._run_terraform_init(state):
-                _log(
-                    "ERROR",
-                    f"terraform init failed for {state.project}/{state.env}; "
-                    "skipping plan layer",
-                )
-                return pair_rc
-
-            if not self._run_terraform_plan(state):
-                _log(
-                    "ERROR",
-                    f"terraform plan failed for {state.project}/{state.env}; "
-                    "skipping plan layer",
-                )
-                return pair_rc
-
-            self._run_terraform_show(state)
 
         # Compute pass list based on tier.
         passes = TIER_PASSES[self.tier]
 
-        # Pass 1: paac (custom policy-as-code) — always when tier allows.
         if "paac" in passes:
-            paac_out = state.env_run_dir / "results_paac.sarif"
-            rc = runner.run_paac(state.env_dir, paac_out)
-            self._record_checkov_rc(rc, state, "paac")
-            pair_rc = self._accumulate(pair_rc, rc)
+            pair_rc = self._accumulate(pair_rc, self._emit_paac(runner, state))
 
         # Pass 2: source (built-in terraform framework).
         # Mirrors scan.sh line 503: source tier runs this; plan/state
         # tier ALSO runs this (it is the deepest source layer).
         if "source" in passes:
-            src_out = state.env_run_dir / "results_terraform_source.sarif"
-            rc = runner.run_source(state.env_dir, src_out)
-            self._record_checkov_rc(rc, state, "source")
-            pair_rc = self._accumulate(pair_rc, rc)
+            pair_rc = self._accumulate(pair_rc, self._emit_source(runner, state))
 
         # Pass 3: plan (terraform_plan framework on plan.json).
-        if "plan" in passes and state.plan_json and state.plan_json.is_file():
-            plan_out = state.env_run_dir / "results_terraform_plan.sarif"
-            rc = runner.run_plan(state.plan_json, plan_out, env_dir=state.env_dir)
-            self._record_checkov_rc(rc, state, "plan")
-            pair_rc = self._accumulate(pair_rc, rc)
+        if "plan" in passes:
+            plan_rc = self._emit_plan_pass(runner, state)
+            if plan_rc is not None:
+                pair_rc = self._accumulate(pair_rc, plan_rc)
 
         # Pass 4: secrets (always when tier allows).
         if "secrets" in passes:
-            secrets_out = state.env_run_dir / "results_secrets.sarif"
-            rc = runner.run_secrets(state.env_dir, secrets_out)
-            self._record_checkov_rc(rc, state, "secrets")
-            pair_rc = self._accumulate(pair_rc, rc)
+            pair_rc = self._accumulate(pair_rc, self._emit_secrets(runner, state))
 
         # Pass 5 (state-only): state-as-plan scan + drift diff.
         if "state" in passes:
@@ -428,6 +414,113 @@ class Orchestrator:
         self._shred_plan_artifacts(state)
 
         return pair_rc
+
+    def _run_plan_tier(
+        self,
+        state: _PairState,
+        state_account: Optional[str],
+    ) -> int:
+        """Tier 2/3 prep: whitelist IP, terraform init + plan + show.
+
+        Returns 0 on success, -1 when an early bail-out was logged (caller
+        should skip the pair's checkov passes). Logs the reason for
+        skipping.
+        """
+        if not self.dry_run and not state_account:
+            _log(
+                "ERROR",
+                f"PACIOLI_STATE_STORAGE_ACCOUNT is not set; cannot run tier "
+                f"{self.tier!r} for {state.project}/{state.env}",
+            )
+            return -1
+
+        if not self._whitelist_my_ip(state, state_account):
+            _log(
+                "ERROR",
+                f"failed to whitelist IP; cannot read remote state; "
+                f"skipping {state.project}/{state.env}",
+            )
+            return -1
+
+        if not self._run_terraform_init(state):
+            _log(
+                "ERROR",
+                f"terraform init failed for {state.project}/{state.env}; "
+                "skipping plan layer",
+            )
+            return -1
+
+        if not self._run_terraform_plan(state):
+            _log(
+                "ERROR",
+                f"terraform plan failed for {state.project}/{state.env}; "
+                "skipping plan layer",
+            )
+            return -1
+
+        self._run_terraform_show(state)
+        return 0
+
+    def _emit_paac(self, runner: CheckovRunner, state: _PairState) -> int:
+        """Run the paac (custom policy-as-code) pass; record + return rc."""
+        paac_out = state.env_run_dir / "results_paac.sarif"
+        rc = runner.run_paac(state.env_dir, paac_out)
+        self._record_checkov_rc(rc, state, "paac")
+        return rc
+
+    def _emit_source(self, runner: CheckovRunner, state: _PairState) -> int:
+        """Run the built-in terraform source pass; record + return rc."""
+        src_out = state.env_run_dir / "results_terraform_source.sarif"
+        rc = runner.run_source(state.env_dir, src_out)
+        self._record_checkov_rc(rc, state, "source")
+        return rc
+
+    def _emit_plan_pass(
+        self,
+        runner: CheckovRunner,
+        state: _PairState,
+    ) -> Optional[int]:
+        """Run the terraform_plan pass on plan.json if it exists.
+
+        Returns ``None`` when no plan.json is available (caller should
+        skip accumulation); otherwise the checkov rc.
+        """
+        if not (state.plan_json and state.plan_json.is_file()):
+            return None
+        plan_out = state.env_run_dir / "results_terraform_plan.sarif"
+        rc = runner.run_plan(state.plan_json, plan_out, env_dir=state.env_dir)
+        self._record_checkov_rc(rc, state, "plan")
+        return rc
+
+    def _emit_secrets(self, runner: CheckovRunner, state: _PairState) -> int:
+        """Run the secrets pass on the .tf source; record + return rc."""
+        secrets_out = state.env_run_dir / "results_secrets.sarif"
+        rc = runner.run_secrets(state.env_dir, secrets_out)
+        self._record_checkov_rc(rc, state, "secrets")
+        return rc
+
+    @staticmethod
+    def _check_storage_account_valid(account: str) -> None:
+        """Validate a storage account name before it reaches ``subprocess``.
+
+        Azure storage account naming rules:
+          * 3-24 characters
+          * lowercase letters and digits only
+
+        The CLI flag ``--state-account`` is the only producer of this
+        value (S8705 — subprocess invocation with tainted CLI value).
+        Validating here gives a fail-fast error before any ``az``
+        subprocess is invoked, and removes the injection surface.
+
+        Raises:
+            ValueError: when ``account`` does not match the Azure
+                storage account naming pattern.
+        """
+        if not re.fullmatch(AZURE_STORAGE_ACCOUNT_PATTERN, account):
+            raise ValueError(
+                f"invalid Azure storage account name: {account!r} "
+                f"(must match {AZURE_STORAGE_ACCOUNT_PATTERN})"
+            )
 
     # -- helpers ------------------------------------------------------
 
@@ -484,6 +577,9 @@ class Orchestrator:
         398-410.
         """
         assert state_account is not None  # checked by caller
+        # Defense-in-depth: validate the CLI-derived value before any
+        # subprocess invocation (S8705 — taint from CLI flag).
+        self._check_storage_account_valid(state_account)
         _log("INFO", f"  whitelist current IP on {state_account} storage firewall")
 
         if self.dry_run:
@@ -682,31 +778,16 @@ class Orchestrator:
         synthesized key (``CR_<Env>_<project>.tfstate``) when missing.
         """
         assert state_account is not None
+        # Defense-in-depth: validate the CLI-derived value before any
+        # subprocess invocation (S8705 — taint from CLI flag).
+        self._check_storage_account_valid(state_account)
         _log("INFO", "  state-scan: download state blob from Azure")
 
-        backend_key = self._resolve_backend_key(state)
-        if not backend_key:
-            backend_key = f"CR_{state.env[:1].upper()}{state.env[1:]}_{state.project}.tfstate"
-            _log(
-                "WARN",
-                f"no backend key in terraform.aztfexport.tf; "
-                f"falling back to synthesized: {backend_key}",
-            )
-
-        state_local = state.env_run_dir / "state.tfstate"
-        state_plan_json = state.env_run_dir / "state_as_plan.json"
-        drift_report = state.env_run_dir / "drift_report.json"
-
-        state.state_local = state_local
-        state.state_plan_json = state_plan_json
+        backend_key = self._resolve_or_synthesize_backend_key(state)
+        paths = self._resolve_state_blob_paths(state)
 
         if self.dry_run:
-            print(
-                f"[dry-run] az storage blob download "
-                f"--account-name {state_account} --container-name iac "
-                f"--name {backend_key} --file {state_local}"
-            )
-            print(f"[dry-run] python scanner/tfstate_to_plan.py {state_local} {state_plan_json}")
+            self._print_state_blob_dry_run(state_account, backend_key, paths)
             return
 
         # Refuse guard (defense in depth).
@@ -715,6 +796,80 @@ class Orchestrator:
             f"--container-name iac --name {backend_key}"
         )
 
+        if not self._download_state_blob(state_account, backend_key, paths["state_local"]):
+            return
+        if not self._convert_state_to_plan(paths["state_local"], paths["state_plan_json"]):
+            return
+        self._scan_state_as_plan(runner, state, paths["state_plan_json"])
+        self._emit_drift_report(state, paths["state_plan_json"], paths["drift_report"])
+
+        # Shred state plan after drift extraction.
+        self._shred_state_plan(paths["state_plan_json"])
+
+    def _resolve_or_synthesize_backend_key(self, state: _PairState) -> str:
+        """Return the storage backend key, synthesizing one if missing.
+
+        Reads ``<env_dir>/terraform.aztfexport.tf``; falls back to
+        ``CR_<Env>_<project>.tfstate`` so downstream download has a key.
+        """
+        backend_key = self._resolve_backend_key(state)
+        if backend_key:
+            return backend_key
+        synthesized = f"CR_{state.env[:1].upper()}{state.env[1:]}_{state.project}.tfstate"
+        _log(
+            "WARN",
+            f"no backend key in terraform.aztfexport.tf; "
+            f"falling back to synthesized: {synthesized}",
+        )
+        return synthesized
+
+    @staticmethod
+    def _resolve_state_blob_paths(state: _PairState) -> dict[str, Path]:
+        """Return the local paths used by the state-blob scan pipeline.
+
+        Also annotates ``state.state_local`` / ``state.state_plan_json``
+        so downstream helpers (e.g. shred, drift) find them.
+        """
+        state_local = state.env_run_dir / "state.tfstate"
+        state_plan_json = state.env_run_dir / "state_as_plan.json"
+        drift_report = state.env_run_dir / "drift_report.json"
+        state.state_local = state_local
+        state.state_plan_json = state_plan_json
+        return {
+            "state_local": state_local,
+            "state_plan_json": state_plan_json,
+            "drift_report": drift_report,
+        }
+
+    @staticmethod
+    def _print_state_blob_dry_run(
+        state_account: str,
+        backend_key: str,
+        paths: dict[str, Path],
+    ) -> None:
+        """Echo the intended ``az`` / tfstate_to_plan invocations."""
+        print(
+            f"[dry-run] az storage blob download "
+            f"--account-name {state_account} --container-name iac "
+            f"--name {backend_key} --file {paths['state_local']}"
+        )
+        print(
+            f"[dry-run] python scanner/tfstate_to_plan.py "
+            f"{paths['state_local']} {paths['state_plan_json']}"
+        )
+
+    def _download_state_blob(
+        self,
+        state_account: str,
+        backend_key: str,
+        state_local: Path,
+    ) -> bool:
+        """Download the state blob to ``state_local``; True on success.
+
+        Logs and returns False on timeout, missing binary, non-zero rc,
+        or empty result. The downloaded blob is shredded ASAP in the
+        caller (PCI 10.7 hygiene).
+        """
         try:
             dl = subprocess.run(
                 [
@@ -742,7 +897,7 @@ class Orchestrator:
             )
         except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
             _log("ERROR", f"  state blob download failed: {exc}")
-            return
+            return False
 
         if dl.returncode != 0:
             _log(
@@ -750,18 +905,28 @@ class Orchestrator:
                 f"  az storage blob download failed (rc={dl.returncode}): "
                 f"{(dl.stderr or '').strip()[:500]}",
             )
-            return
+            return False
 
         if not state_local.is_file() or state_local.stat().st_size == 0:
             _log("WARN", "  state blob download produced an empty file")
-            return
+            return False
 
         _log(
             "INFO",
             f"  state blob downloaded: {state_local.stat().st_size} bytes",
         )
+        return True
 
-        # Convert state -> plan-shape JSON.
+    def _convert_state_to_plan(
+        self,
+        state_local: Path,
+        state_plan_json: Path,
+    ) -> bool:
+        """Convert ``state_local`` -> ``state_plan_json`` via tfstate_to_plan.
+
+        Shreds ``state_local`` on a successful conversion (PCI 10.7).
+        Returns False if conversion failed or output is missing.
+        """
         try:
             conv = subprocess.run(
                 [
@@ -777,7 +942,7 @@ class Orchestrator:
             )
         except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
             _log("ERROR", f"  tfstate_to_plan failed: {exc}")
-            return
+            return False
 
         # Shred the encrypted state blob ASAP (PCI 10.7 hygiene).
         if state_local.is_file():
@@ -788,9 +953,22 @@ class Orchestrator:
 
         if conv.returncode != 0 or not state_plan_json.is_file():
             _log("ERROR", "  tfstate_to_plan did not produce a plan JSON")
-            return
+            return False
+        return True
 
-        # Scan state-as-plan.
+    def _scan_state_as_plan(
+        self,
+        runner: CheckovRunner,
+        state: _PairState,
+        state_plan_json: Path,
+    ) -> None:
+        """Run checkov's ``terraform_plan`` framework on ``state_plan_json``.
+
+        State-pass rc is intentionally NOT propagated into pair_rc here:
+        the SARIF carries the findings and the aggregate step drives the
+        gate. We log a WARN on non-zero so operators see the per-pair
+        signal in stderr.
+        """
         state_sarif = state.env_run_dir / "results_state.sarif"
         rc = runner.run_plan(state_plan_json, state_sarif, env_dir=state.env_dir)
         if rc != 0:
@@ -798,38 +976,46 @@ class Orchestrator:
                 "WARN",
                 f"checkov state returned rc={rc} for {state.project}/{state.env}",
             )
-        # State-pass rc is included in the pair_rc via _scan_one_pair's
-        # _accumulate path; _scan_state_blob is called without that
-        # path, so we track rc here via the runner but do not propagate.
-        # The bash version's accumulate_checkov_rc pattern is replicated
-        # by the caller through the returned pair_rc; we instead log + emit
-        # the SARIF and let the aggregate step's findings drive the gate.
 
-        # Drift diff (best effort).
-        if state.plan_json and state.plan_json.is_file() and state_plan_json.is_file():
-            try:
-                subprocess.run(
-                    [
-                        sys.executable,
-                        str(Path(__file__).resolve().parent / "drift_report.py"),
-                        str(state.plan_json),
-                        str(state_plan_json),
-                        str(drift_report),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    check=False,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                _log("WARN", f"  drift_report.py failed: {exc}")
+    def _emit_drift_report(
+        self,
+        state: _PairState,
+        state_plan_json: Path,
+        drift_report: Path,
+    ) -> None:
+        """Run ``drift_report.py`` to diff ``state.plan_json`` vs state-as-plan.
 
-        # Shred state plan after drift extraction.
-        if state_plan_json.is_file():
-            try:
-                state_plan_json.unlink()
-            except OSError:
-                pass
+        Best-effort: errors are logged at WARN, never raised. Skipped
+        when ``state.plan_json`` is unavailable.
+        """
+        if not (state.plan_json and state.plan_json.is_file() and state_plan_json.is_file()):
+            return
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve().parent / "drift_report.py"),
+                    str(state.plan_json),
+                    str(state_plan_json),
+                    str(drift_report),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            _log("WARN", f"  drift_report.py failed: {exc}")
+
+    @staticmethod
+    def _shred_state_plan(state_plan_json: Path) -> None:
+        """Shred the state-as-plan JSON (PCI 10.7 hygiene, best-effort)."""
+        if not state_plan_json.is_file():
+            return
+        try:
+            state_plan_json.unlink()
+        except OSError as exc:  # noqa: BLE001 — best-effort shred; logged for forensics
+            _log("WARN", f"  failed to shred state plan: {exc}")
 
     def _resolve_backend_key(self, state: _PairState) -> Optional[str]:
         """Read the storage backend key from terraform.aztfexport.tf.
@@ -917,25 +1103,50 @@ class Orchestrator:
         its own scope/mapping/baseline resolution; we pass absolute
         paths so it locates them without depending on CWD.
         """
-        argv: list[str] = ["aggregate.py", "--run-dir", str(run_dir)]
-        if mapping_path is not None:
-            argv += ["--mapping", str(mapping_path)]
-        if baseline_path is not None:
-            argv += ["--baseline", str(baseline_path)]
+        argv = self._resolve_aggregate_argv(run_dir, mapping_path, baseline_path)
 
         if self.dry_run:
             _log("INFO", f"aggregation (dry-run): {argv}")
             return 0
 
-        # Lazy import — aggregate.py is heavy (PyYAML + SARIF parsing +
-        # HTML rendering setup). Importing here avoids paying the cost
-        # for callers that bypass the aggregate step (CI gate mode).
-        from scanner import aggregate as _aggregate
-
         _log(
             "INFO",
             f"aggregating {run_dir} (coverage matrix + HTML report)",
         )
+
+        agg_rc = self._invoke_aggregate(argv)
+        if agg_rc == 0:
+            return 0
+        self._log_aggregate_rc(agg_rc, run_dir)
+        return agg_rc
+
+    @staticmethod
+    def _resolve_aggregate_argv(
+        run_dir: Path,
+        mapping_path: Optional[Path],
+        baseline_path: Optional[Path],
+    ) -> list[str]:
+        """Build the argv list passed to ``scanner.aggregate.main``.
+
+        Mirrors scan.sh's aggregate invocation flags. Absolute paths
+        are used so the aggregate step does not depend on CWD.
+        """
+        argv: list[str] = ["aggregate.py", "--run-dir", str(run_dir)]
+        if mapping_path is not None:
+            argv += ["--mapping", str(mapping_path)]
+        if baseline_path is not None:
+            argv += ["--baseline", str(baseline_path)]
+        return argv
+
+    @staticmethod
+    def _invoke_aggregate(argv: list[str]) -> int:
+        """Call ``scanner.aggregate.main`` with ``sys.argv`` swapped in/out.
+
+        Lazy import keeps ``aggregate.py`` (PyYAML + SARIF parsing +
+        HTML rendering) out of the import path for callers that skip
+        the aggregate step (CI gate mode).
+        """
+        from scanner import aggregate as _aggregate
 
         # aggregate.main() reads sys.argv directly via argparse. We
         # stash the original argv, swap in our constructed one, and
@@ -944,16 +1155,18 @@ class Orchestrator:
         saved_argv = sys.argv
         try:
             sys.argv = argv
-            agg_rc = _aggregate.main()
+            return _aggregate.main()
         finally:
             sys.argv = saved_argv
-        if agg_rc == 0:
-            return 0
 
-        # gate mode: propagate ALL non-zero aggregate rcs (including 7).
-        # report mode: suppress rc=7 (the point of the report is to
-        # surface findings); other rcs are real failures and propagate.
-        # Mirrors scan.sh lines 748-794.
+    @staticmethod
+    def _log_aggregate_rc(agg_rc: int, run_dir: Path) -> None:
+        """Log the aggregate step's non-zero return code with context.
+
+        Mirrors scan.sh lines 748-794: rc=7 is the "findings-present"
+        signal and is informational in report mode; anything else is a
+        real failure and logged as ERROR.
+        """
         if agg_rc == AGGREGATE_FINDINGS_RC:
             _log(
                 "INFO",
@@ -961,13 +1174,12 @@ class Orchestrator:
                 f"(HIGH/CRITICAL findings present); "
                 f"raw SARIFs are still in {run_dir}",
             )
-        else:
-            _log(
-                "ERROR",
-                f"aggregate.py failed (rc={agg_rc}); "
-                f"raw SARIFs are still in {run_dir}",
-            )
-        return agg_rc
+            return
+        _log(
+            "ERROR",
+            f"aggregate.py failed (rc={agg_rc}); "
+            f"raw SARIFs are still in {run_dir}",
+        )
 
     def _merge_aggregate_rc(self, scan_rc: int, agg_rc: int) -> int:
         """Decide how aggregate's rc merges into SCAN_RC.
@@ -999,12 +1211,12 @@ def _discover_public_ip() -> Optional[str]:
     candidates = (
         # Azure IMDS — only works from an Azure VM, but produces the
         # canonical IP the firewall will see.
-        ("http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text", "Azure-IMDS"),
+        (f"http://{AZURE_IMDS_ENDPOINT}{AZURE_IMDS_IPV4_PATH}", "Azure-IMDS"),
         ("https://api.ipify.org", "ipify"),
     )
     for url, label in candidates:
         try:
-            req = urllib.request.Request(url, headers={"Metadata": "true"} if "169.254" in url else {})
+            req = urllib.request.Request(url, headers={"Metadata": "true"} if AZURE_IMDS_ENDPOINT in url else {})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 ip = resp.read().decode("utf-8").strip()
             if ip:
@@ -1143,6 +1355,17 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     # CI=1 gate promotion: must happen FIRST, before any other handling.
     _ci_auto_promote(args)
 
+    # Validate the state-account CLI flag at the boundary so an
+    # invalid value never reaches subprocess (S8705). When the caller
+    # is on a non-plan/state tier the flag is unused, but validating
+    # unconditionally keeps the surface uniform and surfaces typos.
+    if args.state_account is not None:
+        try:
+            Orchestrator._check_storage_account_valid(args.state_account)
+        except ValueError as exc:
+            _log("ERROR", str(exc))
+            return 2
+
     # Resolve paths (CLI > env > defaults). This mirrors the precedence
     # rules in scanner/paths.py.
     #
@@ -1169,7 +1392,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     _register_cleanup_trap(run_dir.path, args.state_account)
 
     if args.verbose or os.environ.get("PCI_VERBOSE", "").strip() == "1":
-        _log("INFO", f"verbose logging enabled")
+        _log("INFO", "verbose logging enabled")
 
     orchestrator = Orchestrator(
         mode=args.mode,

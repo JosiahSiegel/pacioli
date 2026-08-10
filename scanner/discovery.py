@@ -115,8 +115,40 @@ def _load_pci_scope(scope_file: Path) -> list[tuple[str, str]]:
     return pairs
 
 
+def _discover_from_yaml(
+    target_repo: Path,
+    project_filter: Optional[str],
+    env_filter: Optional[str],
+) -> list[tuple[str, str]]:
+    """Handle the ``pci_scope.yaml`` discovery branch.
+
+    Loads in-scope (project, env) pairs from ``<target_repo>/pci_scope.yaml``
+    and applies ``project_filter`` / ``env_filter``.
+
+    The YAML is the source of truth: when it exists, env subdirectories
+    outside the YAML are out of scope by definition. We trust the
+    YAML's (project, env) list as-is; downstream ``require_env_dir``-
+    style validation happens in the scan loop, not here. Replicating
+    it here would conflate discovery with validation.
+
+    Raises :class:`NoTerraformFoundError` if the YAML yields no
+    in-scope pairs (the caller treats this as the "nothing to scan"
+    case regardless of filter values).
+    """
+    pairs = _load_pci_scope(target_repo / "pci_scope.yaml")
+    if not pairs:
+        raise NoTerraformFoundError(
+            f"No Terraform files found under {target_repo}. "
+            "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
+            "or *.tf at the repo root."
+        )
+    return _apply_filters(pairs, project_filter, env_filter)
+
+
 def _discover_from_env_tree(
     target_repo: Path,
+    project_filter: Optional[str],
+    env_filter: Optional[str],
 ) -> list[tuple[str, str]]:
     """Walk ``env/<project>/<env>/`` and emit one pair per real env.
 
@@ -124,6 +156,10 @@ def _discover_from_env_tree(
     non-tilde-prefixed ``*.tf`` file at the top level (mirrors bash
     ``require_env_dir``). The walk is one level deep: ``env/<proj>``
     is a directory of env directories, not nested further.
+
+    Raises :class:`NoTerraformFoundError` if the env/ tree is empty
+    (i.e. no real envs under any project). An empty result after
+    filtering is a valid non-error result and is returned as ``[]``.
     """
     env_root = target_repo / "env"
     if not env_root.is_dir():
@@ -140,7 +176,14 @@ def _discover_from_env_tree(
                 continue
             if _has_real_tf_files(env_dir):
                 pairs.append((project_name, env_dir.name))
-    return pairs
+
+    if not pairs:
+        raise NoTerraformFoundError(
+            f"No Terraform files found under {target_repo}. "
+            "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
+            "or *.tf at the repo root."
+        )
+    return _apply_filters(pairs, project_filter, env_filter)
 
 
 def _discover_flat_repo(target_repo: Path) -> list[tuple[str, str]]:
@@ -148,13 +191,37 @@ def _discover_flat_repo(target_repo: Path) -> list[tuple[str, str]]:
 
     Returns ``[("default", "default")]`` if any ``*.tf`` file exists
     at the repo root (NOT recursive — a flat repo means the .tf files
-    live at the top level). Otherwise returns an empty list so the
-    caller can decide whether to raise.
+    live at the top level). Otherwise raises :class:`NoTerraformFoundError`.
+
+    No filter parameters: a flat repo has exactly one pair, so there
+    is nothing to narrow.
     """
     for entry in target_repo.iterdir():
         if entry.is_file() and entry.name.endswith(".tf"):
             return [("default", "default")]
-    return []
+    raise NoTerraformFoundError(
+        f"No Terraform files found under {target_repo}. "
+        "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
+        "or *.tf at the repo root."
+    )
+
+
+def _apply_filters(
+    pairs: list[tuple[str, str]],
+    project_filter: Optional[str],
+    env_filter: Optional[str],
+) -> list[tuple[str, str]]:
+    """Apply ``--project`` / ``--env`` filters to a pair list.
+
+    A ``None`` filter is a no-op. An empty result after filtering is
+    a valid result (the caller decides how to surface "no matches"
+    to the user); see ``discover_pairs`` for the contract.
+    """
+    if project_filter is not None:
+        pairs = [p for p in pairs if p[0] == project_filter]
+    if env_filter is not None:
+        pairs = [p for p in pairs if p[1] == env_filter]
+    return pairs
 
 
 def discover_pairs(
@@ -170,47 +237,21 @@ def discover_pairs(
       2. ``<target>/env/`` exists → walk ``env/<project>/<env>/``.
       3. Otherwise → flat-repo fallback: scan root ``*.tf`` and emit
          ``[("default", "default")]`` if any exist.
-      4. Otherwise → :class:`NoTerraformFoundError`.
 
-    Filters are applied after the discovery decision. A non-matching
-    pair is silently dropped (the caller is expected to surface
-    "no matches" as a separate user-facing message, not as an error).
+    The chosen strategy is fully self-contained: each helper raises
+    :class:`NoTerraformFoundError` directly if it cannot find any
+    pairs. Filters are applied inside the helper AFTER the
+    empty-pairs check, so a non-matching filter returns ``[]`` rather
+    than raising (``NoTerraformFoundError`` is reserved for the
+    "nothing to scan at all" case).
     """
     target_repo = Path(target_repo)
-    scope_file = target_repo / "pci_scope.yaml"
 
-    if scope_file.is_file():
-        pairs = _load_pci_scope(scope_file)
-        # When the YAML is the source of truth, env subdirectories
-        # outside the YAML are out of scope by definition. We trust
-        # the YAML's (project, env) list as-is; the caller will hit
-        # env/<project>/<env>/ and ``require_env_dir``-style validation
-        # happens downstream (this function only emits pairs, it does
-        # not validate that the .tf files exist for YAML-driven
-        # entries — the bash scanner does that lazily per pair in the
-        # scan loop, and replicating that here would conflate discovery
-        # with validation).
-    elif (target_repo / "env").is_dir():
-        pairs = _discover_from_env_tree(target_repo)
-    else:
-        pairs = _discover_flat_repo(target_repo)
-
-    if not pairs:
-        raise NoTerraformFoundError(
-            f"No Terraform files found under {target_repo}. "
-            "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
-            "or *.tf at the repo root."
-        )
-
-    # Apply filters AFTER the discovery decision so precedence matches
-    # bash. An empty result after filtering is still a valid result
-    # (the caller decides how to handle "no matches for --project X").
-    if project_filter is not None:
-        pairs = [p for p in pairs if p[0] == project_filter]
-    if env_filter is not None:
-        pairs = [p for p in pairs if p[1] == env_filter]
-
-    return pairs
+    if (target_repo / "pci_scope.yaml").is_file():
+        return _discover_from_yaml(target_repo, project_filter, env_filter)
+    if (target_repo / "env").is_dir():
+        return _discover_from_env_tree(target_repo, project_filter, env_filter)
+    return _discover_flat_repo(target_repo)
 
 
 __all__ = [

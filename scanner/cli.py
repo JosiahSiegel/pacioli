@@ -68,6 +68,15 @@ VALID_TIERS: tuple[str, ...] = ("source", "plan", "state")
 VALID_MODES: tuple[str, ...] = ("gate", "report", "audit")
 VALID_SOURCES: tuple[str, ...] = ("local", "remote")
 
+# Top-level config directory under $HOME (matches lib/common.sh's
+# PACIOLI_HOME / ~/.pacioli convention; used by audit-local to locate
+# the runs archive).
+GLOBAL_CONFIG_DIR: str = ".pacioli"
+
+# Default HTML report filename written under <run-dir>/aggregate/.
+# Mirrors scanner.aggregate which writes <run-dir>/aggregate/report.html.
+REPORT_FILENAME: str = "report.html"
+
 # Mirrors lib/common.sh: defaults to "pacioli-reports" container for the
 # audit-from-remote source.
 DEFAULT_REPORTS_CONTAINER: str = "pacioli-reports"
@@ -388,8 +397,8 @@ def _handle_aggregate(args: argparse.Namespace) -> int:
         aggregate_argv += ["--mapping", args.mapping]
     if args.baseline:
         aggregate_argv += ["--baseline", args.baseline]
-    if args.output:
-        aggregate_argv += ["--out", args.output]
+    if args.out:
+        aggregate_argv += ["--out", args.out]
     if args.emit_fix_list:
         aggregate_argv += ["--emit-fix-list"]
 
@@ -405,6 +414,43 @@ def _handle_aggregate(args: argparse.Namespace) -> int:
         sys.argv = saved_argv
 
 
+def _resolve_latest_run_dir(runs_root: Path) -> Optional[Path]:
+    """Find the most-recently-modified run dir under ``runs_root``.
+
+    Returns ``None`` if ``runs_root`` does not exist or contains no
+    candidate subdirectories. Sorting is by mtime descending so the
+    first entry is the freshest scan.
+    """
+    if not runs_root.is_dir():
+        _log("ERROR", f"no runs found under {runs_root}")
+        return None
+    candidates = sorted(
+        (p for p in runs_root.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        _log("ERROR", f"no runs found under {runs_root}")
+        return None
+    return candidates[0]
+
+
+def _resolve_report_html(aggregate_dir: Path, out_path: str) -> None:
+    """Copy ``report.html`` from ``aggregate_dir`` to ``out_path`` if present.
+
+    Logs a WARN and returns silently when the source report is absent
+    (the audit handler treats ``--out`` as best-effort).
+    """
+    src_html = aggregate_dir / REPORT_FILENAME
+    if not src_html.is_file():
+        _log("WARN", f"no {REPORT_FILENAME} in {aggregate_dir}; --out ignored")
+        return
+    out_resolved = Path(out_path).expanduser().resolve()
+    out_resolved.parent.mkdir(parents=True, exist_ok=True)
+    out_resolved.write_bytes(src_html.read_bytes())
+    _log("INFO", f"{REPORT_FILENAME} copied to: {out_path}")
+
+
 def _handle_audit(args: argparse.Namespace) -> int:
     """Re-emit a prior Pacioli report from the archive.
 
@@ -418,10 +464,6 @@ def _handle_audit(args: argparse.Namespace) -> int:
     prior SARIF/HTML artifacts and (optionally) copies report.html to
     --out. Mirrors scan_audit.sh lines 1-15.
     """
-    from datetime import datetime, timezone
-
-    # Determine source. Local = ~/.pacioli/runs/<id>; remote = the
-    # pacioli-reports Azure container.
     source = getattr(args, "source_value", None) or os.environ.get(
         "PACIOLI_AUDIT_SOURCE", "local"
     )
@@ -429,56 +471,57 @@ def _handle_audit(args: argparse.Namespace) -> int:
         _log("ERROR", f"invalid --source: {source!r} (must be one of {VALID_SOURCES})")
         return 2
 
+    if source == "remote":
+        return _handle_audit_remote(args)
+    return _handle_audit_local(args)
+
+
+def _handle_audit_local(args: argparse.Namespace) -> int:
+    """Re-emit a prior report from the local ``~/.pacioli/runs/`` archive.
+
+    Mirrors scan_audit.sh's ``--source local`` branch (lines 30-72).
+    """
+    latest = bool(getattr(args, "latest", False))
+    run_id = getattr(args, "run_id", None)
+    out_path = getattr(args, "out", None)
+    runs_root = Path.home() / GLOBAL_CONFIG_DIR / "runs"
+
+    if not run_id and latest:
+        latest_dir = _resolve_latest_run_dir(runs_root)
+        if latest_dir is None:
+            return 2
+        run_id = latest_dir.name
+
+    if not run_id:
+        _log("ERROR", "pacioli audit requires --latest or --run-id")
+        return 2
+
+    run_dir = (runs_root / run_id).resolve()
+    aggregate_dir = run_dir / "aggregate"
+    if not aggregate_dir.is_dir():
+        _log("ERROR", f"audit source missing: {aggregate_dir} (no aggregate/ subdir)")
+        return 2
+
+    _log("INFO", f"audit (local): {run_dir}")
+    if out_path:
+        _resolve_report_html(aggregate_dir, out_path)
+    return 0
+
+
+def _handle_audit_remote(args: argparse.Namespace) -> int:
+    """Re-emit a prior report from the ``pacioli-reports`` Azure container.
+
+    Mirrors scan_audit.sh's ``--source remote`` branch (lines 73-126).
+    Requires ``PACIOLI_STATE_STORAGE_ACCOUNT`` (or ``--state-account``)
+    to be set; refuses otherwise (defense in depth, scan_audit.sh 74-81).
+    """
+    import subprocess
+    from datetime import datetime, timezone
+
     latest = bool(getattr(args, "latest", False))
     run_id = getattr(args, "run_id", None)
     out_path = getattr(args, "out", None)
 
-    # Local: locate the run dir directly.
-    if source == "local":
-        if not run_id and latest:
-            runs_root = Path.home() / ".pacioli" / "runs"
-            if not runs_root.is_dir():
-                _log("ERROR", f"no runs found under {runs_root}")
-                return 2
-            candidates = sorted(
-                (p for p in runs_root.iterdir() if p.is_dir()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not candidates:
-                _log("ERROR", f"no runs found under {runs_root}")
-                return 2
-            run_id = candidates[0].name
-        if not run_id:
-            _log("ERROR", "pacioli audit requires --latest or --run-id")
-            return 2
-
-        run_dir = (Path.home() / ".pacioli" / "runs" / run_id).resolve()
-        aggregate_dir = run_dir / "aggregate"
-        if not aggregate_dir.is_dir():
-            _log("ERROR", f"audit source missing: {aggregate_dir} (no aggregate/ subdir)")
-            return 2
-        _log("INFO", f"audit (local): {run_dir}")
-
-        # Optional copy of report.html.
-        if out_path:
-            src_html = aggregate_dir / "report.html"
-            if not src_html.is_file():
-                _log("WARN", f"no report.html in {aggregate_dir}; --out ignored")
-            else:
-                Path(out_path).expanduser().resolve().parent.mkdir(
-                    parents=True, exist_ok=True
-                )
-                Path(out_path).expanduser().resolve().write_bytes(
-                    src_html.read_bytes()
-                )
-                _log("INFO", f"report.html copied to: {out_path}")
-        return 0
-
-    # Remote: download from the pacioli-reports Azure container.
-    # We refuse to do this without PACIOLI_STATE_STORAGE_ACCOUNT set
-    # (defense in depth: scan_audit.sh lines 74-81 force an early
-    # failure rather than write to an unintended storage account).
     storage_account = (
         getattr(args, "state_account", None)
         or os.environ.get("PACIOLI_STATE_STORAGE_ACCOUNT", "").strip()
@@ -495,124 +538,156 @@ def _handle_audit(args: argparse.Namespace) -> int:
         )
         return 2
 
-    import subprocess
+    if not run_id and not latest:
+        _log("ERROR", "pacioli audit --source remote requires --latest or --run-id")
+        return 2
 
-    def _az_blob_download(blob_name: str, dest: Path) -> bool:
-        if args.dry_run:
-            print(
-                f"[dry-run] az storage blob download "
-                f"--account-name {storage_account} "
-                f"--container-name {container_name} "
-                f"--name {blob_name} --file {dest}"
-            )
-            return True
-        result = subprocess.run(
-            [
-                "az",
-                "storage",
-                "blob",
-                "download",
-                "--account-name",
-                storage_account,
-                "--container-name",
-                container_name,
-                "--name",
-                blob_name,
-                "--file",
-                str(dest),
-                "--auth-mode",
-                "login",
-                "--output",
-                "none",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            _log(
-                "WARN",
-                f"download {blob_name} failed (rc={result.returncode}): "
-                f"{(result.stderr or '').strip()[:300]}",
-            )
-            return False
-        return True
-
-    # Discover the run-id when --latest was passed.
     if not run_id:
-        if not latest:
-            _log("ERROR", "pacioli audit --source remote requires --latest or --run-id")
+        run_id = _resolve_latest_remote_run_id(
+            storage_account=storage_account,
+            container_name=container_name,
+            dry_run=bool(args.dry_run),
+        )
+        if run_id is None:
             return 2
-        if args.dry_run:
-            run_id = "DRYRUN-LATEST"
-        else:
-            _log("INFO", f"fetching latest run_id from {container_name}")
-            result = subprocess.run(
-                [
-                    "az",
-                    "storage",
-                    "blob",
-                    "list",
-                    "--account-name",
-                    storage_account,
-                    "--container-name",
-                    container_name,
-                    "--auth-mode",
-                    "login",
-                    "--query",
-                    "[?contains(name, '/')].[name]",
-                    "-o",
-                    "tsv",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            ids = sorted({
-                line.split("/", 1)[0]
-                for line in (result.stdout or "").splitlines()
-                if "/" in line
-            })
-            if not ids:
-                _log(
-                    "ERROR",
-                    f"no runs found in {storage_account}/{container_name}",
-                )
-                return 2
-            run_id = ids[-1]
 
     _log("INFO", f"audit (remote): {storage_account}/{container_name}/{run_id}")
 
-    # Local destination — mirror scan_audit.sh line 107.
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    dest_dir = (Path.home() / ".pacioli" / "runs" / run_id / "aggregate").resolve()
+    dest_dir = (Path.home() / GLOBAL_CONFIG_DIR / "runs" / run_id / "aggregate").resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    for fname in ("coverage_matrix.csv", "combined.sarif", "junit.xml", "report.html"):
+    for fname in ("coverage_matrix.csv", "combined.sarif", "junit.xml", REPORT_FILENAME):
         _log("INFO", f"downloading {fname}")
-        _az_blob_download(f"{run_id}/{fname}", dest_dir / fname)
+        _az_blob_download(
+            storage_account=storage_account,
+            container_name=container_name,
+            blob_name=f"{run_id}/{fname}",
+            dest=dest_dir / fname,
+            dry_run=bool(args.dry_run),
+        )
 
     if out_path:
-        src_html = dest_dir / "report.html"
-        if src_html.is_file():
-            Path(out_path).expanduser().resolve().parent.mkdir(
-                parents=True, exist_ok=True
-            )
-            Path(out_path).expanduser().resolve().write_bytes(
-                src_html.read_bytes()
-            )
-            _log("INFO", f"report.html copied to: {out_path}")
-        else:
-            _log("WARN", f"no report.html in {dest_dir}; --out ignored")
+        _resolve_report_html(dest_dir, out_path)
 
     # Mark audit freshness so downstream tooling can distinguish an
     # audit-pull from a fresh scan.
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     (dest_dir / ".audit_pulled_at").write_text(
-        f"{timestamp}\nrun_id={run_id}\nsource={source}\n",
+        f"{timestamp}\nrun_id={run_id}\nsource=remote\n",
         encoding="utf-8",
     )
     _log("INFO", f"audit complete: {dest_dir}")
     return 0
+
+
+def _resolve_latest_remote_run_id(
+    *,
+    storage_account: str,
+    container_name: str,
+    dry_run: bool,
+) -> Optional[str]:
+    """Discover the latest run-id under ``container_name`` via ``az storage blob list``.
+
+    Returns ``None`` (after logging an ERROR) when the container holds
+    no run folders. In ``--dry-run`` mode, returns ``"DRYRUN-LATEST"``
+    so the rest of the pipeline can exercise without contacting Azure.
+    """
+    import subprocess
+
+    if dry_run:
+        return "DRYRUN-LATEST"
+
+    _log("INFO", f"fetching latest run_id from {container_name}")
+    result = subprocess.run(
+        [
+            "az",
+            "storage",
+            "blob",
+            "list",
+            "--account-name",
+            storage_account,
+            "--container-name",
+            container_name,
+            "--auth-mode",
+            "login",
+            "--query",
+            "[?contains(name, '/')].[name]",
+            "-o",
+            "tsv",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    ids = sorted({
+        line.split("/", 1)[0]
+        for line in (result.stdout or "").splitlines()
+        if "/" in line
+    })
+    if not ids:
+        _log(
+            "ERROR",
+            f"no runs found in {storage_account}/{container_name}",
+        )
+        return None
+    return ids[-1]
+
+
+def _az_blob_download(
+    *,
+    storage_account: str,
+    container_name: str,
+    blob_name: str,
+    dest: Path,
+    dry_run: bool,
+) -> bool:
+    """Download ``blob_name`` from the Azure container to ``dest`` via ``az storage blob download``.
+
+    Logs a WARN and returns ``False`` on non-zero exit; returns
+    ``True`` on success (including ``--dry-run``). Module-level
+    function so the remote audit handler stays under CC ≤ 15.
+    """
+    import subprocess
+
+    if dry_run:
+        print(
+            f"[dry-run] az storage blob download "
+            f"--account-name {storage_account} "
+            f"--container-name {container_name} "
+            f"--name {blob_name} --file {dest}"
+        )
+        return True
+    result = subprocess.run(
+        [
+            "az",
+            "storage",
+            "blob",
+            "download",
+            "--account-name",
+            storage_account,
+            "--container-name",
+            container_name,
+            "--name",
+            blob_name,
+            "--file",
+            str(dest),
+            "--auth-mode",
+            "login",
+            "--output",
+            "none",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        _log(
+            "WARN",
+            f"download {blob_name} failed (rc={result.returncode}): "
+            f"{(result.stderr or '').strip()[:300]}",
+        )
+        return False
+    return True
 
 
 def _handle_baseline(args: argparse.Namespace) -> int:

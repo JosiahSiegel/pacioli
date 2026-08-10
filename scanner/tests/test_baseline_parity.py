@@ -39,9 +39,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-# conftest.py (in this directory) adds scanner/ to sys.path.
-import baseline_init
-from aggregate import load_pci_baseline
+# conftest.py (in this directory) adds the project root to sys.path so
+# `from scanner.foo import ...` resolves cleanly.
+from scanner import baseline_init
+from scanner.aggregate import load_pci_baseline
 
 
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -109,7 +110,7 @@ def _make_result(rule_id: str, resource_uri: str) -> dict:
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 def run_dir_with_two_findings(tmp_path: Path) -> Path:
     """Synthetic SARIF with two distinct (check_id, resource) pairs.
 
@@ -148,7 +149,7 @@ def run_dir_with_two_findings(tmp_path: Path) -> Path:
     return tmp_path
 
 
-@pytest.fixture()
+@pytest.fixture
 def baseline_path(tmp_path: Path) -> Path:
     """Destination path for the generated baseline YAML."""
     return tmp_path / "pci_baseline.yaml"

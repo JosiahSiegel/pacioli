@@ -41,3 +41,4 @@ coverage_matrix.csv
 *.swp
 *.swo
 .DS_Store.omo/
+.omo/
