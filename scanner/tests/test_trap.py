@@ -94,19 +94,68 @@ def test_register_traps_atexit_runs_cleanup_on_normal_exit(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only SIGTERM trap")
 def test_register_traps_registers_sigterm_on_posix():
-    """On POSIX, ``register_traps`` must install a SIGTERM handler."""
+    """On POSIX, ``register_traps`` must install a SIGTERM handler.
+
+    Note: pytest installs its own SIGTERM handler at collection time,
+    so the prev/new identity comparison is not reliable in the test
+    process. We assert by behavioral observation: spawn a child
+    process that calls ``register_traps`` and verify the registered
+    handler is callable when SIGTERM is delivered.
+    """
+    # Capture the current handler so we can restore it after the test.
     prev_handler = signal.getsignal(signal.SIGTERM)
 
     def cleanup() -> None:
         pass
 
+    trap.register_traps(cleanup)
     try:
-        trap.register_traps(cleanup)
+        # The handler is now installed. The identity comparison is
+        # not reliable under pytest (it intercepts signals), so we
+        # verify behaviourally via a subprocess: a child that calls
+        # register_traps and gets a SIGTERM should write the marker
+        # AND exit non-zero (the signal was not swallowed).
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "sigterm_marker"
+            scanner_dir = str(Path(__file__).resolve().parents[2])
+            program = textwrap.dedent(
+                f"""
+                import sys
+                sys.path.insert(0, {scanner_dir!r})
+                from scanner import trap
+                import signal
+
+                marker_path = r"{marker}"
+
+                def cleanup():
+                    open(marker_path, "w", encoding="utf-8").close()
+
+                trap.register_traps(cleanup)
+                # Send SIGTERM to ourselves; the handler should run,
+                # write the marker, and re-raise the signal.
+                signal.raise_signal(signal.SIGTERM)
+                """
+            )
+            script_path = Path(td) / "child_sigterm.py"
+            script_path.write_text(program, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            assert marker.exists(), (
+                f"trap handler did not run on SIGTERM: "
+                f"rc={result.returncode} stderr={result.stderr}"
+            )
+            assert result.returncode != 0, (
+                f"SIGTERM was swallowed (exit 0); expected non-zero"
+            )
     finally:
         # Restore so we don't leak handler state into the rest of the run.
         signal.signal(signal.SIGTERM, prev_handler)
-
-    assert signal.getsignal(signal.SIGTERM) is not prev_handler
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific trap")
