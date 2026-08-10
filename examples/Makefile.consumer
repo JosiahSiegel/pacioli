@@ -4,18 +4,25 @@
 # it into your existing Makefile). Update PACIOLI_DIR to point at your
 # local Pacioli checkout (or use a git submodule / pip install).
 #
-# Requires the `pacioli` CLI on $PATH:
-#   pip install -e $(PACIOLI_DIR)         # installs the `pacioli` command
+# Requires the `pacioli` CLI on $PATH. Install from the current GitHub Release:
+#   pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pacioli-X.Y.Z-py3-none-any.whl
+#
+# Future PyPI install (once published):
+#   pip install pacioli==X.Y.Z
+#
+# For local development from a checkout:
+#   pip install -e $(PACIOLI_DIR)
+#
 #   # Legacy alias (pre-standalone CLI): `pacioli-scan` is also accepted.
 # =============================================================================
 
 # Path to the Pacioli installation (used for `make test` and as the default
-# `pip install -e` source). Override at the command line:
+# local-checkout source for `pip install -e`). Override at the command line:
 #   make -f Makefile.pacioli scan PACIOLI_DIR=...
 PACIOLI_DIR ?= ../pacioli
 
 # Which Pacioli binary to invoke. Defaults to `pacioli` (the standalone
-# CLI installed by `pip install -e $(PACIOLI_DIR)`). The legacy wrapper
+# CLI installed from a release or local checkout). The legacy wrapper
 # `pacioli-scan` is also accepted; set PACIOLI_BIN=pacioli-scan to use it.
 PACIOLI_BIN ?= pacioli
 
