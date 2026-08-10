@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,8 +73,39 @@ def resolve_target_repo(args: argparse.Namespace) -> TargetRepo:
 
 
 def resolve_mapping(args: argparse.Namespace) -> MappingPack:
-    value = _cli_value(args, "mapping") or _env_value("PACIOLI_MAPPING", "PCI_MAPPING")
-    path = _canonical(value or _install_root() / "mappings" / "pci_dss_4.0.1.yaml")
+    raw_value = _cli_value(args, "mapping") or _env_value("PACIOLI_MAPPING", "PCI_MAPPING")
+    explicit = raw_value is not None
+    path = _canonical(raw_value) if explicit else _canonical(
+        _install_root() / "mappings" / "pci_dss_4.0.1.yaml"
+    )
+    if not path.is_file():
+        # Default-resolution fallback: when the user did NOT pass an explicit
+        # --mapping / PACIOLI_MAPPING, fall back to the install-bundled
+        # mapping shipped via importlib.resources. This handles wheel installs
+        # where the mapping lives at scanner/mappings/... (inside the package)
+        # rather than at the parent install root.
+        #
+        # Mirrors the pattern in scanner/aggregate.py:main() (commit bcf5944).
+        # Use Traversable.is_file() — works for both editable installs and
+        # wheel installs (Python 3.9+).
+        #
+        # CRITICAL: this fallback MUST only fire for the default. If the user
+        # passed --mapping <explicit-missing-path> and that file is missing,
+        # we must surface the error rather than silently swap in the
+        # install-bundled mapping (which would report against the wrong
+        # framework and mask the user error).
+        if not explicit:
+            try:
+                bundled = importlib.resources.files("scanner").joinpath(
+                    "mappings/pci_dss_4.0.1.yaml"
+                )
+                if bundled.is_file():
+                    path = Path(str(bundled))
+            except (ModuleNotFoundError, AttributeError, OSError):
+                # Traversable lookup can fail in raw-tree execution where the
+                # scanner package isn't installed yet; fall through and let
+                # the original PathResolutionError surface below.
+                pass
     if not path.is_file():
         raise PathResolutionError(f"Mapping pack does not exist: {path}")
     return MappingPack(path=path, framework=_framework(path))

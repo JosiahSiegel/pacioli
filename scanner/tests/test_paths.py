@@ -245,14 +245,146 @@ def test_mapping_legacy_pci_mapping_env_honored(
 def test_mapping_missing_file_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """When BOTH the filesystem default AND the install-bundled mapping are
+    unavailable, resolve_mapping must raise PathResolutionError.
+
+    Updated for the v0.1.1 install-bundled fallback: the previous contract
+    ("default file missing ⇒ raise") now first attempts the
+    ``importlib.resources`` fallback. This test simulates a fully-broken
+    install (neither the filesystem default nor the bundled mapping is
+    resolvable) and confirms the error still surfaces.
+    """
     install_root = _install_root(monkeypatch, tmp_path)  # noqa: F841  (fixture side-effect: monkeypatches env)
     # No mappings dir created -> default file does not exist.
     monkeypatch.delenv("PACIOLI_MAPPING", raising=False)
     monkeypatch.delenv("PCI_MAPPING", raising=False)
 
+    # Disable the importlib.resources fallback so neither path can resolve.
+    # We swap `paths_mod.importlib.resources.files` with a stub that returns
+    # a Traversable whose `.is_file()` is always False — i.e. no bundled
+    # mapping is available.
+    class _MissingTraversable:
+        def is_file(self) -> bool:
+            return False
+
+        def joinpath(self, _child: str) -> "_MissingTraversable":
+            return self
+
+    class _MissingResources:
+        def files(self, _package: str) -> _MissingTraversable:
+            return _MissingTraversable()
+
+    monkeypatch.setattr(
+        paths_mod.importlib.resources, "files", _MissingResources().files
+    )
+
     args = _ns()
     with pytest.raises(PathResolutionError):
         resolve_mapping(args)
+
+
+def test_default_mapping_falls_back_to_importlib_resources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the filesystem default does not exist (wheel install layout), the
+    install-bundled ``scanner/mappings/pci_dss_4.0.1.yaml`` shipped via
+    ``importlib.resources`` must be used.
+
+    Simulates the wheel-install scenario where the mapping lives inside the
+    ``scanner`` package (e.g. ``site-packages/scanner/mappings/...``), NOT at
+    the parent install root (which is what ``_install_root()/mappings/...``
+    points at). Without the importlib.resources fallback this test reproduces
+    the user-reported v0.1.0 bug:
+        ERROR  Mapping pack does not exist: <site-packages>/mappings/pci_dss_4.0.1.yaml
+    """
+    import importlib.resources
+
+    # _install_root() is monkeypatched to a tmp_path layout that does NOT
+    # contain a `mappings/` sibling of the package — the wheel-install
+    # scenario. No PACIOLI_MAPPING / PCI_MAPPING env vars, no --mapping CLI
+    # flag — must use the default-resolution fallback.
+    _install_root(monkeypatch, tmp_path)
+    monkeypatch.delenv("PACIOLI_MAPPING", raising=False)
+    monkeypatch.delenv("PCI_MAPPING", raising=False)
+
+    args = _ns()
+    result = resolve_mapping(args)
+
+    expected = importlib.resources.files("scanner").joinpath(
+        "mappings/pci_dss_4.0.1.yaml"
+    )
+    assert expected.is_file(), (
+        "install-bundled mapping is missing from the test environment — "
+        "this is a test-infra problem, not a paths.py bug. Confirm "
+        "[tool.setuptools.package-data] in pyproject.toml still ships "
+        "'mappings/*.yaml' under the 'scanner' entry."
+    )
+    assert result.path == Path(str(expected)).resolve()
+    assert result.framework == "pci_dss_4.0.1"
+
+
+def test_explicit_missing_mapping_does_not_silently_swap_to_bundled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the user passes --mapping <missing-path>, the importlib.resources
+    fallback MUST NOT fire. The error must surface as PathResolutionError so
+    the user knows their explicit value was wrong (rather than getting a
+    silent swap to the bundled default framework).
+    """
+    import importlib.resources
+
+    _install_root(monkeypatch, tmp_path)  # noqa: F841  (monkeypatches paths.py layout)
+    monkeypatch.delenv("PACIOLI_MAPPING", raising=False)
+    monkeypatch.delenv("PCI_MAPPING", raising=False)
+
+    # Confirm a bundled mapping actually exists — otherwise this test is
+    # trivially true for the wrong reason.
+    bundled = importlib.resources.files("scanner").joinpath(
+        "mappings/pci_dss_4.0.1.yaml"
+    )
+    assert bundled.is_file()
+
+    missing = tmp_path / "definitely_missing_mapping.yaml"
+    assert not missing.exists()  # sanity
+
+    args = _ns(mapping=str(missing))
+    with pytest.raises(PathResolutionError) as excinfo:
+        resolve_mapping(args)
+
+    # Error message must reference the user-supplied path, NOT the bundled
+    # default. If it referenced the bundled default, the test has regressed
+    # into the silent-swap bug.
+    assert str(missing.resolve()) in str(excinfo.value)
+    assert "pci_dss_4.0.1.yaml" not in str(excinfo.value)
+
+
+def test_explicit_env_var_missing_mapping_does_not_silently_swap_to_bundled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same contract as the CLI-flag case, but for the PACIOLI_MAPPING env
+    var. An explicit env var pointing at a missing file must raise
+    PathResolutionError rather than falling back to the bundled mapping.
+    """
+    import importlib.resources
+
+    _install_root(monkeypatch, tmp_path)  # noqa: F841
+    monkeypatch.delenv("PCI_MAPPING", raising=False)
+
+    # Confirm a bundled mapping actually exists.
+    bundled = importlib.resources.files("scanner").joinpath(
+        "mappings/pci_dss_4.0.1.yaml"
+    )
+    assert bundled.is_file()
+
+    missing = tmp_path / "env_missing.yaml"
+    assert not missing.exists()
+    monkeypatch.setenv("PACIOLI_MAPPING", str(missing))
+
+    args = _ns()
+    with pytest.raises(PathResolutionError) as excinfo:
+        resolve_mapping(args)
+
+    assert str(missing.resolve()) in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
