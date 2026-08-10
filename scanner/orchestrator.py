@@ -727,11 +727,13 @@ class Orchestrator:
         self.safety.refuse_if_mutating(cmd)
 
         # Defense-in-depth re-validation immediately before the
-        # subprocess call (S8705 — taint from CLI flag). The static
-        # analyzer sees the sink here; the validation at the top of
-        # the function is too far away. Re-running the check at the
-        # call site clears the taint flag without changing behavior.
-        self._check_storage_account_valid(validated_account)
+        # subprocess call (S8705 — taint from CLI flag). Use an inline
+        # ``re.fullmatch`` guard so the static analyzer sees the
+        # sanitization at the immediate use-site, then bind the
+        # validated value to a local for the subprocess argv.
+        if not re.fullmatch(AZURE_STORAGE_ACCOUNT_PATTERN, validated_account):
+            raise ValueError(f"invalid state_account: {validated_account!r}")
+        sanitized_account: str = validated_account
 
         result = subprocess.run(
             [
@@ -741,7 +743,7 @@ class Orchestrator:
                 "network-rule",
                 "add",
                 "--account-name",
-                validated_account,
+                sanitized_account,
                 "--ip-address",
                 ip,
                 "--output",
