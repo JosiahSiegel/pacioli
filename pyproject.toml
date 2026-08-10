@@ -29,6 +29,7 @@ keywords = [
 dependencies = [
     "pyyaml>=6.0,<7.0",
     "requests>=2.28,<3.0",
+    "packaging>=23.0,<24.0",  # checkov 3.3.9 caps at <24.0; pin matches that floor/ceiling to silence dev-install resolver warning
     "checkov==3.3.9",  # Pinned; bump with care, see requirements-pinned.txt
     "jmespath>=1.0.0",  # Used by storage firewall whitelist logic
 ]
@@ -48,6 +49,7 @@ include-package-data = true
 "scanner" = [
     "terraform_remediation.yaml",
     "requirements-pinned.txt",
+    "mappings/*.yaml",
 ]
 
 [tool.setuptools.packages.find]
