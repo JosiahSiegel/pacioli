@@ -52,7 +52,6 @@ bash scanner/scan.sh [--mode MODE] [--project P] [--env E]
 | `PACIOLI_MAPPING` | `${PACIOLI_INSTALL_DIR}/mappings/pci_dss_4.0.1.yaml` | The framework mapping pack. Override with `--mapping <file>` (see `aggregate.py`). |
 | `PACIOLI_STATE_STORAGE_ACCOUNT` | (empty) | Azure storage account for tier 2/3 state-blob access. **Required** for tier 2/3 and `scan_audit.sh`; the scanner refuses to run without it. |
 | `PACIOLI_REPORTS_CONTAINER` | (empty) | Azure storage container for the `pacioli-reports` archive. **Required** for `scan_audit.sh`; refused if unset. |
-| `PCI_CACHE_ROOT` | `${PACIOLI_TARGET_REPO}/.checkov` | Where the run dir is created. |
 | `PCI_VERBOSE` | unset | Same as `--verbose`. |
 | `PCI_DEBUG` | unset | Even more verbose (DEBUG level). |
 | `CI` | unset | If set, `--mode report` is auto-promoted to `--mode gate`. |
@@ -158,7 +157,7 @@ python scanner/aggregate.py --run-dir DIR
 |---|---|---|
 | `--run-dir <path>` | (required) | The run dir produced by `scan.sh`. |
 | `--out <path>` | `<run-dir>/aggregate/` | Output directory. |
-| `--scope <path>` | `${PACIOLI_TARGET_REPO}/pci_scope.yaml` | Override the scope file. |
+| `--scope <path>` | (deprecated) | DEPRECATED alias for `--baseline`. |
 | `--mapping <path>` | `${PACIOLI_MAPPING}` | Override the framework mapping. |
 | `--baseline <path>` | `${PACIOLI_TARGET_REPO}/pci_baseline.yaml` | Override the baseline. |
 | `--emit-fix-list` | off | Emit `fix_list.md` in the output dir. |

@@ -22,7 +22,7 @@ To scan a specific project and environment:
 pacioli scan . --project myapp --env prod
 ```
 
-The command writes the report to `.checkov/<run-id>/aggregate/report.html`.
+The command writes the report to `~/.pacioli/runs/<run-id>/aggregate/report.html`.
 Open that file in a browser when the scan completes. See [CLI Reference](CLI_REFERENCE.md)
 for all scan modes and options.
 
@@ -158,7 +158,7 @@ Edit it down to:
 # PCI baseline — repo-wide suppressions for known/accepted findings.
 # See docs/OPERATOR_GUIDE.md for the schema and triage workflow.
 # Initially empty. After the first scan, run:
-#   pacioli scan-baseline-init RUN_DIR=.checkov/<run_id>
+#   pacioli baseline init <run_dir>
 # to generate stub entries for triage.
 suppressions: []
 ```
@@ -229,13 +229,13 @@ pacioli scan . --project myapp --env prod
 You should see output ending in:
 
 ```
-report: .checkov/myapp-prod-2026-08-06/aggregate/report.html
+report: ~/.pacioli/runs/myapp-prod-2026-08-06/aggregate/report.html
 ```
 
 Open the report in a browser:
 
 ```bash
-open .checkov/myapp-prod-2026-08-06/aggregate/report.html
+open ~/.pacioli/runs/myapp-prod-2026-08-06/aggregate/report.html
 ```
 
 ## Step 6: triage the findings

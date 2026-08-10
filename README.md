@@ -37,7 +37,7 @@ pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pac
 pacioli scan /path/to/target-repo
 ```
 
-The report is written under `<target-repo>/.checkov/<run-id>/aggregate/report.html`.
+The report is written under `~/.pacioli/runs/<run-id>/aggregate/report.html` (or `~/.pacioli/runs/current/` for the most recent run; override with `--output-dir <path>`).
 
 ### From source (dev only)
 
@@ -94,7 +94,7 @@ output, or `ignore_changes` drift between plan and state).
 
 ```bash
 # Exits non-zero on HIGH/CRITICAL findings. For PR gates.
-pacioli scan --gate <target-repo>
+pacioli gate <target-repo>
 
 # Manual scan. Never blocks. Prints the report path.
 pacioli scan <target-repo>
@@ -169,8 +169,7 @@ cp examples/baseline.yaml.example ./pci_baseline.yaml
 make -f Makefile.pacioli scan PROJECT=myapp ENV=prod
 ```
 
-Most teams won't need this — `pip install -e .` + `pacioli scan`
-is the supported path. The full step-by-step for the wrapper
+Most teams won't need this — `pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pacioli-X.Y.Z-py3-none-any.whl` + `pacioli scan` is the supported path. The full step-by-step for the wrapper
 flow lives in
 [docs/CONSUMING_GUIDE.md](docs/CONSUMING_GUIDE.md).
 

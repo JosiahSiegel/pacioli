@@ -22,4 +22,4 @@
 
 # Safety model: extra-careful review. Two approvals required for changes
 # to lib/safety.sh (enforced by branch protection in repo settings).
-/scanner/lib/safety.sh   @JosiahSiegel
+/scanner/safety.py   @JosiahSiegel

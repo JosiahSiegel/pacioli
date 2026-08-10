@@ -96,8 +96,7 @@ scan-baseline-init:
 		$(if $(BASELINE_FILE),--baseline $(BASELINE_FILE))
 
 scan-fix-list:
-	@$(PACIOLI_BIN) scan --target-repo $(CURDIR) --emit-fix-list \
-		$(if $(RUN_DIR),--run-dir $(RUN_DIR))
+	@$(PACIOLI_BIN) aggregate $(RUN_DIR) --emit-fix-list
 
 scan-cleanup:
 	@echo "scan-cleanup is a no-op under the standalone CLI."
