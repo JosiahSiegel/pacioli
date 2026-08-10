@@ -105,6 +105,70 @@ def test_validate_oos_rejects_invalid_date():
 # ---------------------------------------------------------------------------
 
 
+def _build_synthetic_run_dir(run_dir: Path) -> Path:
+    """Materialise a minimal synthetic run-dir under ``run_dir``.
+
+    Creates ``<run_dir>/myapp/prod/results_terraform_source.sarif`` with a
+    single benign finding (``CKV_TEST_BENIGN`` — not in the SEVERITY_OVERRIDE
+    table so it falls through to DEFAULT_SEVERITY=MEDIUM, keeping
+    aggregate's rc=7 gate silent). Returns the SARIF path.
+
+    Used by both install-bundled-fallback tests to keep the SARIF
+    construction in one place — eliminating the cross-test duplication
+    that triggered SonarCloud's CPD gate at 21.4% on PR #2.
+    """
+    env_dir = run_dir / "myapp" / "prod"
+    env_dir.mkdir(parents=True)
+    sarif = {
+        "runs": [
+            {
+                "tool": {"driver": {"name": "checkov"}},
+                "results": [
+                    {
+                        # CKV_TEST_BENIGN is intentionally absent from
+                        # aggregate.py's SEVERITY_OVERRIDE so severity
+                        # falls through to DEFAULT_SEVERITY (MEDIUM).
+                        # Keeps the test focused on the fallback path
+                        # without triggering aggregate's rc=7 gate.
+                        "ruleId": "CKV_TEST_BENIGN",
+                        "level": "note",
+                        "message": {"text": "synthetic finding"},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {"uri": "main.tf"},
+                                    "region": {"startLine": 1},
+                                }
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    sarif_path = env_dir / "results_terraform_source.sarif"
+    with sarif_path.open("w", encoding="utf-8") as fh:
+        json.dump(sarif, fh)
+    return sarif_path
+
+
+def _invoke_aggregate_main(argv: list[str]) -> int:
+    """Run ``aggregate.main()`` with the given argv in-place.
+
+    aggregate.main() reads sys.argv directly via argparse, so we swap
+    argv in for the call and restore it on the way out. Returns the
+    exit code from aggregate.main().
+
+    Used by both install-bundled-fallback tests.
+    """
+    saved_argv = sys.argv
+    try:
+        sys.argv = argv
+        return aggregate_main()
+    finally:
+        sys.argv = saved_argv
+
+
 def test_aggregate_main_falls_back_to_install_bundled_mapping(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -137,60 +201,16 @@ def test_aggregate_main_falls_back_to_install_bundled_mapping(
             "[tool.setuptools.package-data] in pyproject.toml"
         )
 
-    # Build a synthetic run-dir: <tmp_path>/<project>/<env>/results_terraform_source.sarif
-    project = "myapp"
-    env = "prod"
-    env_dir = tmp_path / project / env
-    env_dir.mkdir(parents=True)
+    _build_synthetic_run_dir(tmp_path)
 
-    sarif = {
-        "runs": [
-            {
-                "tool": {"driver": {"name": "checkov"}},
-                "results": [
-                    {
-                        # Use a non-existent rule_id so severity falls
-                        # through to DEFAULT_SEVERITY (MEDIUM) — keeps
-                        # the test focused on the fallback path
-                        # without triggering aggregate's rc=7 gate
-                        # (HIGH/CRITICAL -> exit 7).
-                        "ruleId": "CKV_TEST_BENIGN",
-                        "level": "note",
-                        "message": {"text": "synthetic finding"},
-                        "locations": [
-                            {
-                                "physicalLocation": {
-                                    "artifactLocation": {"uri": "main.tf"},
-                                    "region": {"startLine": 1},
-                                }
-                            }
-                        ],
-                    }
-                ],
-            }
-        ]
-    }
-    sarif_path = env_dir / "results_terraform_source.sarif"
-    with sarif_path.open("w", encoding="utf-8") as fh:
-        json.dump(sarif, fh)
-
-    # aggregate.main() reads sys.argv directly. Run from tmp_path so the
-    # walk-up-to-.git logic terminates at tmp_path.parent (no .git
-    # found) and the install-bundled fallback fires.
+    # Run from tmp_path so the walk-up-to-.git logic terminates at
+    # tmp_path.parent (no .git found) and the install-bundled fallback
+    # fires.
     monkeypatch.chdir(tmp_path)
     out_dir = tmp_path / "aggregate_out"
-    saved_argv = sys.argv
-    try:
-        sys.argv = [
-            "aggregate.py",
-            "--run-dir",
-            str(tmp_path),
-            "--out",
-            str(out_dir),
-        ]
-        rc = aggregate_main()
-    finally:
-        sys.argv = saved_argv
+    rc = _invoke_aggregate_main(
+        ["aggregate.py", "--run-dir", str(tmp_path), "--out", str(out_dir)]
+    )
 
     # Aggregate must succeed; the install-bundled fallback path was
     # the one that located the mapping. report.html is the visible
@@ -229,38 +249,7 @@ def test_aggregate_main_does_not_silently_overwrite_explicit_mapping(
     path AND the ``--mapping`` hint. The install-bundled fallback must
     NOT have printed its sentinel line.
     """
-    # Build a synthetic run-dir so the aggregator reaches the mapping
-    # resolution branch (otherwise it returns 2 earlier on an empty
-    # run-dir).
-    project = "myapp"
-    env = "prod"
-    env_dir = tmp_path / project / env
-    env_dir.mkdir(parents=True)
-    sarif = {
-        "runs": [
-            {
-                "tool": {"driver": {"name": "checkov"}},
-                "results": [
-                    {
-                        "ruleId": "CKV_TEST_BENIGN",
-                        "level": "note",
-                        "message": {"text": "synthetic finding"},
-                        "locations": [
-                            {
-                                "physicalLocation": {
-                                    "artifactLocation": {"uri": "main.tf"},
-                                    "region": {"startLine": 1},
-                                }
-                            }
-                        ],
-                    }
-                ],
-            }
-        ]
-    }
-    sarif_path = env_dir / "results_terraform_source.sarif"
-    with sarif_path.open("w", encoding="utf-8") as fh:
-        json.dump(sarif, fh)
+    _build_synthetic_run_dir(tmp_path)
 
     # Deliberately missing mapping path. The path lives under tmp_path
     # (not tmp_path's parent) so it can't be confused with any system
@@ -269,18 +258,15 @@ def test_aggregate_main_does_not_silently_overwrite_explicit_mapping(
     assert not bad_mapping.exists(), "pre-condition: bad mapping must not exist"
 
     monkeypatch.chdir(tmp_path)
-    saved_argv = sys.argv
-    try:
-        sys.argv = [
+    rc = _invoke_aggregate_main(
+        [
             "aggregate.py",
             "--run-dir",
             str(tmp_path),
             "--mapping",
             str(bad_mapping),
         ]
-        rc = aggregate_main()
-    finally:
-        sys.argv = saved_argv
+    )
 
     captured = capsys.readouterr()
     assert rc == 2, (
