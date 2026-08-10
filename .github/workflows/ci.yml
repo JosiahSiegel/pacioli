@@ -37,9 +37,13 @@ jobs:
         # The local wheel is built above and installed with --only-binary=:all:
         # so SonarCloud S8541/S8544 (supply chain) are satisfied.
         run: |
+          python -m pip install --upgrade pip==25.2
           pip install --only-binary=:all: ./dist/pacioli-0.1.0-py3-none-any.whl
-          pip install --only-binary=:all: -r scanner/requirements-pinned.txt
           pip install --only-binary=:all: pytest==9.1.1
+          # requirements-pinned.txt contents are pinned; extract the
+          # checkov and pyyaml versions inline so each invocation is
+          # individually pinned (S8544 cannot inspect -r files).
+          pip install --only-binary=:all: checkov==3.3.9 pyyaml==6.0.2 requests==2.32.3
 
       - name: Run pytest
         run: pytest -v
@@ -57,7 +61,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip==25.2
           pip install --only-binary=:all: pyyaml==6.0.2
 
       - name: Validate mapping schema
