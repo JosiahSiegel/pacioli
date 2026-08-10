@@ -53,21 +53,40 @@ for all scan modes and options.
    `PACIOLI_STATE_STORAGE_ACCOUNT` and (for audit mode)
    `PACIOLI_REPORTS_CONTAINER` in the environment; there are no
    tenant-agnostic defaults.
-5. **A copy of Pacioli** — either:
-   - As a sibling directory: `git clone https://github.com/JosiahSiegel/pacioli.git ../pacioli`, or
-   - As a git submodule: `git submodule add https://github.com/JosiahSiegel/pacioli.git`, or
-   - As a `pip install` (not yet published to PyPI — see [Developer
-     Guide → Releasing](DEVELOPER_GUIDE.md#releasing) for the
-     release plan).
+5. **A copy of Pacioli** — install the recommended release wheel:
+   ```bash
+   pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pacioli-X.Y.Z-py3-none-any.whl
+   ```
+   For local development, you can instead clone Pacioli and run
+   `make install` from the checkout.
 
 ## Step 1: install the scanner
 
-If you cloned the repo:
+### Recommended: from a GitHub Release
+
+```bash
+pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pacioli-X.Y.Z-py3-none-any.whl
+```
+
+Replace `vX.Y.Z` and `X.Y.Z` with the desired release tag (e.g. `v0.1.0`, `0.1.0`).
+
+### Development: from a clone (dev only)
+
+For local development against this checkout:
 
 ```bash
 cd pacioli
 make install
 ```
+
+### Future: from PyPI
+
+```bash
+pip install pacioli
+```
+
+Pacioli is not yet published to PyPI — see [Developer Guide →
+Releasing](DEVELOPER_GUIDE.md#releasing) for the release plan.
 
 This installs:
 
