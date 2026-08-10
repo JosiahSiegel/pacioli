@@ -167,6 +167,11 @@ log. If the problem persists, set
 `PACIOLI_STATE_STORAGE_ACCOUNT` to a storage account that allows
 your CI runner's outbound IP permanently.
 
+### `ERROR  Mapping pack does not exist` on `pacioli scan`
+
+You're hitting a v0.1.0 (and earlier) bug where `scanner/paths.py:resolve_mapping` only looked at `<install-root>/mappings/pci_dss_4.0.1.yaml` — i.e. the `site-packages/mappings/` directory, which never receives the mapping YAML under wheel installs. The mapping is actually shipped at `site-packages/scanner/mappings/pci_dss_4.0.1.yaml` (inside the `scanner` package).
+**Upgrade to v0.1.1+** (`pip install --upgrade pacioli`) — the importlib.resources fallback in `resolve_mapping` locates the bundled mapping correctly. If you must stay on ≤ v0.1.0, pass `--mapping /path/to/scanner/mappings/pci_dss_4.0.1.yaml` explicitly.
+
 ### `combined.sarif not found in <run-dir>/aggregate/ — run aggregate first`
 
 You ran `pacioli baseline init` before `pacioli aggregate`. Order
