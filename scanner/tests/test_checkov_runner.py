@@ -187,8 +187,9 @@ def test_cwd_restored_when_checkov_raises(
 
     fake_checkov_module.__init__ = armed_init  # type: ignore[assignment]
     try:
+        runner = CheckovRunner(mode="report")
         with pytest.raises(RuntimeError, match="simulated checkov failure"):
-            CheckovRunner(mode="report").run_source(env_dir, sarif_out)
+            runner.run_source(env_dir, sarif_out)
     finally:
         fake_checkov_module.__init__ = original_init  # type: ignore[assignment]
 
@@ -321,8 +322,9 @@ def test_existing_sarif_is_not_clobbered_on_partial_run(
 
     fake_checkov_module.__init__ = armed_init  # type: ignore[assignment]
     try:
-        with pytest.raises(RuntimeError):
-            CheckovRunner(mode="report").run_source(env_dir, sarif_out)
+        runner = CheckovRunner(mode="report")
+        with pytest.raises(RuntimeError, match="simulated checkov failure"):
+            runner.run_source(env_dir, sarif_out)
     finally:
         fake_checkov_module.__init__ = original_init  # type: ignore[assignment]
 
@@ -357,8 +359,9 @@ def test_partial_run_leaves_no_sarif_at_destination(
 
     fake_checkov_module.__init__ = armed_init  # type: ignore[assignment]
     try:
-        with pytest.raises(RuntimeError):
-            CheckovRunner(mode="report").run_source(env_dir, sarif_out)
+        runner = CheckovRunner(mode="report")
+        with pytest.raises(RuntimeError, match="simulated checkov failure"):
+            runner.run_source(env_dir, sarif_out)
     finally:
         fake_checkov_module.__init__ = original_init  # type: ignore[assignment]
 

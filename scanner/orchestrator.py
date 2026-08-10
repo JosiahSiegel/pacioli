@@ -122,10 +122,14 @@ AZURE_STORAGE_ACCOUNT_PATTERN: str = r"^[a-z0-9]{3,24}$"
 # Azure Instance Metadata Service (IMDS) link-local address. Only
 # reachable from inside an Azure VM; used by ``_discover_public_ip`` to
 # fetch the canonical public IP for the storage firewall whitelist.
-AZURE_IMDS_ENDPOINT: str = "169.254.169.254"
+# ``169.254.169.254`` is the canonical IMDS IP — there is no DNS name
+# and no HTTPS variant (Azure IMDS requires HTTP for its metadata
+# response). The literal must appear here exactly once; consumers
+# reference it via the constant.
+AZURE_IMDS_ENDPOINT: str = "169.254.169.254"  # noqa: S1313 — Azure IMDS link-local IP has no DNS form
 AZURE_IMDS_IPV4_PATH: str = (
-    f"/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress"
-    f"?api-version=2021-02-01&format=text"
+    "/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress"
+    "?api-version=2021-02-01&format=text"
 )
 
 
@@ -238,6 +242,93 @@ class Orchestrator:
             returns ``0`` unless aggregate.py failed with rc != 7.
         """
         # Mode / tier validation first — fail fast before doing work.
+        self._validate_mode_and_tier()
+
+        output_dir = Path(output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        run_root = self._setup_run_root(output_dir, label)
+
+        target_repo, resolved_mapping, resolved_baseline, pairs = (
+            self._resolve_scan_inputs(
+                target_repo=target_repo,
+                project=project,
+                env=env,
+                mapping_path=mapping_path,
+                baseline_path=baseline_path,
+            )
+        )
+
+        if not pairs:
+            _log("WARN", "no (project, env) pairs matched --project/--env filters")
+            return 0
+
+        self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs)
+
+        runner = CheckovRunner(mode=self.mode)
+
+        # SCAN_RC accumulates per checkov pass (max-of) AND aggregate
+        # findings rc (gate mode only). See module docstring.
+        scan_rc = self._run_scan_loop(runner, pairs, target_repo, run_root, state_account)
+
+        # -- aggregate ------------------------------------------------
+        scan_rc = self._run_aggregate_and_report(
+            run_root, resolved_mapping, resolved_baseline, scan_rc
+        )
+
+        _log("INFO", f"scan complete: {output_dir}")
+        return scan_rc
+
+    # -- scan() helpers ----------------------------------------------
+
+    def _resolve_scan_inputs(
+        self,
+        *,
+        target_repo: Path,
+        project: Optional[str],
+        env: Optional[str],
+        mapping_path: Optional[Path],
+        baseline_path: Optional[Path],
+    ) -> tuple[Path, Path, Optional[Path], list[tuple[str, str]]]:
+        """Resolve target repo, mapping, baseline, and (project, env) pairs.
+
+        Extracted from :meth:`scan` so that the top-level orchestrator
+        reads as a thin glue layer (S3776). Raises :class:`OrchestratorError`
+        on resolution failures (mapping, no-pair discovery) so the
+        caller can convert them to a single log + non-zero rc.
+        """
+        target_repo = Path(target_repo).resolve()
+        if not target_repo.is_dir():
+            raise OrchestratorError(f"target repo does not exist: {target_repo}")
+
+        try:
+            resolved_mapping = self._resolve_mapping_path(mapping_path)
+        except PathResolutionError as exc:
+            raise OrchestratorError(str(exc)) from exc
+
+        resolved_baseline = self._resolve_baseline(baseline_path, target_repo)
+
+        try:
+            pairs = discover_pairs(
+                target_repo,
+                project_filter=project,
+                env_filter=env,
+            )
+        except NoTerraformFoundError as exc:
+            raise OrchestratorError(str(exc)) from exc
+
+        return target_repo, resolved_mapping, resolved_baseline, pairs
+
+    # -- scan() helpers ----------------------------------------------
+
+    def _validate_mode_and_tier(self) -> None:
+        """Fail fast on invalid mode / tier before doing any work.
+
+        Extracted from :meth:`scan` to keep that method's cognitive
+        complexity under control. ``audit`` mode is intentionally not
+        implemented in the Python orchestrator — the bash
+        ``scan_audit.sh`` companion handles that flow.
+        """
         if self.mode not in VALID_MODES:
             raise OrchestratorError(
                 f"invalid mode: {self.mode!r} (must be one of {VALID_MODES})"
@@ -252,53 +343,57 @@ class Orchestrator:
                 f"invalid tier: {self.tier!r} (must be one of {VALID_TIERS})"
             )
 
-        target_repo = Path(target_repo).resolve()
-        if not target_repo.is_dir():
-            raise OrchestratorError(f"target repo does not exist: {target_repo}")
+    @staticmethod
+    def _setup_run_root(output_dir: Path, label: Optional[str]) -> Path:
+        """Return the per-run root, creating it if a ``label`` was supplied.
 
-        output_dir = Path(output_dir).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # ``label`` (from ``--label``) is an optional slug that
-        # disambiguates run-dirs when the operator wants to keep multiple
-        # scan runs side-by-side under the same parent. When supplied,
-        # per-pair output is written under ``<output_dir>/<label>/<project>/<env>/``
-        # instead of ``<output_dir>/<project>/<env>/``. When ``None`` (the
-        # default), the layout is unchanged.
+        ``label`` (from ``--label``) is an optional slug that
+        disambiguates run-dirs when the operator wants to keep multiple
+        scan runs side-by-side under the same parent. When supplied,
+        per-pair output is written under
+        ``<output_dir>/<label>/<project>/<env>/`` instead of
+        ``<output_dir>/<project>/<env>/``. When ``None`` (the default),
+        the layout is unchanged.
+        """
         run_root = output_dir / label if label else output_dir
         if label:
             run_root.mkdir(parents=True, exist_ok=True)
+        return run_root
 
-        # Resolve mapping/baseline (CLI > env > install-root fallback).
-        try:
-            resolved_mapping = self._resolve_mapping_path(mapping_path)
-        except PathResolutionError as exc:
-            raise OrchestratorError(str(exc)) from exc
+    @staticmethod
+    def _resolve_baseline(
+        baseline_path: Optional[Path],
+        target_repo: Path,
+    ) -> Optional[Path]:
+        """Pick the effective baseline file (CLI > repo default).
 
+        Returns ``None`` when no usable baseline file exists. Mirrors
+        the bash scanner's ``$PCI_BASELINE_FILE`` precedence.
+        """
         if baseline_path is not None:
-            resolved_baseline: Optional[Path] = Path(baseline_path).resolve()
-            if not resolved_baseline.is_file():
-                resolved_baseline = None
-        else:
-            env_baseline = target_repo / "pci_baseline.yaml"
-            resolved_baseline = env_baseline if env_baseline.is_file() else None
+            resolved: Optional[Path] = Path(baseline_path).resolve()
+            if not resolved.is_file():
+                resolved = None
+            return resolved
+        env_baseline = target_repo / "pci_baseline.yaml"
+        return env_baseline if env_baseline.is_file() else None
 
-        # Discover (project, env) pairs (yaml > env/ tree > flat-repo).
-        try:
-            pairs = discover_pairs(
-                target_repo,
-                project_filter=project,
-                env_filter=env,
-            )
-        except NoTerraformFoundError as exc:
-            raise OrchestratorError(str(exc)) from exc
+    @staticmethod
+    def _emit_scan_banner(
+        mode: str,
+        tier: str,
+        output_dir: Path,
+        resolved_mapping: Path,
+        resolved_baseline: Optional[Path],
+        pairs: list[tuple[str, str]],
+    ) -> None:
+        """Emit the per-run INFO banner before the per-pair loop starts.
 
-        if not pairs:
-            _log("WARN", "no (project, env) pairs matched --project/--env filters")
-            return 0
-
-        _log("INFO", f"mode: {self.mode}")
-        _log("INFO", f"tier: {self.tier}")
+        Extracted from :meth:`scan` so the top-level orchestrator reads
+        as a thin glue layer.
+        """
+        _log("INFO", f"mode: {mode}")
+        _log("INFO", f"tier: {tier}")
         _log("INFO", f"output_dir: {output_dir}")
         _log("INFO", f"mapping: {resolved_mapping}")
         if resolved_baseline:
@@ -309,12 +404,21 @@ class Orchestrator:
             + ", ".join(f"{p}/{e}" for p, e in pairs),
         )
 
-        runner = CheckovRunner(mode=self.mode)
+    def _run_scan_loop(
+        self,
+        runner: CheckovRunner,
+        pairs: list[tuple[str, str]],
+        target_repo: Path,
+        run_root: Path,
+        state_account: Optional[str],
+    ) -> int:
+        """Drive the (project, env) pair loop and return the per-pair max rc.
 
-        # SCAN_RC accumulates per checkov pass (max-of) AND aggregate
-        # findings rc (gate mode only). See module docstring.
+        Skips pairs whose env dir is missing. The per-pair dispatch into
+        the tier-specific passes is delegated to
+        :meth:`_scan_one_pair`.
+        """
         scan_rc = 0
-
         for proj, env_name in pairs:
             env_dir = self._resolve_env_dir(target_repo, proj, env_name)
             if not env_dir.is_dir():
@@ -340,30 +444,42 @@ class Orchestrator:
             scan_rc = max(scan_rc, pair_rc)
 
             _log("INFO", f"done {proj}/{env_name}")
+        return scan_rc
 
-        # -- aggregate ------------------------------------------------
-        if not self.no_aggregate and self.mode != "audit":
-            agg_rc = self._run_aggregate(
-                run_dir=run_root,
-                mapping_path=resolved_mapping,
-                baseline_path=resolved_baseline,
-            )
-            scan_rc = self._merge_aggregate_rc(scan_rc, agg_rc)
+    def _run_aggregate_and_report(
+        self,
+        run_root: Path,
+        resolved_mapping: Path,
+        resolved_baseline: Optional[Path],
+        scan_rc: int,
+    ) -> int:
+        """Run the post-loop aggregate step and print the report path.
 
-            # Probe both candidate locations (aggregate.py default is
-            # <run-dir>/aggregate/, but earlier versions emitted
-            # <run-dir>/report.html). Mirrors scan.sh lines 759-774.
-            report_html: Optional[Path] = None
-            for candidate in (run_root / "aggregate" / "report.html", run_root / "report.html"):
-                if candidate.is_file():
-                    report_html = candidate
-                    break
-            if report_html is not None:
-                # Always print the report path on stdout so consumers
-                # following the consumption guide can `open` it directly.
-                print(f"report: {report_html}")
+        Returns the merged scan_rc. Skipped when ``--no-aggregate`` was
+        set or the mode is ``audit``. Mirrors scan.sh lines 731-797.
+        """
+        if self.no_aggregate or self.mode == "audit":
+            return scan_rc
 
-        _log("INFO", f"scan complete: {output_dir}")
+        agg_rc = self._run_aggregate(
+            run_dir=run_root,
+            mapping_path=resolved_mapping,
+            baseline_path=resolved_baseline,
+        )
+        scan_rc = self._merge_aggregate_rc(scan_rc, agg_rc)
+
+        # Probe both candidate locations (aggregate.py default is
+        # <run-dir>/aggregate/, but earlier versions emitted
+        # <run-dir>/report.html). Mirrors scan.sh lines 759-774.
+        report_html: Optional[Path] = None
+        for candidate in (run_root / "aggregate" / "report.html", run_root / "report.html"):
+            if candidate.is_file():
+                report_html = candidate
+                break
+        if report_html is not None:
+            # Always print the report path on stdout so consumers
+            # following the consumption guide can `open` it directly.
+            print(f"report: {report_html}")
         return scan_rc
 
     # -- pair scan ----------------------------------------------------
@@ -870,6 +986,10 @@ class Orchestrator:
         or empty result. The downloaded blob is shredded ASAP in the
         caller (PCI 10.7 hygiene).
         """
+        # Defense-in-depth: validate the CLI-derived value here too so
+        # the data-flow analyzer sees the check immediately before the
+        # subprocess invocation (S8705 — taint from CLI flag).
+        self._check_storage_account_valid(state_account)
         try:
             dl = subprocess.run(
                 [
@@ -1004,8 +1124,10 @@ class Orchestrator:
                 timeout=120,
                 check=False,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            _log("WARN", f"  drift_report.py failed: {exc}")
+        except subprocess.TimeoutExpired as exc:
+            _log("WARN", f"  drift_report.py timed out: {exc}")
+        except FileNotFoundError as exc:
+            _log("WARN", f"  drift_report.py unavailable: {exc}")
 
     @staticmethod
     def _shred_state_plan(state_plan_json: Path) -> None:
@@ -1082,10 +1204,7 @@ class Orchestrator:
         is reached from CI/automation where a TTY prompt is unwanted.
         """
         ns = argparse.Namespace(mapping=str(cli_mapping) if cli_mapping is not None else None)
-        try:
-            pack = resolve_mapping_path(ns)
-        except PathResolutionError:
-            raise
+        pack = resolve_mapping_path(ns)
         return pack.path
 
     # -- aggregate ----------------------------------------------------
@@ -1171,7 +1290,7 @@ class Orchestrator:
             _log(
                 "INFO",
                 f"aggregate.py finished with rc=7 "
-                f"(HIGH/CRITICAL findings present); "
+                "(HIGH/CRITICAL findings present); "
                 f"raw SARIFs are still in {run_dir}",
             )
             return
@@ -1211,7 +1330,11 @@ def _discover_public_ip() -> Optional[str]:
     candidates = (
         # Azure IMDS — only works from an Azure VM, but produces the
         # canonical IP the firewall will see.
-        (f"http://{AZURE_IMDS_ENDPOINT}{AZURE_IMDS_IPV4_PATH}", "Azure-IMDS"),
+        # The Azure Instance Metadata Service (IMDS) endpoint is
+        # intentionally served over HTTP (not HTTPS) and the request
+        # must include the ``Metadata: true`` header to be accepted.
+        # Azure IMDS specifically uses HTTP; this is by design.
+        (f"http://{AZURE_IMDS_ENDPOINT}{AZURE_IMDS_IPV4_PATH}", "Azure-IMDS"),  # noqa: S5332 — Azure IMDS requires HTTP
         ("https://api.ipify.org", "ipify"),
     )
     for url, label in candidates:

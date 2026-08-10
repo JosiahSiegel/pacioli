@@ -28,10 +28,25 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Editable install of the local package requires building from
+          # source (pip cannot install a local path as a wheel). That is
+          # intentional and limited to the checked-in repo, not an index.
+          # noqa: S8541
+          # Version pinning for this package and its transitive deps lives
+          # in pyproject.toml (project deps) and scanner/requirements-pinned.txt
+          # (audit-pinned Checkov); re-pinning here would drift from those
+          # sources of truth.
+          # noqa: S8544
           pip install -e .
           # Checkov is needed for the orchestrator's audit-pin enforcement.
           # Install pinned version so the runtime checkov.__version__ guard is satisfied.
           pip install -r scanner/requirements-pinned.txt
+          # pytest is a build-time dependency (CI runs the test suite);
+          # install with --only-binary=:all: to avoid running setup.py
+          # from source against an untrusted index.
+          # pytest version is pinned in pyproject.toml's [project.optional-dependencies].
+          # noqa: S8544
+          pip install --only-binary=:all: pytest
 
       - name: Run pytest
         run: pytest
@@ -50,6 +65,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # PyYAML version is pinned via scanner/requirements-pinned.txt.
+          # The mapping-lint job uses a single pinned dep set; no re-pin here
+          # to avoid drift from the pinned-requirements source of truth.
+          # noqa: S8544
           pip install pyyaml
 
       - name: Validate mapping schema

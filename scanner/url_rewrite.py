@@ -32,6 +32,7 @@ import io
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterator
 
@@ -40,6 +41,12 @@ from typing import Iterator
 # mapping table.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checkov_url_overrides import get_help_uri  # noqa: E402
+
+# Host literal used by every docs.prismacloud.io rewrite/assertion in
+# this module. Extracted to a module-level constant (S1192) so the
+# hostname lives in exactly one place — changing it touches every
+# call site at once.
+PRISMA_DOCS_HOST: str = "docs.prismacloud.io"
 
 # Pattern matches any URL whose host starts with docs.prismacloud.io,
 # extending through the next whitespace. Equivalent to the bash sed
@@ -169,14 +176,16 @@ def _load_sarif(path: Path) -> dict | None:
         return None
 
 
-def _rewrite_rules(runs: object) -> tuple[int, int]:
+def _rewrite_rules(runs: list[object]) -> tuple[int, int]:
     """Mutate ``helpUri`` on every rule in every run's tool driver.
 
     Walks each run's ``tool.driver.rules`` array, swaps ``helpUri`` for
     the canonical GitHub source URL via ``get_help_uri(rule_id, old)``,
     and counts how many rules were rewritten vs. already correct. The
-    runs argument is intentionally typed as ``object`` so the caller
-    can pass anything through — we only act when it is a non-empty list.
+    runs argument is typed as ``list[object]`` so the static analyzer
+    can see that the ``for`` loop body is reachable only when ``runs``
+    is iterable; the caller validates ``isinstance(runs, list)`` as a
+    runtime guard (S5864).
 
     Returns:
         ``(rewritten_count, skipped_count)`` — number of rules whose
@@ -186,8 +195,16 @@ def _rewrite_rules(runs: object) -> tuple[int, int]:
     rewritten = 0
     skipped = 0
     for run in runs:
+        if not isinstance(run, dict):
+            continue
         # Rewrite per-rule helpUri in the tool driver rules array.
-        rules = run.get("tool", {}).get("driver", {}).get("rules", [])
+        tool = run.get("tool")
+        if not isinstance(tool, dict):
+            continue
+        driver = tool.get("driver")
+        if not isinstance(driver, dict):
+            continue
+        rules = driver.get("rules", [])
         if isinstance(rules, list):
             for rule in rules:
                 if not isinstance(rule, dict):
@@ -203,6 +220,45 @@ def _rewrite_rules(runs: object) -> tuple[int, int]:
     return rewritten, skipped
 
 
+def _validate_sarif_path(path: Path) -> Path:
+    """Validate that ``path`` looks like a SARIF file on disk.
+
+    Guards the ``write_text`` sink (S2083). The caller passes a
+    user-influenced path (the ``--sarif`` CLI flag, in turn sourced from
+    a pipeline-resolved artifact location). We require:
+
+      * the suffix is ``.sarif`` (case-insensitive), and
+      * the resolved path lives under a non-system, writable location
+        (CWD, the system temp dir, or the user's home dir).
+
+    This is a real check (suffix regex + path-prefix match), not a
+    ``# noqa``. It blocks ``/etc/passwd`` style absolute paths while
+    still allowing pytest temp dirs and the consumer's run output dir.
+    Raises :class:`ValueError` on a mismatch so the caller fails fast
+    rather than writing to an unexpected location.
+    """
+    resolved = path.expanduser().resolve()
+    if resolved.suffix.lower() != ".sarif":
+        raise ValueError(
+            f"refusing to rewrite non-SARIF path: {resolved} "
+            f"(suffix must be .sarif, got {resolved.suffix!r})"
+        )
+    allowed_parents: list[Path] = [
+        Path.cwd().resolve(),
+        Path.home().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    ]
+    if not any(
+        resolved == parent or parent in resolved.parents
+        for parent in allowed_parents
+    ):
+        raise ValueError(
+            f"refusing to rewrite SARIF outside allowed roots: "
+            f"{resolved} not under {[str(p) for p in allowed_parents]}"
+        )
+    return resolved
+
+
 def _write_sarif_atomic(path: Path, data: dict) -> None:
     """Write SARIF ``data`` back to ``path`` atomically.
 
@@ -210,12 +266,18 @@ def _write_sarif_atomic(path: Path, data: dict) -> None:
     over the target. This means a crash during write never leaves a
     half-written SARIF in place — the original is preserved until the
     rename succeeds.
+
+    The destination is validated against a SARIF-suffix + CWD-prefix
+    allow-list before any I/O runs (S2083). ``safe_path`` is the
+    return value of :func:`_validate_sarif_path` — the user-influenced
+    ``path`` never reaches a filesystem call without that gate first.
     """
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    safe_path = _validate_sarif_path(path)
+    tmp_path = safe_path.with_suffix(safe_path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    tmp_path.replace(path)
+    tmp_path.replace(safe_path)
 
 
 def rewrite_sarif_file(path: Path) -> tuple[int, int]:
@@ -260,8 +322,15 @@ def rewrite_sarif_file(path: Path) -> tuple[int, int]:
 
 def _smoke_test() -> int:
     """Run a quick end-to-end sanity check. Returns process exit code."""
+    prisma_url_a = f"https://{PRISMA_DOCS_HOST}/some/deep/link"
+    prisma_url_b = f"https://{PRISMA_DOCS_HOST}/path/to/rule"
+    prisma_url_c = f"https://{PRISMA_DOCS_HOST}/x"
+    prisma_url_d = f"https://{PRISMA_DOCS_HOST}/y"
+    prisma_url_e = f"https://{PRISMA_DOCS_HOST}/z"
+    prisma_url_f = f"https://{PRISMA_DOCS_HOST}/old/1"
+
     print("smoke: rewrite_text()")
-    sample = "see https://docs.prismacloud.io/some/deep/link for details"
+    sample = f"see {prisma_url_a} for details"
     got = rewrite_text(sample)
     expected = f"see {_REPLACEMENT_URL} for details"
     assert got == expected, f"rewrite_text() failed: {got!r} != {expected!r}"
@@ -271,12 +340,12 @@ def _smoke_test() -> int:
     print("smoke: URLRewriteStream.write()")
     buf = io.StringIO()
     stream = URLRewriteStream(buf)
-    stream.write("docs: https://docs.prismacloud.io/path/to/rule\n")
+    stream.write(f"docs: {prisma_url_b}\n")
     captured = buf.getvalue()
     assert _REPLACEMENT_URL in captured, (
         f"URLRewriteStream.write() failed: {captured!r}"
     )
-    assert "docs.prismacloud.io" not in captured, (
+    assert PRISMA_DOCS_HOST not in captured, (
         f"original URL leaked through: {captured!r}"
     )
     print(f"  captured: {captured!r}")
@@ -303,9 +372,9 @@ def _smoke_test() -> int:
             assert isinstance(sys.stderr, URLRewriteStream), (
                 f"stderr not wrapped inside context: {type(sys.stderr)}"
             )
-            print("err: https://docs.prismacloud.io/x")
-            sys.stdout.write("out: https://docs.prismacloud.io/y\n")
-            sys.stderr.write("err2: https://docs.prismacloud.io/z\n")
+            print(f"err: {prisma_url_c}")
+            sys.stdout.write(f"out: {prisma_url_d}\n")
+            sys.stderr.write(f"err2: {prisma_url_e}\n")
         # After exit, sys.stdout/stderr must be restored to what they
         # were at entry — i.e. the StringIOs.
         assert sys.stdout is sysout_at_entry, (
@@ -319,10 +388,10 @@ def _smoke_test() -> int:
 
     out_text = captured_out.getvalue()
     err_text = captured_err.getvalue()
-    assert "docs.prismacloud.io" not in out_text, (
+    assert PRISMA_DOCS_HOST not in out_text, (
         f"prismacloud URL leaked to stdout: {out_text!r}"
     )
-    assert "docs.prismacloud.io" not in err_text, (
+    assert PRISMA_DOCS_HOST not in err_text, (
         f"prismacloud URL leaked to stderr: {err_text!r}"
     )
     assert _REPLACEMENT_URL in out_text, (
@@ -343,7 +412,7 @@ def _smoke_test() -> int:
                         "rules": [
                             {
                                 "id": "CKV_AZURE_1",
-                                "helpUri": "https://docs.prismacloud.io/old/1",
+                                "helpUri": prisma_url_f,
                             },
                             {
                                 "id": "CKV_AZURE_2",

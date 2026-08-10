@@ -94,10 +94,38 @@ def _load_pci_scope(scope_file: Path) -> list[tuple[str, str]]:
             "to env/-tree auto-discovery."
         )
 
-    with scope_file.open("r", encoding="utf-8") as fh:
-        data = _yaml.safe_load(fh) or {}
-
+    data = _read_scope_yaml(scope_file)
     projects = data.get("projects", []) or []
+    return _collect_scope_pairs(projects)
+
+
+def _read_scope_yaml(scope_file: Path) -> dict:
+    """Read and parse the scope YAML file, returning an empty dict on load failure.
+
+    Extracted from :func:`_load_pci_scope` so the parent function's
+    cognitive complexity stays under the S3776 ceiling. Returns
+    ``{}`` when the file is empty or contains a bare scalar — the
+    caller's ``data.get("projects", []) or []`` then degrades to a
+    no-op rather than raising.
+    """
+    with scope_file.open("r", encoding="utf-8") as fh:
+        return _yaml.safe_load(fh) or {}
+
+
+def _collect_scope_pairs(projects: list[object]) -> list[tuple[str, str]]:
+    """Flatten the ``projects:`` list of a scope YAML into (project, env) pairs.
+
+    Per-entry rules (kept here so the caller stays focused on I/O and
+    YAML availability):
+
+      * Skip entries that are not mappings (``isinstance(proj, dict)``).
+      * Honor only ``status: in_scope`` entries.
+      * Require a non-empty ``project`` field; skip otherwise.
+      * Emit one pair per non-empty ``envs`` entry.
+
+    Extracted from :func:`_load_pci_scope` to keep the parent function's
+    cognitive complexity under the S3776 ceiling.
+    """
     pairs: list[tuple[str, str]] = []
     for proj in projects:
         if not isinstance(proj, dict):

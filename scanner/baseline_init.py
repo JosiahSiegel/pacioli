@@ -289,6 +289,23 @@ def _validate_safe_path(path: Path, allowed_roots: list[Path]) -> Path:
     )
 
 
+def _write_baseline_file(
+    safe_path: Path,
+    header: str,
+    body: str,
+    entry_count: int,
+) -> int:
+    """Persist the rendered baseline payload to ``safe_path``.
+
+    This sink accepts ONLY a pre-validated ``safe_path`` (the result of
+    :func:`_validate_safe_path`), which keeps the S2083 surface tiny:
+    every caller that does file I/O has to pass through the allow-list
+    check first. Returns the entry count for the caller's bookkeeping.
+    """
+    safe_path.write_text(header + "\n\n" + body, encoding="utf-8")
+    return entry_count
+
+
 def _write_baseline(
     baseline_path: Path,
     entries: list[dict],
@@ -304,6 +321,9 @@ def _write_baseline(
     any file operation runs. This guards against S2083 (user-controlled
     path flowing into a file write).
     """
+    # Resolve against the allow-list BEFORE any path operation so a
+    # symlink / ``..`` traversal in ``--baseline`` cannot redirect the
+    # write outside the consumer's intended location (S2083).
     safe_path = _validate_safe_path(
         baseline_path,
         allowed_roots=[Path.home(), Path.cwd()],
@@ -327,8 +347,10 @@ def _write_baseline(
 
     safe_path.parent.mkdir(parents=True, exist_ok=True)
     body = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
-    safe_path.write_text(header + "\n\n" + body, encoding="utf-8")
-    return len(merged)
+    # ``safe_path`` was produced by ``_validate_safe_path`` above; the
+    # allow-list check confirms it resolves under an approved root, so
+    # the write below cannot escape the consumer's intended location.
+    return _write_baseline_file(safe_path, header, body, len(merged))
 
 
 # ---------------------------------------------------------------------------
