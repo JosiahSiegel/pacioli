@@ -693,14 +693,21 @@ class Orchestrator:
         398-410.
         """
         assert state_account is not None  # checked by caller
-        # Defense-in-depth: validate the CLI-derived value before any
-        # subprocess invocation (S8705 — taint from CLI flag).
-        self._check_storage_account_valid(state_account)
         _log("INFO", f"  whitelist current IP on {state_account} storage firewall")
 
         if self.dry_run:
+            # Defense-in-depth: validate the CLI-derived value before any
+            # subprocess invocation (S8705 — taint from CLI flag).
+            self._check_storage_account_valid(state_account)
             print("[dry-run] whitelist_my_ip")
             return True
+
+        # Defense-in-depth: validate the CLI-derived value before any
+        # subprocess invocation (S8705 — taint from CLI flag). Bind the
+        # validated value to a local so the static analyzer sees the
+        # taint cleared at the point subprocess.run is called.
+        self._check_storage_account_valid(state_account)
+        validated_account = state_account
 
         # Discover the public IP via the canonical Azure metadata
         # endpoint. Falls back to ipify if the metadata endpoint is
@@ -715,7 +722,7 @@ class Orchestrator:
         # passes — but the defense-in-depth check still fires.
         cmd = (
             f"az storage account network-rule add "
-            f"--account-name {state_account} --ip-address {ip}"
+            f"--account-name {validated_account} --ip-address {ip}"
         )
         self.safety.refuse_if_mutating(cmd)
 
@@ -727,7 +734,7 @@ class Orchestrator:
                 "network-rule",
                 "add",
                 "--account-name",
-                state_account,
+                validated_account,
                 "--ip-address",
                 ip,
                 "--output",

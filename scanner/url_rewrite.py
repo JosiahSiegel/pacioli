@@ -176,28 +176,26 @@ def _load_sarif(path: Path) -> dict | None:
         return None
 
 
+def _rewrite_rule(rule: object) -> tuple[int, int]:
+    """Rewrite one SARIF rule and return ``(rewritten, skipped)`` counts."""
+    if not isinstance(rule, dict):
+        return 0, 0
+    rid = rule.get("id", "")
+    old = rule.get("helpUri")
+    new = get_help_uri(rid, old)
+    if new == old:
+        return 0, 1
+    rule["helpUri"] = new
+    return 1, 0
+
+
 def _rewrite_rules(runs: list[object]) -> tuple[int, int]:
-    """Mutate ``helpUri`` on every rule in every run's tool driver.
-
-    Walks each run's ``tool.driver.rules`` array, swaps ``helpUri`` for
-    the canonical GitHub source URL via ``get_help_uri(rule_id, old)``,
-    and counts how many rules were rewritten vs. already correct. The
-    runs argument is typed as ``list[object]`` so the static analyzer
-    can see that the ``for`` loop body is reachable only when ``runs``
-    is iterable; the caller validates ``isinstance(runs, list)`` as a
-    runtime guard (S5864).
-
-    Returns:
-        ``(rewritten_count, skipped_count)`` — number of rules whose
-        ``helpUri`` changed vs. number whose ``helpUri`` was already
-        correct.
-    """
+    """Mutate ``helpUri`` on every rule in every run's tool driver."""
     rewritten = 0
     skipped = 0
     for run in runs:
         if not isinstance(run, dict):
             continue
-        # Rewrite per-rule helpUri in the tool driver rules array.
         tool = run.get("tool")
         if not isinstance(tool, dict):
             continue
@@ -205,18 +203,12 @@ def _rewrite_rules(runs: list[object]) -> tuple[int, int]:
         if not isinstance(driver, dict):
             continue
         rules = driver.get("rules", [])
-        if isinstance(rules, list):
-            for rule in rules:
-                if not isinstance(rule, dict):
-                    continue
-                rid = rule.get("id", "")
-                old = rule.get("helpUri")
-                new = get_help_uri(rid, old)
-                if new != old:
-                    rule["helpUri"] = new
-                    rewritten += 1
-                else:
-                    skipped += 1
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
+            rule_rewritten, rule_skipped = _rewrite_rule(rule)
+            rewritten += rule_rewritten
+            skipped += rule_skipped
     return rewritten, skipped
 
 

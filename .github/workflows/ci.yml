@@ -26,30 +26,22 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        # All third-party versions are pinned to satisfy SonarCloud
+        # S8541/S8544. The set comes from scanner/requirements-pinned.txt
+        # (audit-pinned) and pyproject.toml's [project.dependencies].
+        # The editable install of the local package inherits its
+        # project.dependencies pins from pyproject.toml directly.
         run: |
           python -m pip install --upgrade pip
-          # Editable install of the local package requires building from
-          # source (pip cannot install a local path as a wheel). That is
-          # intentional and limited to the checked-in repo, not an index.
-          # noqa: S8541
-          # Version pinning for this package and its transitive deps lives
-          # in pyproject.toml (project deps) and scanner/requirements-pinned.txt
-          # (audit-pinned Checkov); re-pinning here would drift from those
-          # sources of truth.
-          # noqa: S8544
+          pip install --only-binary=:all: \
+            pytest==9.1.1 \
+            pyyaml==6.0.2 \
+            requests==2.32.3
           pip install -e .
-          # Checkov is needed for the orchestrator's audit-pin enforcement.
-          # Install pinned version so the runtime checkov.__version__ guard is satisfied.
-          pip install -r scanner/requirements-pinned.txt
-          # pytest is a build-time dependency (CI runs the test suite);
-          # install with --only-binary=:all: to avoid running setup.py
-          # from source against an untrusted index.
-          # pytest version is pinned in pyproject.toml's [project.optional-dependencies].
-          # noqa: S8544
-          pip install --only-binary=:all: pytest
+          pip install --only-binary=:all: -r scanner/requirements-pinned.txt
 
       - name: Run pytest
-        run: pytest
+        run: pytest -v
 
   mapping-lint:
     name: Validate mapping YAML
@@ -65,11 +57,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # PyYAML version is pinned via scanner/requirements-pinned.txt.
-          # The mapping-lint job uses a single pinned dep set; no re-pin here
-          # to avoid drift from the pinned-requirements source of truth.
-          # noqa: S8544
-          pip install pyyaml
+          pip install --only-binary=:all: pyyaml==6.0.2
 
       - name: Validate mapping schema
         run: |
