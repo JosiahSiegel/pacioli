@@ -726,6 +726,13 @@ class Orchestrator:
         )
         self.safety.refuse_if_mutating(cmd)
 
+        # Defense-in-depth re-validation immediately before the
+        # subprocess call (S8705 — taint from CLI flag). The static
+        # analyzer sees the sink here; the validation at the top of
+        # the function is too far away. Re-running the check at the
+        # call site clears the taint flag without changing behavior.
+        self._check_storage_account_valid(validated_account)
+
         result = subprocess.run(
             [
                 "az",

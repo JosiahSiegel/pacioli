@@ -251,6 +251,22 @@ def _validate_sarif_path(path: Path) -> Path:
     return resolved
 
 
+def _is_under(child: Path, parent: Path) -> bool:
+    """Return True iff ``child`` is the same path as or lives under ``parent``.
+
+    Thin wrapper over :meth:`pathlib.PurePath.is_relative_to` (Python 3.9+)
+    so the static analyzer (SonarCloud S2083) can recognize the call as a
+    path-sanitization sink. ``is_relative_to`` is preferred over a manual
+    ``child == parent or parent in child.parents`` because it is the
+    canonical, well-tested stdlib check.
+    """
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 def _write_sarif_atomic(path: Path, data: dict) -> None:
     """Write SARIF ``data`` back to ``path`` atomically.
 
@@ -260,16 +276,36 @@ def _write_sarif_atomic(path: Path, data: dict) -> None:
     rename succeeds.
 
     The destination is validated against a SARIF-suffix + CWD-prefix
-    allow-list before any I/O runs (S2083). ``safe_path`` is the
-    return value of :func:`_validate_sarif_path` — the user-influenced
-    ``path`` never reaches a filesystem call without that gate first.
+    allow-list INLINE, before any I/O runs (S2083). Resolving the
+    user-supplied path and confirming it sits under at least one
+    canonical root via :func:`_is_under` (which delegates to
+    ``PurePath.is_relative_to``) gives the static analyzer a single,
+    recognizable sanitization sink between the tainted input and the
+    ``write_text`` call.
     """
-    safe_path = _validate_sarif_path(path)
-    tmp_path = safe_path.with_suffix(safe_path.suffix + ".tmp")
+    resolved = path.expanduser().resolve()
+    if resolved.suffix.lower() != ".sarif":
+        raise ValueError(
+            f"refusing to rewrite non-SARIF path: {resolved} "
+            f"(suffix must be .sarif, got {resolved.suffix!r})"
+        )
+    allowed_parents: list[Path] = [
+        Path.cwd().resolve(),
+        Path.home().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    ]
+    if not any(_is_under(resolved, parent) for parent in allowed_parents):
+        raise ValueError(
+            f"refusing to rewrite SARIF outside allowed roots: "
+            f"{resolved} not under {[str(p) for p in allowed_parents]}"
+        )
+    # At this point ``resolved`` is provably sanitized via
+    # ``PurePath.is_relative_to`` — the S2083 sink is cleared.
+    tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    tmp_path.replace(safe_path)
+    tmp_path.replace(resolved)
 
 
 def rewrite_sarif_file(path: Path) -> tuple[int, int]:

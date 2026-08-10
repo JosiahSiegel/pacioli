@@ -25,20 +25,21 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install dependencies
-        # All third-party versions are pinned to satisfy SonarCloud
-        # S8541/S8544. The set comes from scanner/requirements-pinned.txt
-        # (audit-pinned) and pyproject.toml's [project.dependencies].
-        # The editable install of the local package inherits its
-        # project.dependencies pins from pyproject.toml directly.
+      - name: Build wheel
         run: |
           python -m pip install --upgrade pip
-          pip install --only-binary=:all: \
-            pytest==9.1.1 \
-            pyyaml==6.0.2 \
-            requests==2.32.3
-          pip install -e .
+          pip install --only-binary=:all: build==1.5.0
+          python -m build --wheel --outdir ./dist
+
+      - name: Install dependencies
+        # NOTE: All versions are pinned in scanner/requirements-pinned.txt
+        # (audit-pinned checkov) and pyproject.toml (project dependencies).
+        # The local wheel is built above and installed with --only-binary=:all:
+        # so SonarCloud S8541/S8544 (supply chain) are satisfied.
+        run: |
+          pip install --only-binary=:all: ./dist/pacioli-0.1.0-py3-none-any.whl
           pip install --only-binary=:all: -r scanner/requirements-pinned.txt
+          pip install --only-binary=:all: pytest==9.1.1
 
       - name: Run pytest
         run: pytest -v
