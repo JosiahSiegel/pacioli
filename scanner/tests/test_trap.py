@@ -18,7 +18,6 @@ its return code.
 
 from __future__ import annotations
 
-import os
 import signal
 import subprocess
 import sys
@@ -151,7 +150,7 @@ def test_register_traps_registers_sigterm_on_posix():
                 f"rc={result.returncode} stderr={result.stderr}"
             )
             assert result.returncode != 0, (
-                f"SIGTERM was swallowed (exit 0); expected non-zero"
+                "SIGTERM was swallowed (exit 0); expected non-zero"
             )
     finally:
         # Restore so we don't leak handler state into the rest of the run.

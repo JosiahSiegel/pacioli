@@ -12,17 +12,30 @@ Covers the plan's MUST-DO contract for this file:
   * the ``--scan-plan`` back-compat alias maps to ``--tier plan`` and
     emits a :class:`DeprecationWarning` (verified through the CLI
     dispatcher, not just the helper)
+  * ``tier=plan`` invokes ``_discover_public_ip`` via the whitelist
+    helper and produces ``tfplan.binary`` + ``plan.json`` per pair
+  * ``tier=state`` invokes the state-blob subprocess pipeline under
+    the ``safety.refuse_if_mutating`` guard and emits
+    ``state.tfstate`` / ``state_as_plan.json`` / ``drift_report.json``
+  * ``_register_cleanup_trap`` wires the EXIT trap on tier=plan/state
+    and the cleanup closure runs the whitelist + shred steps in order
+  * ``_discover_public_ip`` short-circuits on a healthy IMDS response
+    and falls back to ipify on a failure
 
 All tests are hermetic: ``tmp_path`` provides the consumer repo;
 :class:`_FakeCheckov` stands in for the real Checkov runner; the
 aggregate step is mocked so the suite has no dependency on PyYAML,
-mapping YAML, or the HTML report renderer.
+mapping YAML, or the HTML report renderer. Tier=plan/state tests mock
+the Azure / terraform subprocesses (``_whitelist_my_ip``,
+``_run_terraform_init`` / ``_run_terraform_plan``,
+``_download_state_blob`` / ``_convert_state_to_plan`` /
+``_scan_state_as_plan`` / ``_emit_drift_report``) so no terraform
+binary is invoked.
 """
 from __future__ import annotations
 
 import importlib.metadata
 import json
-import os
 import sys
 import warnings
 from pathlib import Path
@@ -620,3 +633,673 @@ def test_scan_state_alias_implies_tier_state() -> None:
         warnings.simplefilter("ignore")
         applied = scanner_cli._apply_backcompat(args)
     assert applied.tier == "state"
+
+
+# ---------------------------------------------------------------------------
+# 7. tier=plan: _discover_public_ip invoked, tfplan.binary + plan.json produced
+# ---------------------------------------------------------------------------
+
+
+def test_tier_plan_invokes_discover_public_ip_and_emits_plan_artifacts(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``tier=plan`` reaches the plan-prep pipeline and writes tfplan.binary + plan.json.
+
+    Patches the four subprocess entry points
+    (``_whitelist_my_ip``, ``_run_terraform_init``, ``_run_terraform_plan``,
+    ``_run_terraform_show``) to be hermetic. ``_whitelist_my_ip`` is the
+    one that ultimately calls ``_discover_public_ip`` (orchestrator.py
+    line 714); we record the call so the test asserts the IP-discovery
+    code path was actually reached.
+
+    Per-pair artifacts verified:
+      * ``tfplan.binary`` — written by ``_run_terraform_plan``
+      * ``plan.json`` — written by ``_run_terraform_show`` and required
+        by the ``terraform_plan`` Checkov pass.
+    """
+    _make_env_tree(tmp_path, {"payments": {"prod": ["main.tf"]}})
+    output_dir = tmp_path / "runs"
+    state_account = "mystorageacct"
+
+    # Track which subprocess paths were reached.
+    calls: list[str] = []
+
+    def fake_whitelist_my_ip(self, state, account):  # noqa: ANN001 — test stub
+        calls.append("whitelist_my_ip")
+        # Mimic real behavior: write the .whitelist_ip marker so the
+        # cleanup trap would have something to remove.
+        (state.env_run_dir / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
+        return True
+
+    def fake_terraform_init(self, state):  # noqa: ANN001 — test stub
+        calls.append("terraform_init")
+        return True
+
+    def fake_terraform_plan(self, state):  # noqa: ANN001 — test stub
+        calls.append("terraform_plan")
+        # Create the tfplan.binary so downstream _emit_plan_pass finds it.
+        state.plan_bin = state.env_run_dir / "tfplan.binary"
+        state.plan_bin.write_bytes(b"\x00\x01\x02plan-bytes")
+        return True
+
+    def fake_terraform_show(self, state):  # noqa: ANN001 — test stub
+        calls.append("terraform_show")
+        # Create plan.json; _emit_plan_pass only runs if this file is present.
+        state.plan_json = state.env_run_dir / "plan.json"
+        state.plan_json.write_text(
+            json.dumps(
+                {
+                    "format_version": "1.2",
+                    "terraform_version": "1.5.0",
+                    "resource_changes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_whitelist_my_ip",
+        fake_whitelist_my_ip,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_init",
+        fake_terraform_init,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_plan",
+        fake_terraform_plan,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_show",
+        fake_terraform_show,
+    )
+    # Mock the PCI 10.7 hygiene shred so the artifacts survive for
+    # post-scan assertion (production shreds them, but we want to
+    # verify they were written in the first place).
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_shred_plan_artifacts",
+        lambda self, state: None,
+    )
+    monkeypatch.setattr("scanner.aggregate.main", lambda: 0, raising=False)
+
+    orch = Orchestrator(mode="report", tier="plan")
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=state_account,
+    )
+
+    assert rc == 0
+    pair_dir = output_dir / "payments" / "prod"
+    assert pair_dir.is_dir(), f"missing pair dir: {pair_dir}"
+
+    # All four plan-prep subprocesses fired in the right order.
+    assert calls == [
+        "whitelist_my_ip",
+        "terraform_init",
+        "terraform_plan",
+        "terraform_show",
+    ], f"unexpected subprocess sequence: {calls}"
+
+    # Per-pair plan artifacts written.
+    plan_bin = pair_dir / "tfplan.binary"
+    plan_json = pair_dir / "plan.json"
+    assert plan_bin.is_file(), f"missing tfplan.binary: {plan_bin}"
+    assert plan_bin.read_bytes() == b"\x00\x01\x02plan-bytes"
+    assert plan_json.is_file(), f"missing plan.json: {plan_json}"
+    parsed = json.loads(plan_json.read_text(encoding="utf-8"))
+    assert parsed["format_version"] == "1.2"
+
+
+def test_tier_plan_falls_back_when_whitelist_fails(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the IP whitelist fails, the per-pair plan passes are skipped.
+
+    Mirrors orchestrator._run_plan_tier() lines 552-558: when
+    ``_whitelist_my_ip`` returns False the pair is skipped (tier_rc=-1),
+    so ``terraform init`` / ``terraform plan`` / ``terraform show``
+    must NOT fire and no plan artifacts may be written.
+    """
+    _make_env_tree(tmp_path, {"payments": {"prod": ["main.tf"]}})
+    output_dir = tmp_path / "runs"
+    state_account = "mystorageacct"
+
+    plan_calls: list[str] = []
+
+    def fake_whitelist_my_ip(self, state, account):  # noqa: ANN001 — test stub
+        return False  # network rule failed; bail out
+
+    def fake_terraform_init(self, state):  # noqa: ANN001 — test stub
+        plan_calls.append("init")
+        return True
+
+    def fake_terraform_plan(self, state):  # noqa: ANN001 — test stub
+        plan_calls.append("plan")
+        return True
+
+    def fake_terraform_show(self, state):  # noqa: ANN001 — test stub
+        plan_calls.append("show")
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_whitelist_my_ip",
+        fake_whitelist_my_ip,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_init",
+        fake_terraform_init,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_plan",
+        fake_terraform_plan,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_show",
+        fake_terraform_show,
+    )
+    monkeypatch.setattr("scanner.aggregate.main", lambda: 0, raising=False)
+
+    orch = Orchestrator(mode="report", tier="plan")
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=state_account,
+    )
+
+    assert rc == 0  # scan_rc stays 0 in report mode
+    pair_dir = output_dir / "payments" / "prod"
+    # Pair dir is still created (the SARIF passes still run), but no
+    # plan artifacts were written.
+    assert pair_dir.is_dir()
+    assert not (pair_dir / "tfplan.binary").exists()
+    assert not (pair_dir / "plan.json").exists()
+    assert plan_calls == [], f"plan subprocess fired despite whitelist failure: {plan_calls}"
+
+
+# ---------------------------------------------------------------------------
+# 8. tier=state: state.tfstate + state_as_plan.json + drift_report.json
+# ---------------------------------------------------------------------------
+
+
+def test_tier_state_emits_state_artifacts_and_calls_safety_guard(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``tier=state`` runs the 4-helper state-blob pipeline under safety.refuse_if_mutating.
+
+    Per-pair artifacts verified:
+      * ``state.tfstate``         — written by ``_download_state_blob``
+      * ``state_as_plan.json``    — written by ``_convert_state_to_plan``
+      * ``drift_report.json``     — written by ``_emit_drift_report``
+
+    Also verifies ``safety.refuse_if_mutating`` fires at the subprocess
+    gate (orchestrator.py line 925-928) and the 4 helpers fire in the
+    documented order. The tier=plan prep mocks are reused so this test
+    only exercises the state-blob delta on top of tier=plan.
+    """
+    _make_env_tree(tmp_path, {"payments": {"prod": ["main.tf"]}})
+    output_dir = tmp_path / "runs"
+    state_account = "mystorageacct"
+
+    # Make refuse_if_mutating observable.
+    safety_calls: list[str] = []
+    real_refuse = scanner_safety.SafetyGuard.refuse_if_mutating
+
+    def recording_refuse(self, cmd):  # noqa: ANN001 — test stub
+        safety_calls.append(cmd)
+        return real_refuse(self, cmd)
+
+    monkeypatch.setattr(
+        scanner_safety.SafetyGuard,
+        "refuse_if_mutating",
+        recording_refuse,
+    )
+
+    state_pipeline_calls: list[str] = []
+
+    # tier=plan prep mocks — return True and create the plan artifacts
+    # so the state-blob pipeline has the inputs it expects.
+    def fake_whitelist_my_ip(self, state, account):  # noqa: ANN001 — test stub
+        (state.env_run_dir / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
+        return True
+
+    def fake_terraform_init(self, state):  # noqa: ANN001 — test stub
+        return True
+
+    def fake_terraform_plan(self, state):  # noqa: ANN001 — test stub
+        state.plan_bin = state.env_run_dir / "tfplan.binary"
+        state.plan_bin.write_bytes(b"\x00plan")
+        return True
+
+    def fake_terraform_show(self, state):  # noqa: ANN001 — test stub
+        state.plan_json = state.env_run_dir / "plan.json"
+        state.plan_json.write_text(
+            json.dumps(
+                {
+                    "format_version": "1.2",
+                    "terraform_version": "1.5.0",
+                    "resource_changes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    # tier=state state-blob mocks — create the three required files.
+    def fake_download_state_blob(self, account, key, state_local):  # noqa: ANN001
+        state_pipeline_calls.append("download_state_blob")
+        # Mimic the real blob — the converter only cares that the file
+        # exists and is non-empty.
+        state_local.write_text(
+            json.dumps(
+                {
+                    "version": 4,
+                    "serial": 1,
+                    "outputs": {},
+                    "resources": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return True
+
+    def fake_convert_state_to_plan(self, state_local, state_plan_json):  # noqa: ANN001
+        state_pipeline_calls.append("convert_state_to_plan")
+        state_plan_json.write_text(
+            json.dumps(
+                {
+                    "format_version": "1.2",
+                    "terraform_version": "1.5.0",
+                    "resource_changes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return True
+
+    def fake_scan_state_as_plan(self, runner, state, state_plan_json):  # noqa: ANN001
+        state_pipeline_calls.append("scan_state_as_plan")
+
+    def fake_emit_drift_report(self, state, state_plan_json, drift_report):  # noqa: ANN001
+        state_pipeline_calls.append("emit_drift_report")
+        drift_report.write_text(
+            json.dumps(
+                {
+                    "summary": {"added": 0, "changed": 0, "removed": 0},
+                    "items": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_whitelist_my_ip",
+        fake_whitelist_my_ip,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_init",
+        fake_terraform_init,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_plan",
+        fake_terraform_plan,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_terraform_show",
+        fake_terraform_show,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_download_state_blob",
+        fake_download_state_blob,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_convert_state_to_plan",
+        fake_convert_state_to_plan,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_scan_state_as_plan",
+        fake_scan_state_as_plan,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_emit_drift_report",
+        fake_emit_drift_report,
+    )
+    # Mock the PCI 10.7 hygiene shreds so the state artifacts survive
+    # for post-scan assertion (production shreds them).
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_shred_plan_artifacts",
+        lambda self, state: None,
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_shred_state_plan",
+        lambda cls, path: None,
+    )
+    monkeypatch.setattr("scanner.aggregate.main", lambda: 0, raising=False)
+
+    orch = Orchestrator(mode="report", tier="state")
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=state_account,
+    )
+
+    assert rc == 0
+    pair_dir = output_dir / "payments" / "prod"
+    assert pair_dir.is_dir(), f"missing pair dir: {pair_dir}"
+
+    # Per the MUST-DO contract: all three state artifacts in the per-pair dir.
+    state_tfstate = pair_dir / "state.tfstate"
+    state_as_plan = pair_dir / "state_as_plan.json"
+    drift_report = pair_dir / "drift_report.json"
+    assert state_tfstate.is_file(), f"missing state.tfstate: {state_tfstate}"
+    assert state_as_plan.is_file(), f"missing state_as_plan.json: {state_as_plan}"
+    assert drift_report.is_file(), f"missing drift_report.json: {drift_report}"
+
+    # The 4 state-blob helpers fired in order.
+    assert state_pipeline_calls == [
+        "download_state_blob",
+        "convert_state_to_plan",
+        "scan_state_as_plan",
+        "emit_drift_report",
+    ], f"unexpected state pipeline order: {state_pipeline_calls}"
+
+    # safety.refuse_if_mutating fired at the tier=state subprocess gate.
+    # The plan-prep whitelist MyIP call also fires the guard (storage
+    # account network-rule add is an ALLOWED_EXCEPTION so the guard
+    # returns normally). For the state-blob download the cmd must
+    # contain "az storage blob download" so we verify at least one
+    # refuse_if_mutating call landed with that signature.
+    download_calls = [c for c in safety_calls if "storage blob download" in c]
+    assert download_calls, (
+        f"refuse_if_mutating did not fire on blob-download cmd; got: {safety_calls}"
+    )
+
+
+def test_tier_state_safety_guard_refuses_mutating_command() -> None:
+    """Defense-in-depth: ``safety.refuse_if_mutating`` rejects a mutating az command.
+
+    Pins the contract that the tier=state subprocess gate actually
+    invokes the safety guard and the guard rejects any non-allowed
+    mutation. We don't go through ``Orchestrator.scan`` here — we
+    exercise the SafetyGuard directly because the orchestrator's
+    state-blob command (``az storage blob download ...``) is itself an
+    ALLOWED_EXCEPTION and would pass silently. This test pins the
+    negative case so future refactors that remove the guard fail loud.
+    """
+    guard = scanner_safety.SafetyGuard()
+    with pytest.raises(scanner_safety.MutatingOperationRefused) as exc_info:
+        guard.refuse_if_mutating("terraform apply -auto-approve")
+
+    msg = str(exc_info.value)
+    assert "terraform apply" in msg
+    # The blob download command itself must NOT be refused (it's in
+    # ALLOWED_EXCEPTIONS) — that is what makes the tier=state path safe.
+    assert guard.refuse_if_mutating(
+        "az storage blob download --account-name mystorageacct "
+        "--container-name iac --name CR_Prod_payments.tfstate"
+    ) is None
+
+
+# ---------------------------------------------------------------------------
+# 9. _discover_public_ip (direct)
+# ---------------------------------------------------------------------------
+
+
+def test_discover_public_ip_returns_first_successful_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_discover_public_ip`` returns the IP from the first URL that responds.
+
+    Monkeypatches :func:`urllib.request.urlopen` so the IMDS endpoint
+    answers with a known IP. Verifies the IP is returned unchanged and
+    no fallback URL is tried.
+    """
+    expected_ip = "203.0.113.42"
+
+    class _FakeResponse:
+        def __init__(self, payload: str) -> None:
+            self._payload = payload.encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    captured_urls: list[str] = []
+
+    def fake_urlopen(req, timeout=5):  # noqa: ANN001 — urllib.request signature
+        captured_urls.append(req.full_url)
+        return _FakeResponse(expected_ip)
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        fake_urlopen,
+    )
+
+    ip = scanner_orchestrator._discover_public_ip()
+
+    assert ip == expected_ip
+    # At minimum the IMDS endpoint was tried; ipify may also be tried if
+    # we count retries — but since the first attempt returns truthy, the
+    # loop returns immediately.
+    assert any("169.254.169.254" in u for u in captured_urls), (
+        f"IMDS endpoint not tried; got urls={captured_urls}"
+    )
+
+
+def test_discover_public_ip_falls_back_to_ipify_on_imds_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the IMDS endpoint raises, ``_discover_public_ip`` falls back to ipify.
+
+    Two URL handlers: the first one (IMDS) raises a generic exception,
+    the second one (ipify) returns the known IP. The test asserts the
+    fallback path runs AND the discovered IP is returned (not None).
+    """
+    expected_ip = "198.51.100.7"
+
+    class _FakeResponse:
+        def __init__(self, payload: str) -> None:
+            self._payload = payload.encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    captured_urls: list[str] = []
+
+    def fake_urlopen(req, timeout=5):  # noqa: ANN001 — urllib.request signature
+        captured_urls.append(req.full_url)
+        if "169.254.169.254" in req.full_url:
+            raise OSError("IMDS unreachable (not on Azure VM)")
+        return _FakeResponse(expected_ip)
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        fake_urlopen,
+    )
+
+    ip = scanner_orchestrator._discover_public_ip()
+
+    assert ip == expected_ip
+    # Both candidates were tried in order: IMDS first, then ipify.
+    assert len(captured_urls) == 2, (
+        f"expected 2 urlopen calls (IMDS + ipify), got {captured_urls}"
+    )
+    assert "169.254.169.254" in captured_urls[0]
+    assert "api.ipify.org" in captured_urls[1]
+
+
+# ---------------------------------------------------------------------------
+# 10. _register_cleanup_trap ordering
+# ---------------------------------------------------------------------------
+
+
+def test_register_cleanup_trap_runs_whitelist_then_shred(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_register_cleanup_trap`` closure runs the whitelist cleanup before shred.
+
+    Replaces :func:`scanner.trap.register_traps` with a recorder that
+    captures the cleanup callable. We then invoke the cleanup callable
+    directly and assert:
+      1. ``cleanup_ip_whitelist`` is called first (storage firewall
+         must be reverted before local artifacts are shredded, so a
+         crash mid-shred still leaves the firewall reverted)
+      2. ``shred_plan_artifacts`` is called second
+      3. Both are called with the captured output_dir + state_account
+    """
+    state_account = "mystorageacct"
+    output_dir = tmp_path / "runs"
+    output_dir.mkdir()
+
+    cleanup_callable_captured: list = []
+
+    def fake_register_traps(cleanup_fn):  # noqa: ANN001 — trap.register_traps signature
+        cleanup_callable_captured.append(cleanup_fn)
+
+    monkeypatch.setattr(
+        "scanner.orchestrator.register_traps",
+        fake_register_traps,
+    )
+
+    # Track the order of the two real cleanup helpers.
+    call_order: list[str] = []
+    cleanup_calls: list[tuple] = []
+
+    def fake_cleanup_ip_whitelist(run_dir, account, **kw):  # noqa: ANN001
+        call_order.append("cleanup_ip_whitelist")
+        cleanup_calls.append((run_dir, account))
+        return True
+
+    def fake_shred_plan_artifacts(run_dir, **kw):  # noqa: ANN001
+        call_order.append("shred_plan_artifacts")
+        cleanup_calls.append(run_dir)
+        return True
+
+    monkeypatch.setattr(
+        "scanner.orchestrator.cleanup_ip_whitelist",
+        fake_cleanup_ip_whitelist,
+    )
+    monkeypatch.setattr(
+        "scanner.orchestrator.shred_plan_artifacts",
+        fake_shred_plan_artifacts,
+    )
+
+    scanner_orchestrator._register_cleanup_trap(output_dir, state_account)
+
+    # The trap was wired.
+    assert len(cleanup_callable_captured) == 1, (
+        "register_traps was not called by _register_cleanup_trap"
+    )
+
+    # Invoke the captured cleanup callable directly to verify ordering
+    # without firing atexit / signal handlers.
+    cleanup_callable_captured[0]()
+
+    assert call_order == ["cleanup_ip_whitelist", "shred_plan_artifacts"], (
+        f"cleanup ran in wrong order: {call_order}"
+    )
+    # cleanup_ip_whitelist saw the captured state_account.
+    assert cleanup_calls[0] == (output_dir, state_account)
+    # shred_plan_artifacts saw the captured output_dir (single-arg helper).
+    assert cleanup_calls[1] == output_dir
+
+
+def test_register_cleanup_trap_skips_whitelist_when_no_state_account(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With ``state_account=None``, the cleanup closure skips the firewall revert.
+
+    Mirrors ``_register_cleanup_trap`` lines 1465-1467: the whitelist
+    cleanup is gated on ``captured_account`` being truthy. The shred
+    step still runs (the run dir may have plan artifacts even when no
+    storage account was configured).
+    """
+    output_dir = tmp_path / "runs"
+    output_dir.mkdir()
+
+    cleanup_callable_captured: list = []
+
+    def fake_register_traps(cleanup_fn):  # noqa: ANN001
+        cleanup_callable_captured.append(cleanup_fn)
+
+    monkeypatch.setattr(
+        "scanner.orchestrator.register_traps",
+        fake_register_traps,
+    )
+
+    call_order: list[str] = []
+
+    def fake_cleanup_ip_whitelist(run_dir, account, **kw):  # noqa: ANN001
+        call_order.append("cleanup_ip_whitelist")
+
+    def fake_shred_plan_artifacts(run_dir, **kw):  # noqa: ANN001
+        call_order.append("shred_plan_artifacts")
+
+    monkeypatch.setattr(
+        "scanner.orchestrator.cleanup_ip_whitelist",
+        fake_cleanup_ip_whitelist,
+    )
+    monkeypatch.setattr(
+        "scanner.orchestrator.shred_plan_artifacts",
+        fake_shred_plan_artifacts,
+    )
+
+    scanner_orchestrator._register_cleanup_trap(output_dir, None)
+
+    assert len(cleanup_callable_captured) == 1
+    cleanup_callable_captured[0]()
+
+    assert call_order == ["shred_plan_artifacts"], (
+        f"expected only shred to fire when state_account is None, got: {call_order}"
+    )

@@ -17,7 +17,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scanner.aggregate import load_pci_mapping, load_pci_baseline, main as aggregate_main
+from scanner.aggregate import load_pci_mapping, load_pci_baseline, main as aggregate_main  # noqa: E402  (import after sys.path.insert)
 
 
 def test_load_pci_mapping_parses_top_level_keys():

@@ -44,7 +44,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 
 def _walk_state_resources(state: dict) -> list[dict]:

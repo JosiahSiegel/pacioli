@@ -52,7 +52,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 # Make sibling scanner modules importable when invoked as
 # `python -m scanner.cli` from the repo root (the package layout puts
@@ -515,7 +515,6 @@ def _handle_audit_remote(args: argparse.Namespace) -> int:
     Requires ``PACIOLI_STATE_STORAGE_ACCOUNT`` (or ``--state-account``)
     to be set; refuses otherwise (defense in depth, scan_audit.sh 74-81).
     """
-    import subprocess
     from datetime import datetime, timezone
 
     latest = bool(getattr(args, "latest", False))

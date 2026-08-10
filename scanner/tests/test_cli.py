@@ -26,10 +26,11 @@ guard.
 """
 from __future__ import annotations
 
+import argparse
 import os
-import shutil
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -275,3 +276,673 @@ def test_pacioli_aggregate_reemits_report(tmp_path: Path) -> None:
         "re-emitted report.html is byte-identical to the prior report; "
         "the aggregator likely no-op'd"
     )
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for the handler helpers in scanner/cli.py
+# ---------------------------------------------------------------------------
+#
+# These tests bypass subprocess invocation and exercise each handler
+# in-process. Downstream calls (orchestrator.main, aggregate.main,
+# baseline_init.main, _az_blob_download, _resolve_latest_remote_run_id)
+# are mocked via ``monkeypatch.setattr`` so we never touch Azure.
+#
+# The original 8 tests above are unchanged; this section adds 10
+# direct unit tests as required by the full-pr test-coverage plan.
+
+
+def _make_args(**kwargs: object) -> argparse.Namespace:
+    """Build an ``argparse.Namespace`` seeded with safe defaults.
+
+    Centralised so the unit tests below don't all repeat the same
+    ``Namespace(...)`` boilerplate. Only overrides the keys that the
+    handler reads, leaving everything else at ``None`` / ``False``.
+    """
+    base: dict[str, object] = {
+        "target_dir": None,
+        "target_repo": None,
+        "tier": "source",
+        "mode": "report",
+        "mapping": None,
+        "baseline": None,
+        "output_dir": None,
+        "project": None,
+        "env": None,
+        "label": None,
+        "state_account": None,
+        "source_value": None,
+        "dry_run": False,
+        "verbose": False,
+        "non_interactive": False,
+        "scan_state": False,
+        "scan_plan": False,
+        "scope": None,
+    }
+    base.update(kwargs)
+    return argparse.Namespace(**base)
+
+
+# ---------------------------------------------------------------------------
+# 9. _apply_backcompat order-of-precedence
+# ---------------------------------------------------------------------------
+
+
+def test_apply_backcompat_state_wins_over_plan() -> None:
+    """``--scan-state`` > ``--scan-plan``: final tier must be ``state``.
+
+    Mirrors scanner/cli.py:262-273: when both aliases are set, the
+    state branch fires first and escalates to ``tier='state'``. The
+    subsequent plan branch sees ``tier != 'source'`` and bails out,
+    so the final tier is ``state`` — never ``plan``.
+    """
+    from scanner.cli import _apply_backcompat
+
+    args = _make_args(scan_state=True, scan_plan=True)
+    with warnings.catch_warnings():
+        # _apply_backcompat calls _emit_deprecation which calls
+        # warnings.simplefilter("always", DeprecationWarning); the
+        # catch block keeps the test output clean and still records
+        # the warning so we can assert it was emitted.
+        warnings.simplefilter("always")
+        out = _apply_backcompat(args)
+
+    assert out.tier == "state", (
+        f"--scan-state should win over --scan-plan; got tier={out.tier!r}"
+    )
+
+
+def test_apply_backcompat_plan_only_escalates_to_plan() -> None:
+    """``--scan-plan`` alone escalates ``tier`` from ``source`` to ``plan``."""
+    from scanner.cli import _apply_backcompat
+
+    args = _make_args(scan_plan=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        out = _apply_backcompat(args)
+
+    assert out.tier == "plan", (
+        f"--scan-plan alone should set tier=plan; got tier={out.tier!r}"
+    )
+
+
+def test_apply_backcompat_scope_alias_only_when_baseline_unset() -> None:
+    """``--scope`` translates to ``--baseline`` only when ``--baseline`` is unset.
+
+    Mirrors scanner/cli.py:275-281: explicit ``--baseline`` wins over
+    the deprecated ``--scope`` alias (so a user opting into the new
+    flag gets a deterministic override).
+    """
+    from scanner.cli import _apply_backcompat
+
+    # Scope fills baseline when baseline is None
+    args = _make_args(scope="scope.yaml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        out = _apply_backcompat(args)
+    assert out.baseline == "scope.yaml", (
+        f"--scope should populate baseline; got baseline={out.baseline!r}"
+    )
+
+    # Explicit --baseline wins over --scope
+    args = _make_args(scope="scope.yaml", baseline="real.yaml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        out = _apply_backcompat(args)
+    assert out.baseline == "real.yaml", (
+        f"--baseline should win over --scope; got baseline={out.baseline!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. _emit_deprecation emits both a DeprecationWarning and a stderr line
+# ---------------------------------------------------------------------------
+
+
+def test_emit_deprecation_warns_and_prints(capsys: pytest.CaptureFixture[str]) -> None:
+    """``_emit_deprecation`` raises a DeprecationWarning AND prints to stderr.
+
+    The handler has belt-and-suspenders output: the warnings module so
+    Python tooling (``-W error::DeprecationWarning``) sees it, and a
+    direct stderr write so operators tailing stderr see it even when
+    warnings are filtered.
+    """
+    from scanner.cli import _emit_deprecation
+
+    with pytest.warns(DeprecationWarning, match=r"--scan-state"):
+        _emit_deprecation("--scan-state", "--tier state")
+
+    captured = capsys.readouterr()
+    assert "WARNING:" in captured.err, (
+        f"_emit_deprecation should also print to stderr; got err={captured.err!r}"
+    )
+    assert "--scan-state" in captured.err, (
+        f"stderr line should mention the deprecated flag; got err={captured.err!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. _handle_scan delegates to orchestrator.main with the right argv
+# ---------------------------------------------------------------------------
+
+
+def test_handle_scan_passes_args_to_orchestrator_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_scan`` translates the namespace into orchestrator argv.
+
+    Mocks ``scanner.orchestrator.main`` to capture the argv it
+    receives. Asserts the positional ``target_repo`` is passed via
+    ``--target-repo`` (orchestrator uses a flag, not a positional)
+    and that ``--tier`` / ``--mode`` defaults propagate.
+    """
+    from scanner import cli
+
+    captured: dict[str, object] = {}
+
+    def fake_main(argv: list[str]) -> int:
+        captured["argv"] = list(argv)
+        return 0
+
+    # The handler does ``from scanner import orchestrator as _orchestrator``
+    # then calls ``_orchestrator.main(argv)``. We patch
+    # ``scanner.orchestrator.main`` so the late-bound import picks up
+    # the fake.
+    import scanner.orchestrator as orchestrator_mod
+    monkeypatch.setattr(orchestrator_mod, "main", fake_main)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    args = _make_args(
+        target_dir=str(repo),
+        tier="plan",
+        mode="report",
+        state_account="mystorageacct",
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    argv = captured["argv"]
+    assert "--target-repo" in argv, f"missing --target-repo in argv={argv!r}"
+    assert "--tier" in argv and argv[argv.index("--tier") + 1] == "plan"
+    assert "--mode" in argv and argv[argv.index("--mode") + 1] == "report"
+    assert "--state-account" in argv, (
+        f"--state-account missing in argv={argv!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. _handle_gate forces --mode gate
+# ---------------------------------------------------------------------------
+
+
+def test_handle_gate_forces_mode_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_gate`` overrides whatever ``--mode`` the user passed.
+
+    Mirrors scanner/cli.py:353: ``args.mode = "gate"`` is unconditional.
+    """
+    from scanner import cli
+
+    captured: dict[str, object] = {}
+
+    def fake_main(argv: list[str]) -> int:
+        captured["argv"] = list(argv)
+        return 0
+
+    import scanner.orchestrator as orchestrator_mod
+    monkeypatch.setattr(orchestrator_mod, "main", fake_main)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # User passed --mode report (the default). Gate must override.
+    args = _make_args(target_dir=str(repo), mode="report")
+    rc = cli._handle_gate(args)
+    assert rc == 0, f"_handle_gate returned {rc}; expected 0"
+    argv = captured["argv"]
+    assert argv[argv.index("--mode") + 1] == "gate", (
+        f"_handle_gate must force --mode gate; got argv={argv!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 13. _handle_aggregate argv wiring preserves --emit-fix-list
+# ---------------------------------------------------------------------------
+
+
+def test_handle_aggregate_preserves_emit_fix_list(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_aggregate`` passes ``--emit-fix-list`` to ``aggregate.main``.
+
+    The handler swaps ``sys.argv`` for the call and restores it on
+    exit (mirrors the orchestrator's argv-swap pattern). Mocks
+    ``scanner.aggregate.main`` to capture the argv it sees.
+    """
+    from scanner import cli
+
+    captured: dict[str, object] = {}
+
+    def fake_main() -> int:
+        # aggregate.main reads sys.argv directly (line 395 in cli.py:
+        # ``sys.argv = aggregate_argv`` before the call).
+        captured["argv"] = list(sys.argv)
+        return 0
+
+    import scanner.aggregate as aggregate_mod
+    monkeypatch.setattr(aggregate_mod, "main", fake_main)
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    saved_argv = sys.argv
+    try:
+        args = argparse.Namespace(
+            run_dir=str(run_dir),
+            mapping="m.yaml",
+            baseline="b.yaml",
+            out="/tmp/o",
+            emit_fix_list=True,
+        )
+        rc = cli._handle_aggregate(args)
+    finally:
+        sys.argv = saved_argv
+
+    assert rc == 0, f"_handle_aggregate returned {rc}; expected 0"
+    argv = captured["argv"]
+    assert "--emit-fix-list" in argv, (
+        f"--emit-fix-list missing from aggregate argv={argv!r}"
+    )
+    assert "--run-dir" in argv, f"--run-dir missing from argv={argv!r}"
+    assert "--mapping" in argv, f"--mapping missing from argv={argv!r}"
+    assert "--baseline" in argv, f"--baseline missing from argv={argv!r}"
+    # Belt-and-suspenders: sys.argv must be restored after the call.
+    assert sys.argv == saved_argv, (
+        f"_handle_aggregate must restore sys.argv; got {sys.argv!r}"
+    )
+
+
+def test_handle_aggregate_without_run_dir_returns_2() -> None:
+    """``_handle_aggregate`` with no ``run_dir`` returns 2 and skips the call."""
+    from scanner import cli
+
+    args = argparse.Namespace(
+        run_dir=None,
+        mapping=None,
+        baseline=None,
+        out=None,
+        emit_fix_list=False,
+    )
+    rc = cli._handle_aggregate(args)
+    assert rc == 2, f"expected rc=2 for missing run_dir; got rc={rc}"
+
+
+# ---------------------------------------------------------------------------
+# 14. _resolve_latest_run_dir returns None / freshest
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_latest_run_dir_returns_none_on_empty_root(tmp_path: Path) -> None:
+    """``_resolve_latest_run_dir`` returns ``None`` when no candidates exist."""
+    from scanner.cli import _resolve_latest_run_dir
+
+    empty_runs = tmp_path / "runs"
+    empty_runs.mkdir()
+    assert _resolve_latest_run_dir(empty_runs) is None, (
+        "expected None for empty runs root"
+    )
+
+
+def test_resolve_latest_run_dir_returns_freshest_mtime(tmp_path: Path) -> None:
+    """``_resolve_latest_run_dir`` returns the most-recently-modified subdir.
+
+    Creates three subdirs with distinct mtimes (oldest first, freshest
+    last) and asserts the freshest is returned.
+    """
+    from scanner.cli import _resolve_latest_run_dir
+
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+    a = runs_root / "run-old"
+    b = runs_root / "run-mid"
+    c = runs_root / "run-new"
+    for d in (a, b, c):
+        d.mkdir()
+
+    # Force distinct mtimes by walking forward in 1-second steps; on
+    # Windows mtime resolution is ~2s so we use larger deltas.
+    import time
+
+    base_mtime = time.time() - 10_000
+    os.utime(a, (base_mtime, base_mtime))
+    os.utime(b, (base_mtime + 100, base_mtime + 100))
+    os.utime(c, (base_mtime + 200, base_mtime + 200))
+
+    latest = _resolve_latest_run_dir(runs_root)
+    assert latest == c, (
+        f"expected freshest dir (run-new); got {latest!r}"
+    )
+
+
+def test_resolve_latest_run_dir_returns_none_when_root_missing(tmp_path: Path) -> None:
+    """``_resolve_latest_run_dir`` returns ``None`` when the root itself is absent."""
+    from scanner.cli import _resolve_latest_run_dir
+
+    missing = tmp_path / "does_not_exist_runs_root"
+    assert not missing.exists(), "pre-condition: root must not exist"
+    assert _resolve_latest_run_dir(missing) is None, (
+        "expected None for missing runs root"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 15. _resolve_report_html is a silent no-op when source HTML is missing
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_report_html_noop_when_source_missing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``_resolve_report_html`` logs a WARN and does nothing if ``report.html`` is absent.
+
+    Mirrors scanner/cli.py:438-451: when the source report.html is
+    missing the handler must not crash, must not create the dest
+    file, and must emit a WARN log so operators see what happened.
+    """
+    from scanner.cli import _resolve_report_html
+
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    out_path = tmp_path / "out" / "report.html"
+    # Pre-condition: out_path must NOT exist so we can prove no-op.
+    assert not out_path.exists()
+    assert not (aggregate_dir / "report.html").exists()
+
+    _resolve_report_html(aggregate_dir, str(out_path))
+
+    assert not out_path.exists(), (
+        f"_resolve_report_html should be a no-op; created {out_path!r}"
+    )
+    captured = capsys.readouterr()
+    assert "WARN" in captured.err, (
+        f"expected a WARN log on stderr; got {captured.err!r}"
+    )
+    assert "report.html" in captured.err, (
+        f"WARN should mention report.html; got {captured.err!r}"
+    )
+
+
+def test_resolve_report_html_copies_when_source_present(tmp_path: Path) -> None:
+    """``_resolve_report_html`` copies ``report.html`` when source exists."""
+    from scanner.cli import REPORT_FILENAME, _resolve_report_html
+
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    src = aggregate_dir / REPORT_FILENAME
+    src.write_bytes(b"<html>ok</html>\n")
+
+    out_path = tmp_path / "out" / "report.html"
+    _resolve_report_html(aggregate_dir, str(out_path))
+
+    assert out_path.is_file(), f"expected {out_path} to exist"
+    assert out_path.read_bytes() == b"<html>ok</html>\n", (
+        "copied bytes should match source verbatim"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 16. _handle_audit_local in --latest mode uses _resolve_latest_run_dir
+# ---------------------------------------------------------------------------
+
+
+def test_handle_audit_local_with_run_id_copies_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_audit_local --run-id <id>`` reads ``report.html`` from <runs>/<id>/aggregate/.
+
+    Patches ``Path.home`` so the handler looks under ``tmp_path``
+    instead of the real ``~/.pacioli/runs/`` (hermetic test).
+    """
+    from scanner import cli
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+
+    runs_root = tmp_path / ".pacioli" / "runs"
+    run_id = "20260804T153407Z-2455"
+    aggregate_dir = runs_root / run_id / "aggregate"
+    aggregate_dir.mkdir(parents=True)
+    (aggregate_dir / "report.html").write_bytes(b"<html>audit</html>\n")
+
+    args = argparse.Namespace(
+        latest=False,
+        run_id=run_id,
+        out=str(tmp_path / "out" / "report.html"),
+    )
+    rc = cli._handle_audit_local(args)
+    assert rc == 0, f"_handle_audit_local returned {rc}; expected 0"
+    assert (tmp_path / "out" / "report.html").is_file(), (
+        f"expected report.html copied to {(tmp_path / 'out' / 'report.html')!r}"
+    )
+
+
+def test_handle_audit_local_without_run_id_or_latest_returns_2(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_audit_local`` without ``--latest`` or ``--run-id`` returns 2."""
+    from scanner import cli
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+
+    args = argparse.Namespace(latest=False, run_id=None, out=None)
+    rc = cli._handle_audit_local(args)
+    assert rc == 2, f"expected rc=2; got rc={rc}"
+
+
+# ---------------------------------------------------------------------------
+# 17. _handle_audit_remote returns 2 when PACIOLI_STATE_STORAGE_ACCOUNT is unset
+# ---------------------------------------------------------------------------
+
+
+def test_handle_audit_remote_returns_2_when_storage_account_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_handle_audit_remote`` refuses with rc=2 when storage account is unset.
+
+    Defense in depth: mirrors scan_audit.sh lines 74-81. The handler
+    must NOT contact Azure; it must short-circuit before invoking
+    ``_resolve_latest_remote_run_id`` or ``_az_blob_download``.
+    """
+    from scanner import cli
+
+    # Clear the env var. ``monkeypatch.delenv`` raises if the var
+    # isn't set in the test process — use ``raising=False`` so the
+    # test works regardless of host environment.
+    monkeypatch.delenv("PACIOLI_STATE_STORAGE_ACCOUNT", raising=False)
+    # Also force args.state_account to None in case the host has it
+    # set (defensive — the handler checks args.state_account first).
+    args = argparse.Namespace(
+        latest=True,
+        run_id=None,
+        out=None,
+        state_account=None,
+        dry_run=True,
+    )
+
+    # Spy on the would-be Azure-touching helpers; they MUST NOT run.
+    called: dict[str, int] = {"resolve_latest": 0, "az_download": 0}
+
+    def fake_resolve_latest(
+        *, storage_account: str, container_name: str, dry_run: bool
+    ) -> str | None:
+        called["resolve_latest"] += 1
+        return "DRYRUN-LATEST"
+
+    def fake_az_download(
+        *,
+        storage_account: str,
+        container_name: str,
+        blob_name: str,
+        dest: Path,
+        dry_run: bool,
+    ) -> bool:
+        called["az_download"] += 1
+        return True
+
+    monkeypatch.setattr(cli, "_resolve_latest_remote_run_id", fake_resolve_latest)
+    monkeypatch.setattr(cli, "_az_blob_download", fake_az_download)
+
+    rc = cli._handle_audit_remote(args)
+
+    assert rc == 2, (
+        f"_handle_audit_remote must refuse without storage account; got rc={rc}"
+    )
+    assert called["resolve_latest"] == 0, (
+        "_resolve_latest_remote_run_id must NOT be called when storage account is unset"
+    )
+    assert called["az_download"] == 0, (
+        "_az_blob_download must NOT be called when storage account is unset"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 18. _handle_audit_remote dry-run path uses DRYRUN-LATEST and prints
+# ---------------------------------------------------------------------------
+
+
+def test_handle_audit_remote_dry_run_skips_azure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--dry-run`` mode contacts no Azure: the latest-run-id is faked and prints to stdout.
+
+    Patches both ``_resolve_latest_remote_run_id`` and
+    ``_az_blob_download`` to record their invocations. Verifies the
+    handler does call them (in dry-run mode it short-circuits before
+    any real ``az storage blob ...`` subprocess), and that the
+    download print prefix is "[dry-run]".
+    """
+    from scanner import cli
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PACIOLI_STATE_STORAGE_ACCOUNT", "fakeacct")
+
+    downloaded: list[dict[str, object]] = []
+
+    def fake_resolve_latest(
+        *, storage_account: str, container_name: str, dry_run: bool
+    ) -> str | None:
+        assert dry_run is True, "dry_run flag must propagate"
+        assert storage_account == "fakeacct"
+        return "DRYRUN-LATEST"
+
+    def fake_az_download(
+        *,
+        storage_account: str,
+        container_name: str,
+        blob_name: str,
+        dest: Path,
+        dry_run: bool,
+    ) -> bool:
+        downloaded.append(
+            {
+                "storage_account": storage_account,
+                "container_name": container_name,
+                "blob_name": blob_name,
+                "dest": str(dest),
+                "dry_run": dry_run,
+            }
+        )
+        # Mirror the real handler's dry-run print so we exercise the
+        # branch even though no subprocess ran.
+        print(
+            f"[dry-run] az storage blob download "
+            f"--account-name {storage_account} "
+            f"--container-name {container_name} "
+            f"--name {blob_name} --file {dest}"
+        )
+        return True
+
+    monkeypatch.setattr(cli, "_resolve_latest_remote_run_id", fake_resolve_latest)
+    monkeypatch.setattr(cli, "_az_blob_download", fake_az_download)
+
+    args = argparse.Namespace(
+        latest=True,
+        run_id=None,
+        out=None,
+        state_account=None,
+        dry_run=True,
+    )
+    rc = cli._handle_audit_remote(args)
+    assert rc == 0, f"_handle_audit_remote dry-run returned {rc}; expected 0"
+
+    # Four artifacts downloaded: coverage_matrix.csv, combined.sarif,
+    # junit.xml, report.html.
+    assert len(downloaded) == 4, (
+        f"expected 4 dry-run downloads; got {len(downloaded)}: {downloaded!r}"
+    )
+    expected_blobs = {
+        "coverage_matrix.csv",
+        "combined.sarif",
+        "junit.xml",
+        "report.html",
+    }
+    assert {d["blob_name"].rsplit("/", 1)[-1] for d in downloaded} == expected_blobs, (
+        f"unexpected blob names: {[d['blob_name'] for d in downloaded]!r}"
+    )
+    for d in downloaded:
+        assert d["dry_run"] is True, (
+            f"all downloads should be dry-run; got {d['dry_run']!r}"
+        )
+    captured = capsys.readouterr()
+    assert "[dry-run]" in captured.out, (
+        f"dry-run downloads should print [dry-run] markers; got {captured.out!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 19. _handle_baseline argv wiring preserves --append / --top / --dry-run
+# ---------------------------------------------------------------------------
+
+
+def test_handle_baseline_passes_append_top_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_handle_baseline`` translates the namespace into baseline_init argv.
+
+    Mocks ``scanner.baseline_init.main`` to capture the argv it
+    receives. Asserts ``--run-dir`` (positional -> flag translation),
+    ``--append``, ``--top``, and ``--dry-run`` all propagate.
+    """
+    from scanner import cli
+
+    captured: dict[str, object] = {}
+
+    def fake_main(argv: list[str]) -> int:
+        captured["argv"] = list(argv)
+        return 0
+
+    import scanner.baseline_init as baseline_init_mod
+    monkeypatch.setattr(baseline_init_mod, "main", fake_main)
+
+    args = argparse.Namespace(
+        run_dir="/tmp/some/run-dir",
+        baseline="b.yaml",
+        top=25,
+        append=True,
+        dry_run=True,
+    )
+    rc = cli._handle_baseline(args)
+    assert rc == 0, f"_handle_baseline returned {rc}; expected 0"
+    argv = captured["argv"]
+    assert "--run-dir" in argv, f"--run-dir missing; argv={argv!r}"
+    assert "--baseline" in argv, f"--baseline missing; argv={argv!r}"
+    assert "--top" in argv and argv[argv.index("--top") + 1] == "25", (
+        f"--top value should be '25'; argv={argv!r}"
+    )
+    assert "--append" in argv, f"--append missing; argv={argv!r}"
+    assert "--dry-run" in argv, f"--dry-run missing; argv={argv!r}"

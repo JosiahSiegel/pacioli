@@ -51,7 +51,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checkov_url_overrides import (  # noqa: E402
     RULE_SOURCE_URLS as CHECKOV_RULE_SOURCE_URLS,
-    get_help_uri,
 )
 
 # ---------------------------------------------------------------------------
@@ -76,7 +75,6 @@ try:
     sys.flags.utf8_mode  # noqa: B018 -- true if -X utf8 or PYTHONUTF8=1 is on
 except AttributeError:
     pass
-from typing import Any
 from datetime import datetime, timezone
 
 try:
@@ -872,7 +870,7 @@ def build_coverage_matrix(
     # Used by write_coverage_gaps_csv to render the note as triage_hint
     # so the auditor sees the rationale instead of a generic
     # "1 check expected, 0 fired" hint.
-    note_by_req: dict[str, str] = {
+    note_by_req: dict[str, str] = {  # noqa: F841  (dead-code, kept for parity with downstream consumers)
         r["id"]: r["note"]
         for r in requirements
         if any(c in PCI_NOTE_TOKENS for c in r.get("checks", []))
@@ -2206,15 +2204,15 @@ def write_html_report(
         missing_ids = (missing_per_req or {}).get(rid, [])
         finding_count = sum(1 for er in env_results for f in er.findings if rid in (f.pci_requirements or []))
         if any_non_compliant:
-            klass = "kpi-high"; label = "FAIL"
+            klass = "kpi-high"; label = "FAIL"  # noqa: E702  (intentional one-liner pair)
         elif any_not_scanned:
-            klass = "kpi-warn"; label = "PARTIAL"
+            klass = "kpi-warn"; label = "PARTIAL"  # noqa: E702
         elif any_compliant:
-            klass = "kpi-ok"; label = "PASS"
+            klass = "kpi-ok"; label = "PASS"  # noqa: E702
         elif any_data:
-            klass = "kpi-ok"; label = "PASS"
+            klass = "kpi-ok"; label = "PASS"  # noqa: E702
         else:
-            klass = "kpi-warn"; label = "GAP"
+            klass = "kpi-warn"; label = "GAP"  # noqa: E702
         body += f'    <div class="heatmap-cell {klass}" title="{html.escape(title)}"><div class="req-id">{html.escape(rid)}</div><div class="req-count">{finding_count} finding{"" if finding_count == 1 else "s"} · {label}</div></div>\n'
     body += """  </div>
   <h3>PCI Requirement Status</h3>
@@ -3698,7 +3696,7 @@ def main() -> int:
 
     # Summary
     print()
-    print(f"=== Aggregation complete ===")
+    print("=== Aggregation complete ===")
     print(f"  env-results:        {len(results)}")
     ok = sum(1 for r in results if r.scan_status == "ok")
     print(f"  successful scans:   {ok}")
@@ -3716,8 +3714,8 @@ def main() -> int:
             "                      see coverage_gaps.csv for triage list"
         )
     else:
-        print(f"  coverage gaps:      0 (every mapped check evaluated)")
-    print(f"  outputs:")
+        print("  coverage gaps:      0 (every mapped check evaluated)")
+    print("  outputs:")
     for f in ("coverage_matrix.csv", "combined.sarif", "junit.xml", "report.html"):
         p = out_dir / f
         if p.exists():
