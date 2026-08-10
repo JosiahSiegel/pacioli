@@ -62,10 +62,26 @@ For the read-only invariant, see [Safety Model](SAFETY_MODEL.md).
 │   │   └── safety.sh
 │   └── tests/                        # pytest suite
 │       ├── conftest.py
+│       ├── test_aggregate_html.py            (new)
 │       ├── test_aggregate_pci.py
+│       ├── test_baseline_parity.py
+│       ├── test_checkov_runner.py
 │       ├── test_checkov_url_overrides.py
+│       ├── test_checks.py                    (new)
+│       ├── test_cli.py
+│       ├── test_config.py
+│       ├── test_discovery.py
+│       ├── test_drift_report.py              (new)
+│       ├── test_mapping_pack_rules.py        (new)
+│       ├── test_orchestrator.py
+│       ├── test_paths.py
 │       ├── test_rewrite_sarif_help.py
-│       └── test_terraform_remediation_yaml.py
+│       ├── test_safety.py
+│       ├── test_terraform_remediation_yaml.py
+│       ├── test_tfstate_to_plan.py           (new)
+│       ├── test_trap.py
+│       ├── test_url_rewrite.py               (new)
+│       └── test_utf8.py                      (new)
 └── .github/
     ├── workflows/ci.yml              # CI: test + lint + selftest
     ├── ISSUE_TEMPLATE/               # Issue templates
@@ -111,7 +127,7 @@ make lint
 make selftest
 ```
 
-`make test` runs all 35 tests across 4 files:
+`make test` runs all 348 tests across 20 files:
 
 | Test file | What it covers |
 |---|---|
