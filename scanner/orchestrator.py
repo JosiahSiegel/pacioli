@@ -51,14 +51,13 @@ Console scripts
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Iterable, Optional
 
 # Bootstrap UTF-8 I/O before any scan work (mirrors lib/common.sh).
 import scanner._utf8  # noqa: F401  -- side-effect import

@@ -6,7 +6,6 @@ helpUri values with canonical GitHub source URLs.
 import json
 from pathlib import Path
 
-import pytest
 
 from rewrite_sarif_help import rewrite_sarif
 

@@ -16,17 +16,13 @@ of pytest's tmp_path fixture.
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import pytest
 
 import paths as paths_mod
 from paths import (
-    Baseline,
-    MappingPack,
     PathResolutionError,
-    RunDir,
     TargetRepo,
     resolve_baseline,
     resolve_mapping,
@@ -249,7 +245,7 @@ def test_mapping_legacy_pci_mapping_env_honored(
 def test_mapping_missing_file_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    install_root = _install_root(monkeypatch, tmp_path)
+    install_root = _install_root(monkeypatch, tmp_path)  # noqa: F841  (fixture side-effect: monkeypatches env)
     # No mappings dir created -> default file does not exist.
     monkeypatch.delenv("PACIOLI_MAPPING", raising=False)
     monkeypatch.delenv("PCI_MAPPING", raising=False)
