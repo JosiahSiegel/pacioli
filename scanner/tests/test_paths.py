@@ -1,0 +1,462 @@
+"""Tests for scanner/paths.py path resolution precedence rules.
+
+Covers:
+- CLI flag > env var > default precedence for target_repo, mapping,
+  baseline, and run_dir.
+- PACIOLI_MAPPING env var wins over any config-picker default.
+- Legacy PCI_REPO_ROOT alias is honored as a target_repo env var.
+- Windows-style path canonicalization (via resolve()).
+- Default install-bundled mapping pack (mappings/pci_dss_4.0.1.yaml
+  relative to the install root).
+
+These tests are intentionally hermetic: they do NOT depend on a real
+install location, a real user home directory, or a real CWD outside
+of pytest's tmp_path fixture.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+
+import pytest
+
+import paths as paths_mod
+from paths import (
+    Baseline,
+    MappingPack,
+    PathResolutionError,
+    RunDir,
+    TargetRepo,
+    resolve_baseline,
+    resolve_mapping,
+    resolve_paths,
+    resolve_run_dir,
+    resolve_target_repo,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _ns(**kwargs) -> argparse.Namespace:
+    """Build a Namespace with all known CLI args defaulted to None."""
+    base = {
+        "target_repo": None,
+        "mapping": None,
+        "baseline": None,
+        "output_dir": None,
+        "run_id": None,
+    }
+    base.update(kwargs)
+    return argparse.Namespace(**base)
+
+
+def _install_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point paths._install_root() at a tmp_path-based fake install.
+
+    Returns the install root (which now hosts the 'scanner' subdir).
+    """
+    install_root = tmp_path / "fake_install"
+    install_root.mkdir()
+    # _install_root() returns parents[1] of paths.py -> parents[1] of
+    # scanner/paths.py is the repo root that contains scanner/. We
+    # arrange so that scanner/paths.py's parents[1] == install_root by
+    # making the path module believe __file__ is install_root/scanner/paths.py.
+    # Easiest way: monkeypatch Path(__file__).resolve() via the module's
+    # own __file__ attribute. But _install_root calls Path(__file__).resolve(),
+    # so we must change the module's __file__ string.
+    fake_paths_py = install_root / "scanner" / "paths.py"
+    fake_paths_py.parent.mkdir()
+    fake_paths_py.write_text("# stub\n")
+    monkeypatch.setattr(paths_mod, "__file__", str(fake_paths_py))
+    return install_root
+
+
+def _write_mapping(install_root: Path, name: str = "pci_dss_4.0.1.yaml") -> Path:
+    """Create a stub mapping YAML at install_root/mappings/<name>."""
+    mappings_dir = install_root / "mappings"
+    mappings_dir.mkdir(exist_ok=True)
+    p = mappings_dir / name
+    p.write_text("# stub mapping\n")
+    return p
+
+
+# ---------------------------------------------------------------------------
+# target_repo
+# ---------------------------------------------------------------------------
+
+def test_cli_flag_wins_over_env_var_for_target_repo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cli_dir = tmp_path / "from_cli"
+    env_dir = tmp_path / "from_env"
+    env_dir.mkdir()
+    monkeypatch.setenv("PACIOLI_TARGET_REPO", str(env_dir))
+
+    args = _ns(target_repo=str(cli_dir))
+    result = resolve_target_repo(args)
+
+    assert result.path == cli_dir.resolve()
+    assert result.exists is False  # cli_dir not created
+
+
+def test_env_var_wins_over_default_for_target_repo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_dir = tmp_path / "env_repo"
+    env_dir.mkdir()
+    monkeypatch.setenv("PACIOLI_TARGET_REPO", str(env_dir))
+    monkeypatch.delenv("PCI_REPO_ROOT", raising=False)
+
+    args = _ns()
+    result = resolve_target_repo(args)
+
+    assert result.path == env_dir.resolve()
+    assert result.exists is True
+
+
+def test_target_repo_defaults_to_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("PACIOLI_TARGET_REPO", raising=False)
+    monkeypatch.delenv("PCI_REPO_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    args = _ns()
+    result = resolve_target_repo(args)
+
+    assert result.path == tmp_path.resolve()
+    assert result.exists is True
+
+
+def test_target_repo_is_canonicalized_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """resolve() must collapse .. segments and drive casing consistently."""
+    base = tmp_path / "a" / "b"
+    base.mkdir(parents=True)
+    # Use a path with redundant '..' segments.
+    messy = base / ".." / "b" / "."
+    monkeypatch.setenv("PACIOLI_TARGET_REPO", str(messy))
+    monkeypatch.delenv("PCI_REPO_ROOT", raising=False)
+
+    args = _ns()
+    result = resolve_target_repo(args)
+
+    assert result.path == base.resolve()
+    assert result.exists is True
+
+
+def test_legacy_pci_repo_root_alias_honored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When PACIOLI_TARGET_REPO is unset, PCI_REPO_ROOT (legacy) wins."""
+    legacy_dir = tmp_path / "legacy_repo"
+    legacy_dir.mkdir()
+    monkeypatch.delenv("PACIOLI_TARGET_REPO", raising=False)
+    monkeypatch.setenv("PCI_REPO_ROOT", str(legacy_dir))
+
+    args = _ns()
+    result = resolve_target_repo(args)
+
+    assert result.path == legacy_dir.resolve()
+    assert result.exists is True
+
+
+# ---------------------------------------------------------------------------
+# mapping
+# ---------------------------------------------------------------------------
+
+def test_mapping_cli_flag_wins_over_env_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_root = _install_root(monkeypatch, tmp_path)
+    _write_mapping(install_root, "cli_pick.yaml")
+
+    cli_mapping = tmp_path / "cli_mapping.yaml"
+    cli_mapping.write_text("# cli\n")
+    env_mapping = tmp_path / "env_mapping.yaml"
+    env_mapping.write_text("# env\n")
+
+    monkeypatch.setenv("PACIOLI_MAPPING", str(env_mapping))
+    monkeypatch.delenv("PCI_MAPPING", raising=False)
+
+    args = _ns(mapping=str(cli_mapping))
+    result = resolve_mapping(args)
+
+    assert result.path == cli_mapping.resolve()
+    assert result.framework == "cli_mapping"
+
+
+def test_mapping_default_is_install_bundled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_root = _install_root(monkeypatch, tmp_path)
+    bundled = _write_mapping(install_root, "pci_dss_4.0.1.yaml")
+
+    monkeypatch.delenv("PACIOLI_MAPPING", raising=False)
+    monkeypatch.delenv("PCI_MAPPING", raising=False)
+
+    args = _ns()
+    result = resolve_mapping(args)
+
+    assert result.path == bundled.resolve()
+    assert result.framework == "pci_dss_4.0.1"
+
+
+def test_pacioli_mapping_env_var_overrides_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PACIOLI_MAPPING env var must win over the install-bundled default.
+
+    Plan quote: 'PACIOLI_MAPPING precedence over config picker'.
+    """
+    install_root = _install_root(monkeypatch, tmp_path)
+    _write_mapping(install_root, "pci_dss_4.0.1.yaml")  # the default
+
+    override = tmp_path / "soc2.yaml"
+    override.write_text("# soc2\n")
+    monkeypatch.setenv("PACIOLI_MAPPING", str(override))
+    monkeypatch.delenv("PCI_MAPPING", raising=False)
+
+    args = _ns()
+    result = resolve_mapping(args)
+
+    assert result.path == override.resolve()
+    assert result.framework == "soc2"
+
+
+def test_mapping_legacy_pci_mapping_env_honored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_root = _install_root(monkeypatch, tmp_path)
+    _write_mapping(install_root, "pci_dss_4.0.1.yaml")
+
+    legacy = tmp_path / "legacy_map.yaml"
+    legacy.write_text("# legacy\n")
+    monkeypatch.delenv("PACIOLI_MAPPING", raising=False)
+    monkeypatch.setenv("PCI_MAPPING", str(legacy))
+
+    args = _ns()
+    result = resolve_mapping(args)
+
+    assert result.path == legacy.resolve()
+    assert result.framework == "legacy_map"
+
+
+def test_mapping_missing_file_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_root = _install_root(monkeypatch, tmp_path)
+    # No mappings dir created -> default file does not exist.
+    monkeypatch.delenv("PACIOLI_MAPPING", raising=False)
+    monkeypatch.delenv("PCI_MAPPING", raising=False)
+
+    args = _ns()
+    with pytest.raises(PathResolutionError):
+        resolve_mapping(args)
+
+
+# ---------------------------------------------------------------------------
+# baseline
+# ---------------------------------------------------------------------------
+
+def test_baseline_cli_flag_wins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    repo_default = repo / "pci_baseline.yaml"
+    repo_default.write_text("# default\n")
+
+    cli_baseline = tmp_path / "cli_baseline.yaml"
+    cli_baseline.write_text("# cli\n")
+    env_baseline = tmp_path / "env_baseline.yaml"
+    env_baseline.write_text("# env\n")
+
+    monkeypatch.setenv("PACIOLI_BASELINE_FILE", str(env_baseline))
+
+    args = _ns(baseline=str(cli_baseline))
+    target = TargetRepo(path=repo.resolve(), exists=True)
+    result = resolve_baseline(args, target)
+
+    assert result.path == cli_baseline.resolve()
+
+
+def test_baseline_env_var_wins_over_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pci_baseline.yaml").write_text("# default\n")
+
+    env_baseline = tmp_path / "env_baseline.yaml"
+    env_baseline.write_text("# env\n")
+    monkeypatch.setenv("PACIOLI_BASELINE_FILE", str(env_baseline))
+
+    args = _ns()
+    target = TargetRepo(path=repo.resolve(), exists=True)
+    result = resolve_baseline(args, target)
+
+    assert result.path == env_baseline.resolve()
+
+
+def test_baseline_defaults_to_target_repo_pci_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    default = repo / "pci_baseline.yaml"
+    default.write_text("# default\n")
+
+    monkeypatch.delenv("PACIOLI_BASELINE_FILE", raising=False)
+
+    args = _ns()
+    target = TargetRepo(path=repo.resolve(), exists=True)
+    result = resolve_baseline(args, target)
+
+    assert result.path == default.resolve()
+
+
+def test_baseline_defaults_to_none_when_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Plan quote: 'baseline default to None'."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # No pci_baseline.yaml inside repo.
+    monkeypatch.delenv("PACIOLI_BASELINE_FILE", raising=False)
+
+    args = _ns()
+    target = TargetRepo(path=repo.resolve(), exists=True)
+    result = resolve_baseline(args, target)
+
+    assert result.path is None
+
+
+# ---------------------------------------------------------------------------
+# run_dir (--output-dir override)
+# ---------------------------------------------------------------------------
+
+def test_output_dir_cli_flag_wins_over_env_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cli_out = tmp_path / "cli_out"
+    env_out = tmp_path / "env_out"
+    env_out.mkdir()
+    monkeypatch.setenv("PACIOLI_OUTPUT_DIR", str(env_out))
+
+    args = _ns(output_dir=str(cli_out))
+    result = resolve_run_dir(args)
+
+    assert result.path == cli_out.resolve()
+
+
+def test_output_dir_env_var_used_when_no_cli_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_out = tmp_path / "env_out"
+    env_out.mkdir()
+    monkeypatch.setenv("PACIOLI_OUTPUT_DIR", str(env_out))
+
+    args = _ns()
+    result = resolve_run_dir(args)
+
+    assert result.path == env_out.resolve()
+
+
+def test_run_dir_default_uses_run_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("PACIOLI_OUTPUT_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    args = _ns(run_id="abc123")
+    result = resolve_run_dir(args)
+
+    assert result.path == (tmp_path / ".pacioli" / "runs" / "abc123").resolve()
+
+
+def test_run_dir_default_falls_back_to_current(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("PACIOLI_OUTPUT_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    args = _ns()
+    result = resolve_run_dir(args)
+
+    assert result.path == (tmp_path / ".pacioli" / "runs" / "current").resolve()
+
+
+# ---------------------------------------------------------------------------
+# resolve_paths orchestrator
+# ---------------------------------------------------------------------------
+
+def test_resolve_paths_uses_all_precedence_layers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_root = _install_root(monkeypatch, tmp_path)
+    _write_mapping(install_root, "pci_dss_4.0.1.yaml")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pci_baseline.yaml").write_text("# default\n")
+
+    mapping_override = tmp_path / "soc2.yaml"
+    mapping_override.write_text("# soc2\n")
+    output_dir = tmp_path / "runs"
+    baseline = tmp_path / "cli_baseline.yaml"
+    baseline.write_text("# cli baseline\n")
+
+    monkeypatch.setenv("PACIOLI_TARGET_REPO", str(repo))  # overridden by CLI
+    monkeypatch.setenv("PACIOLI_BASELINE_FILE", str(tmp_path / "env_baseline.yaml"))
+    monkeypatch.setenv("PACIOLI_OUTPUT_DIR", str(tmp_path / "env_out"))
+
+    args = _ns(
+        target_repo=str(repo),
+        mapping=str(mapping_override),
+        baseline=str(baseline),
+        output_dir=str(output_dir),
+    )
+
+    target, mapping, base, run_dir = resolve_paths(args)
+
+    assert target.path == repo.resolve()
+    assert mapping.path == mapping_override.resolve()
+    assert base.path == baseline.resolve()
+    assert run_dir.path == output_dir.resolve()
+
+
+def test_resolve_paths_raises_when_target_repo_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_root = _install_root(monkeypatch, tmp_path)
+    _write_mapping(install_root, "pci_dss_4.0.1.yaml")
+
+    missing = tmp_path / "does_not_exist"
+    args = _ns(target_repo=str(missing))
+
+    with pytest.raises(PathResolutionError):
+        resolve_paths(args)
+
+
+def test_resolve_paths_target_repo_env_var_when_no_cli_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_root = _install_root(monkeypatch, tmp_path)
+    _write_mapping(install_root, "pci_dss_4.0.1.yaml")
+
+    repo = tmp_path / "env_repo"
+    repo.mkdir()
+    monkeypatch.setenv("PACIOLI_TARGET_REPO", str(repo))
+    monkeypatch.delenv("PCI_REPO_ROOT", raising=False)
+    monkeypatch.delenv("PACIOLI_OUTPUT_DIR", raising=False)
+
+    args = _ns()
+    target, _mapping, _base, _run_dir = resolve_paths(args)
+
+    assert target.path == repo.resolve()
+    assert target.exists is True

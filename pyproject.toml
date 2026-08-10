@@ -9,7 +9,7 @@ description = "Read-only compliance scanner for Azure Terraform. PCI DSS v4.0.1,
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [{name = "Pacioli Contributors"}]
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: System Administrators",
@@ -27,7 +27,8 @@ keywords = [
     "checkov", "terraform", "azure", "policy-as-code", "security", "iac",
 ]
 dependencies = [
-    "pyyaml>=6.0",
+    "pyyaml>=6.0,<7.0",
+    "requests>=2.28,<3.0",
     "checkov==3.3.9",  # Pinned; bump with care, see requirements-pinned.txt
     "jmespath>=1.0.0",  # Used by storage firewall whitelist logic
 ]
@@ -36,7 +37,8 @@ dependencies = [
 test = ["pytest>=8.0"]
 
 [project.scripts]
-pacioli-scan = "scanner.scan:main"
+pacioli = "scanner.cli:main"
+pacioli-scan = "scanner.orchestrator:legacy_main"
 pacioli-aggregate = "scanner.aggregate:main"
 
 [tool.setuptools]

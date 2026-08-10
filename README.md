@@ -22,6 +22,21 @@
 |---|---|---|
 | Per-env health bars, PCI coverage heatmap, top-N lists, severity donut | Click any panel → all routes filter in sync | Drop in a new mapping YAML for any framework |
 
+## Standalone usage
+
+Pacioli installs as a single Python CLI. Point it at any Terraform
+repo and it emits a self-contained HTML report.
+
+```bash
+# Install (Python 3.12+)
+pip install -e .
+
+# Scan any Terraform repo
+pacioli scan /path/to/target-repo
+```
+
+The report is written under `<target-repo>/.checkov/<run-id>/aggregate/report.html`.
+
 ## Why Pacioli?
 
 You write Terraform. The auditor asks "are you PCI DSS 4.0.1
@@ -34,7 +49,7 @@ compliant?" You point them at a report. The report should:
   HCL plus a verification command you can run.
 - **Be readable** — the auditor clicks once, drills into the
   affected resource, and reads the fix.
-- **Run in CI** — gate on HIGH/CRITICAL with one Make target.
+- **Run in CI** — gate on HIGH/CRITICAL with one command.
 - **Work on Azure** — 89 pre-built remediation snippets for the
   resources you actually use.
 
@@ -53,33 +68,13 @@ but fixes the things that make Checkov hard to use in production:
   `--fix`, and any Azure mutation. The only mutation is the
   storage firewall IP whitelist (auto-revert via EXIT trap).
 
-## Quick start
-
-```bash
-# Install dependencies (Python 3.12+, Checkov, jq)
-make install
-brew install jq   # or apt-get install jq
-
-# Source-only scan (fast, no Azure calls, no init)
-bash scanner/scan.sh --mode report
-
-# Open the report
-open .checkov/<run-id>/aggregate/report.html
-```
-
-Or pick a single project + env:
-
-```bash
-bash scanner/scan.sh --mode report --project myapp --env prod
-```
-
 ## Three scan tiers
 
 | Tier | Command | What it does | When |
 |---|---|---|---|
-| 1. Source | `scan.sh --mode report` | Static `.tf` parse. **~seconds.** No init, no plan, no storage. | Pre-commit, day-to-day CI. |
-| 2. Plan | `scan.sh --mode report --scan-plan` | Adds `terraform plan` so Checkov sees resolved values. | Monthly deep reviews, audit prep. |
-| 3. State | `scan.sh --mode report --scan-state` | Adds `.tfstate` blob scan + drift diff. | Drift triage, after manual Azure changes. |
+| 1. Source | `pacioli scan <target-repo>` | Static `.tf` parse. **~seconds.** No init, no plan, no storage. | Pre-commit, day-to-day CI. |
+| 2. Plan | `pacioli scan --tier plan <target-repo>` | Adds `terraform plan` so Checkov sees resolved values. | Monthly deep reviews, audit prep. |
+| 3. State | `pacioli scan --tier state <target-repo>` | Adds `.tfstate` blob scan + drift diff. | Drift triage, after manual Azure changes. |
 
 Tier 1 is right for pre-commit hooks and day-to-day CI. Tier 2/3
 catch things the source can't see (like CMK buried in a module
@@ -89,10 +84,10 @@ output, or `ignore_changes` drift between plan and state).
 
 ```bash
 # Exits non-zero on HIGH/CRITICAL findings. For PR gates.
-scan.sh --mode gate
+pacioli scan --gate <target-repo>
 
 # Manual scan. Never blocks. Prints the report path.
-scan.sh --mode report
+pacioli scan <target-repo>
 ```
 
 ## Documentation
@@ -143,7 +138,11 @@ framework in three steps:
 Re-run with `--mapping mappings/<framework>_<version>.yaml` and
 the HTML title and sidebar will reflect the new framework.
 
-## Consuming Pacioli from a Terraform repo
+## Optional: enterprise wrapper
+
+If you maintain a Terraform monorepo and want a self-contained
+wrapper checked in next to your code, the consumer Makefile is
+still available:
 
 ```bash
 # Copy the wrapper Makefile into your repo
@@ -160,7 +159,9 @@ cp examples/baseline.yaml.example ./pci_baseline.yaml
 make -f Makefile.pacioli scan PROJECT=myapp ENV=prod
 ```
 
-The full step-by-step is in
+Most teams won't need this — `pip install -e .` + `pacioli scan`
+is the supported path. The full step-by-step for the wrapper
+flow lives in
 [docs/CONSUMING_GUIDE.md](docs/CONSUMING_GUIDE.md).
 
 ## License

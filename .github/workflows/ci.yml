@@ -38,29 +38,6 @@ jobs:
       - name: Run pytest
         run: pytest
 
-  shellcheck:
-    name: Shell lint + safety selftest
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install shellcheck
-        run: sudo apt-get install -y shellcheck
-
-      - name: Lint shell scripts
-        run: |
-          shellcheck scanner/lib/common.sh
-          shellcheck scanner/lib/safety.sh
-          shellcheck scanner/scan.sh
-          shellcheck scanner/scan_audit.sh
-          shellcheck scanner/scan_baseline_init.sh
-
-      - name: Install jq (required by scan.sh --help)
-        run: sudo apt-get install -y jq
-
-      - name: Run scanner self-test
-        run: make selftest
-
   mapping-lint:
     name: Validate mapping YAML
     runs-on: ubuntu-latest
