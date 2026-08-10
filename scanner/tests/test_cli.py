@@ -704,11 +704,14 @@ def test_handle_audit_local_with_run_id_copies_report(
     """``_handle_audit_local --run-id <id>`` reads ``report.html`` from <runs>/<id>/aggregate/.
 
     Patches ``Path.home`` so the handler looks under ``tmp_path``
-    instead of the real ``~/.pacioli/runs/`` (hermetic test).
+    instead of the real ``~/.pacioli/runs/`` (hermetic test). The
+    ``_maybe_open_report`` no-op prevents the stub HTML from opening as a
+    bare ``audit`` page in a real browser.
     """
     from scanner import cli
 
     monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_maybe_open_report", lambda path, *, no_open: None)
 
     runs_root = tmp_path / ".pacioli" / "runs"
     run_id = "20260804T153407Z-2455"
