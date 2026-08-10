@@ -5,6 +5,21 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [0.1.1](https://github.com/JosiahSiegel/pacioli/compare/v0.1.0...v0.1.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* resolve mapping pack from install-bundled location in scan path ([ba2d338](https://github.com/JosiahSiegel/pacioli/commit/ba2d3389ba2a4fc1ebf36db5c0bb6f7b21e49b35))
+
+
+### Documentation
+
+* add TROUBLESHOOTING entry for v0.1.0 'Mapping pack does not exist' bug ([dc5b8cf](https://github.com/JosiahSiegel/pacioli/commit/dc5b8cf18cf89fa5d5f004186a5aa0a18430d43d))
+* fix critical user-facing references (--gate, --scope, baseline init, CODEOWNERS path, etc.) ([f305c85](https://github.com/JosiahSiegel/pacioli/commit/f305c856bf2eaef747f8b02c0081c43d6f258845))
+* fix default run-dir path, Python 3.13, CHANGELOG cleanup, SUPPORT.md ([69463d2](https://github.com/JosiahSiegel/pacioli/commit/69463d2da83951a8be322fbbd8a2ccd3d195dcd6))
+* replace bash scanner references with Python CLI equivalents ([fbc2215](https://github.com/JosiahSiegel/pacioli/commit/fbc2215436a2ba9a660b8ece78240adf054aeee3))
+
 ## 0.1.0 (2026-08-10)
 
 
