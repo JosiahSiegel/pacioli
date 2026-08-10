@@ -216,7 +216,7 @@ For the custom checks in `scanner/checks/`:
 - Keep them (they're general Azure hygiene checks that apply to any
   compliance framework), or
 - Move them to a framework-specific subdirectory and update the
-  `--external-checks-dir` flag in the `scan.sh` driver.
+  `--external-checks-dir` flag in `scanner/orchestrator.py`.
 
 ## Verifying the mapping file
 

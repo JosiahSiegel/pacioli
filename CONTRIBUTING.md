@@ -252,7 +252,7 @@ For the custom checks in `scanner/checks/`, you can either:
 - Keep them (they're general Azure hygiene checks that apply to any
   compliance framework), or
 - Move them to a framework-specific subdirectory and update the
-  `--external-checks-dir` flag in `scanner/scan.sh`.
+  `--external-checks-dir` flag in `scanner/orchestrator.py`.
 
 ## Adding a new custom check
 
@@ -294,12 +294,12 @@ All three must pass before a PR is mergeable.
   literals. The UTF-8 env-var bootstrap (`PYTHONIOENCODING=utf-8`,
   `PYTHONUTF8=1`, `sys.stdout.reconfigure`) is mandatory in every
   module that opens files or prints.
-- **Bash**: `set -uo pipefail` at the top. Always go through
-  `run_cmd` (driver) or `safe_run_exec` (`lib/common.sh`) so the
-  safety invariant is enforced. Source `lib/common.sh` first (which
-  sources `lib/safety.sh`). No `realpath` — use the
-  `cd "$(dirname ...)" && pwd` idiom (realpath breaks on Windows
-  `S:/` paths in MSYS Git Bash).
+- **Process-spawn convention**: every external command MUST go
+  through the process-spawn helpers in `scanner/orchestrator.py`
+  so the `SafetyGuard.refuse_if_mutating` invariant is enforced.
+  Do not invoke `subprocess.run` (or `os.system`, or
+  `subprocess.Popen`) directly from driver code — you will bypass
+  the safety guard.
 - **Commits**: present tense imperative ("add", not "added"). Body
   should reference the issue or describe the *why*, not the *what*.
   Use the prefixes above.

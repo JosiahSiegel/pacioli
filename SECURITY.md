@@ -63,10 +63,10 @@ Out-of-scope:
 
 The scanner is **read-only** against your cloud. The only Azure
 mutation is the storage firewall IP whitelist (added/removed via
-the EXIT trap), and even that is opt-in (only runs when
-`--scan-plan` or `--scan-state` is set). See
-[docs/SAFETY_MODEL.md](docs/SAFETY_MODEL.md) for the full list of
-refused commands.
+the signal/atexit cleanup in `scanner/trap.py`), and even that is
+opt-in (only runs when `--tier plan` or `--tier state` is set).
+See [docs/SAFETY_MODEL.md](docs/SAFETY_MODEL.md) for the full
+list of refused commands.
 
 You can verify the read-only invariant at any time:
 
@@ -83,14 +83,15 @@ please report immediately.
 
 Specific things to look for and report:
 
-- A `scan.sh` codepath that allows `--project <name>` or
+- A `pacioli scan` codepath that allows `--project <name>` or
   `--label <text>` to traverse outside the intended run dir.
 - A `rewrite_sarif_help.py` or `aggregate.py` codepath that allows
   the SARIF `helpUri` rewrite to inject HTML or JavaScript into
   the report.
 - A `tfstate_to_plan.py` or `drift_report.py` codepath that
   allows the state blob to inject paths outside the run dir.
-- A way to make `whitelist_my_ip` remove an IP that was not
+- A way to make the storage firewall IP whitelist (in
+  `scanner/orchestrator.py`) remove an IP that was not
   whitelisted by the current run (the function has a
   pre-removal verification check, but if you find a way to bypass
   it, that's critical).

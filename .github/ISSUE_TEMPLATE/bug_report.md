@@ -15,7 +15,7 @@ A clear description of the bug.
 The exact command(s) you ran:
 
 ```bash
-bash scanner/scan.sh --mode report --project ... --env ...
+pacioli scan --project ... --env ...
 ```
 
 ## Expected behavior

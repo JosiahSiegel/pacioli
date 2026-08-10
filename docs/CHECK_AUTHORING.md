@@ -215,8 +215,9 @@ the graph for a standalone resource that links to the parent.
 ## Registering the check
 
 The check is auto-loaded by Checkov via the
-`--external-checks-dir` flag in `scan.sh`. No registration step
-is needed beyond dropping the file in the right directory.
+`--external-checks-dir` flag in `scanner/orchestrator.py`. No
+registration step is needed beyond dropping the file in the
+right directory.
 
 ```bash
 # Verify the file is loadable

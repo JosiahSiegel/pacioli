@@ -73,9 +73,10 @@ Pacioli is built in five layers, each with a single responsibility:
 
 The first module `scanner/orchestrator.py` imports is `safety.py`,
 which defines the read-only invariant. Every external command the
-scanner runs is gated through `SafetyGuard.refuse_if_mutating()` (or
-the `safe_run_exec` helper that calls it). The full pattern list and
-extension procedure are in [Safety Model](SAFETY_MODEL.md).
+scanner runs is gated through `SafetyGuard.refuse_if_mutating()`
+(via the process-spawn helpers in `scanner/orchestrator.py`). The
+full pattern list and extension procedure are in
+[Safety Model](SAFETY_MODEL.md).
 
 ### Layer 1 — `scanner/orchestrator.py` (paths + run-id + helpers)
 
@@ -96,9 +97,9 @@ needs:
   when either is unset).
 - `_log` (timestamped logging; respects `PACIOLI_VERBOSE`,
   `PACIOLI_DEBUG`).
-- `_whitelist_my_ip` / `cleanup_ip_whitelist` (paired Azure mutation
-  + removal, with a 5-retry verification; cleanup runs via the
-  signal/atexit trap in `scanner/trap.py`).
+- The storage firewall whitelist logic: a paired Azure mutation
+  + removal with 5-retry verification, registered with the
+  signal/atexit cleanup in `scanner/trap.py`.
 - Plan-artifact shredding (PCI 10.7 hygiene for plan files).
 - Scope parsing (`pci_scope.yaml`).
 - Run-dir naming and labeling.
@@ -110,7 +111,8 @@ The driver is a per-(project, env) loop. For each env, it does, in
 order:
 
 1. **Validate the env dir**.
-2. **Whitelist the runner IP** if tier 2 or 3 (`_whitelist_my_ip`).
+2. **Whitelist the runner IP** if tier 2 or 3 (see the storage
+   firewall whitelist logic in `scanner/orchestrator.py`).
 3. **`terraform init -input=false`** (tier 2+).
 4. **`terraform plan -out=tfplan.binary`** (tier 2+).
 5. **`terraform show -json tfplan.binary > plan.json`** (tier 2+).
@@ -136,7 +138,8 @@ per-tier logic.
 The driver registers an EXIT-equivalent cleanup (via
 `scanner/trap.py`) that:
 
-- Calls `cleanup_ip_whitelist` (removes the IP we added in step 2).
+- Removes the storage firewall IP we added in step 2 (paired
+  with the whitelist logic in `scanner/orchestrator.py`).
 - Shreds plan artifacts (destroys `tfplan.binary` + `plan.json`).
 - Removes the staging dir for the pairs file.
 

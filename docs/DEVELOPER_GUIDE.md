@@ -170,18 +170,18 @@ selftest explicitly via `make selftest`.
 
 ### Python (process-spawn conventions)
 
-- Every external command MUST go through
-  `scanner/orchestrator.py`'s `safe_run_exec(cmd)` or
-  `_run_guarded(cmd, *, dry_run=False)` helper. Both call
+- Every external command MUST go through the process-spawn helpers
+  in `scanner/orchestrator.py`. Both call
   `SafetyGuard.refuse_if_mutating(cmd)` first; a refusal raises
   `scanner.safety.MutatingOperationRefused` and the scanner exits
   with code 99.
 - Do not invoke `subprocess.run` (or `os.system`, or
   `subprocess.Popen`) directly from driver code — you will bypass
   the safety guard.
-- For dry-run support, route the call through `_run_guarded` and
-  pass `dry_run=True` (or set `DRY_RUN=1` in the environment);
-  the helper prints the command instead of executing it.
+- For dry-run support, route the call through the guarded-runner
+  helper and pass `dry_run=True` (or set `DRY_RUN=1` in the
+  environment); the helper prints the command instead of executing
+  it.
 
 ### Commit messages
 
