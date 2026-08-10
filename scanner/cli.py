@@ -30,6 +30,9 @@ Flags (top-level, accepted by ``scan``/``gate``/``audit`` as relevant):
     --dry-run                Print intended actions without executing (matches scan.sh).
     --verbose                Emit INFO logs (matches PCI_VERBOSE=1).
     --non-interactive        Disable the first-run interactive picker for `pacioli scan`.
+    --no-open                Skip auto-opening report.html in the default browser
+                             (scan/gate/audit). Auto-open is also disabled
+                             automatically when CI=1.
 
 Back-compat aliases (deprecated; emit a DeprecationWarning to stderr):
     --scan-plan      Equivalent to --tier plan.
@@ -51,6 +54,7 @@ import argparse
 import os
 import sys
 import warnings
+import webbrowser
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -225,6 +229,11 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Disable the first-run interactive picker (for CI / scripts).",
     )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not auto-open the generated report.html in the default browser after the scan.",
+    )
 
 
 def _add_backcompat_aliases(parser: argparse.ArgumentParser) -> None:
@@ -340,6 +349,8 @@ def _handle_scan(args: argparse.Namespace) -> int:
         argv += ["--dry-run"]
     if args.verbose:
         argv += ["--verbose"]
+    if getattr(args, "no_open", False):
+        argv += ["--no-open"]
 
     return _orchestrator.main(argv)
 
@@ -377,6 +388,8 @@ def _handle_gate(args: argparse.Namespace) -> int:
         argv += ["--dry-run"]
     if args.verbose:
         argv += ["--verbose"]
+    if getattr(args, "no_open", False):
+        argv += ["--no-open"]
     return _orchestrator.main(argv)
 
 
@@ -451,6 +464,39 @@ def _resolve_report_html(aggregate_dir: Path, out_path: str) -> None:
     _log("INFO", f"{REPORT_FILENAME} copied to: {out_path}")
 
 
+def _maybe_open_report(path: Path, *, no_open: bool) -> None:
+    """Best-effort auto-open of ``path`` in the default browser.
+
+    Used by the audit handlers after they copy ``report.html`` to the
+    operator-supplied ``--out`` path. Mirrors
+    :meth:`scanner.orchestrator.Orchestrator._open_report` but is
+    module-level because the audit flow lives in ``cli.py``, not the
+    orchestrator. Per the plan, this helper does NOT consult ``CI=1``
+    (audit is operator-initiated, never a CI job — operators may
+    legitimately invoke ``pacioli audit`` from a workstation even when
+    ``CI`` is set in their shell).
+
+    Suppressed (returns silently) when ``no_open`` is True. Never
+    raises: any failure mode logs a WARN and swallows so the audit
+    exit code is preserved.
+    """
+    if no_open:
+        return
+    try:
+        opened = webbrowser.open(path.resolve().as_uri())
+    except (OSError, AttributeError, ValueError) as exc:
+        _log(
+            "WARN",
+            f"could not auto-open report ({type(exc).__name__}): {path}",
+        )
+        return
+    if not opened:
+        _log(
+            "WARN",
+            f"no browser registered; report not auto-opened: {path}",
+        )
+
+
 def _handle_audit(args: argparse.Namespace) -> int:
     """Re-emit a prior Pacioli report from the archive.
 
@@ -505,6 +551,7 @@ def _handle_audit_local(args: argparse.Namespace) -> int:
     _log("INFO", f"audit (local): {run_dir}")
     if out_path:
         _resolve_report_html(aggregate_dir, out_path)
+        _maybe_open_report(Path(out_path), no_open=bool(getattr(args, "no_open", False)))
     return 0
 
 
@@ -567,6 +614,7 @@ def _handle_audit_remote(args: argparse.Namespace) -> int:
 
     if out_path:
         _resolve_report_html(dest_dir, out_path)
+        _maybe_open_report(Path(out_path), no_open=bool(getattr(args, "no_open", False)))
 
     # Mark audit freshness so downstream tooling can distinguish an
     # audit-pull from a fresh scan.
@@ -874,6 +922,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--state-account",
         default=None,
         help="Storage account for --source remote (default: $PACIOLI_STATE_STORAGE_ACCOUNT).",
+    )
+    audit_p.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not auto-open the --out destination in the default browser after audit.",
     )
     audit_p.add_argument(
         "--dry-run",

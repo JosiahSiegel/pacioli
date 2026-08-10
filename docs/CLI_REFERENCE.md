@@ -30,6 +30,7 @@ pacioli scan [--mode MODE] [--project P] [--env E]
 | `--dry-run` | flag | off | Print every command without executing. Does not actually run Checkov or `terraform`. |
 | `--verbose` | flag | off | Enable INFO-level logging. Same as `PACIOLI_VERBOSE=1`. |
 | `--label` | `<text>` | (derived from scope) | Custom slug for the run-dir name. Sanitized to `[A-Za-z0-9_.-]`. Suffixes the UTC date. |
+| `--no-open` | flag | off | Do not auto-open `report.html` after a successful aggregate. |
 | `--help` / `-h` | flag | — | Show usage and exit. |
 
 ### Exit codes
@@ -56,6 +57,22 @@ pacioli scan [--mode MODE] [--project P] [--env E]
 | `PYTHONIOENCODING` | `utf-8` | Forced by `scanner/_utf8.py` to avoid Windows cp1252 crashes. |
 | `PYTHONUTF8` | `1` | Same. |
 | `LC_ALL` / `LANG` | `C.UTF-8` | Same. |
+
+### Auto-open behavior
+
+By default, `pacioli scan`, `pacioli gate`, and `pacioli audit --out <path>`
+open `report.html` in the OS default browser after the run completes.
+Auto-open is suppressed when:
+
+* `--no-open` is passed.
+* `CI=1` is set (for `scan` and `gate`; audit ignores `CI` because it is
+  always operator-initiated).
+* No browser is registered (e.g. headless Linux without `xdg-open`) —
+  in this case a WARN is logged and the scan exits 0; the report path
+  is still printed on stdout.
+
+To save the report into the scanned repo, use `--output-dir .`. The
+report lands at `./aggregate/report.html` and is auto-opened.
 
 ### Examples
 
@@ -99,6 +116,7 @@ pacioli audit [--run-id ID | --latest] [--out PATH] [--dry-run]
 | `--out <path>` | Optional destination for `report.html`. |
 | `--source <src>` | `local` (default; reads `~/.pacioli/runs/`) or `remote` (`pacioli-reports` Azure container). |
 | `--dry-run` | Print the blob-download commands without executing. |
+| `--no-open` | Do not auto-open the `--out` destination after a successful audit. |
 | `--help` / `-h` | Show usage. |
 
 ### Environment variables
