@@ -8,6 +8,24 @@
 This guide walks through, end to end, what you need to do to start
 scanning your Terraform code with Pacioli.
 
+## Quick start
+
+From any Terraform repository, run the installed CLI against the repository:
+
+```bash
+pacioli scan .
+```
+
+To scan a specific project and environment:
+
+```bash
+pacioli scan . --project myapp --env prod
+```
+
+The command writes the report to `.checkov/<run-id>/aggregate/report.html`.
+Open that file in a browser when the scan completes. See [CLI Reference](CLI_REFERENCE.md)
+for all scan modes and options.
+
 ## What you need
 
 1. **A Terraform repo** with this layout (or close to it):
@@ -28,7 +46,7 @@ scanning your Terraform code with Pacioli.
    │   └── ...
    ```
 2. **Python 3.12+**.
-3. **`jq`** (used by `scan.sh` for JSON queries).
+3. **`jq`** (used for JSON queries).
 4. **Azure CLI** (`az`) — only for tier 2 and tier 3 scans (where
    `terraform plan` or `.tfstate` download is required). The
    scanner also requires the consumer to set
@@ -67,36 +85,7 @@ checkov --version
 # 3.3.9
 ```
 
-## Step 2: create the wrapper Makefile
-
-Copy `examples/Makefile.consumer` to your Terraform repo as
-`Makefile.pacioli`. The Makefile is the operator-facing entry point
-for the scanner.
-
-```bash
-# In your Terraform repo
-cp ../pacioli/examples/Makefile.consumer ./Makefile.pacioli
-```
-
-Update the `PACIOLI_DIR` variable to point at where you cloned
-Pacioli:
-
-```makefile
-PACIOLI_DIR ?= ../pacioli
-```
-
-If you have a different layout, you can override `PACIOLI_DIR` on
-the command line:
-
-```bash
-make -f Makefile.pacioli scan PACIOLI_DIR=/opt/pacioli
-```
-
-You can either keep `Makefile.pacioli` separate (and call it with
-`-f Makefile.pacioli`) or merge its targets into your existing
-`Makefile`.
-
-## Step 3: create the scope file
+## Step 2: create the scope file
 
 `pci_scope.yaml` declares which `(project, env)` pairs are in PCI
 audit scope. The scanner walks every entry under
@@ -135,7 +124,7 @@ For your initial setup, set every project you want scanned to
 addition; use `excluded` only for permanent out-of-scope items
 like a sandbox.
 
-## Step 4: create the baseline file (initially empty)
+## Step 3: create the baseline file (initially empty)
 
 `pci_baseline.yaml` lists per-finding suppressions. Initially it
 should be an empty list — you populate it after the first scan.
@@ -150,7 +139,7 @@ Edit it down to:
 # PCI baseline — repo-wide suppressions for known/accepted findings.
 # See docs/OPERATOR_GUIDE.md for the schema and triage workflow.
 # Initially empty. After the first scan, run:
-#   make -f Makefile.pacioli scan-baseline-init RUN_DIR=.checkov/<run_id>
+#   pacioli scan-baseline-init RUN_DIR=.checkov/<run_id>
 # to generate stub entries for triage.
 suppressions: []
 ```
@@ -158,7 +147,34 @@ suppressions: []
 You do NOT need to add any entries before the first scan. The
 aggregator handles the empty-list case.
 
-## Step 5: configure Azure (only for tier 2/3 scans)
+## Headless / CI
+
+Use non-interactive mode in automation. `PACIOLI_MAPPING` selects a
+mapping pack without prompting:
+
+```bash
+PACIOLI_MAPPING=/path/to/mapping.yaml \
+  pacioli scan /path/to/terraform-repo --non-interactive
+```
+
+The equivalent environment-variable form is useful when a CI job
+cannot add the flag to its command:
+
+```bash
+PACIOLI_MAPPING=/path/to/mapping.yaml \
+PACIOLI_NON_INTERACTIVE=1 \
+  pacioli scan /path/to/terraform-repo
+```
+
+For a PR gate, add `--mode gate`; the command exits non-zero on
+HIGH/CRITICAL findings:
+
+```bash
+PACIOLI_MAPPING=/path/to/mapping.yaml \
+  pacioli scan /path/to/terraform-repo --non-interactive --mode gate
+```
+
+## Step 4: configure Azure (only for tier 2/3 scans)
 
 Tier 1 (source-only) needs nothing beyond Checkov. Tier 2 (plan)
 and tier 3 (state) need Azure authentication.
@@ -171,8 +187,7 @@ az login
 az storage account show --name "$PACIOLI_STATE_STORAGE_ACCOUNT"
 ```
 
-Set `PACIOLI_STATE_STORAGE_ACCOUNT` in your shell or in the
-Makefile:
+Set `PACIOLI_STATE_STORAGE_ACCOUNT` in your shell or CI secret:
 
 ```bash
 export PACIOLI_STATE_STORAGE_ACCOUNT=mystorageaccount
@@ -180,16 +195,16 @@ export PACIOLI_STATE_STORAGE_ACCOUNT=mystorageaccount
 
 The storage account must contain a `iac` container with the
 `.tfstate` blobs named `CR_<env-prefix>_<project>.tfstate` (e.g.
-`CR_Prod_myapp.tfstate`). If yours are named differently, edit
-the `backend_key` derivation in `scan.sh` (search for
-`CR_$(echo "${env}"` — the prefix is built from the env name).
+`CR_Prod_myapp.tfstate`). If yours are named differently, configure
+the corresponding state key mapping in Pacioli (see
+[CLI Reference](CLI_REFERENCE.md)).
 
-## Step 6: run your first scan
+## Step 5: run your first scan
 
 Tier 1 (no Azure calls):
 
 ```bash
-make -f Makefile.pacioli scan PROJECT=myapp ENV=prod
+pacioli scan . --project myapp --env prod
 ```
 
 You should see output ending in:
@@ -204,7 +219,7 @@ Open the report in a browser:
 open .checkov/myapp-prod-2026-08-06/aggregate/report.html
 ```
 
-## Step 7: triage the findings
+## Step 6: triage the findings
 
 1. Open the **Findings** route in the report.
 2. Click each HIGH/CRITICAL finding:
@@ -218,7 +233,7 @@ open .checkov/myapp-prod-2026-08-06/aggregate/report.html
 For accepted-risk findings, see the
 [baseline schema in Operator Guide](OPERATOR_GUIDE.md#baseline-entry-schema).
 
-## Step 8: wire into CI
+## Step 7: wire into CI
 
 In your CI pipeline (Azure DevOps, GitHub Actions, etc.), add a job
 that runs:
@@ -227,8 +242,9 @@ that runs:
 # GitHub Actions snippet
 - name: Pacioli PCI scan (gate)
   run: |
-    PACIOLI_DIR=${{ github.workspace }}/../pacioli
-    make -f Makefile.pacioli scan-gate PROJECT=myapp ENV=prod
+    PACIOLI_MAPPING=${{ github.workspace }}/../pacioli/mappings/pci_dss_4.0.1.yaml \
+      pacioli scan "${{ github.workspace }}" --non-interactive --mode gate \
+      --project myapp --env prod
 ```
 
 Or for the standard Azure DevOps pipeline:
@@ -239,28 +255,28 @@ Or for the standard Azure DevOps pipeline:
   inputs:
     targetType: 'inline'
     script: |
-      make -f Makefile.pacioli scan-gate PROJECT=$(PROJECT) ENV=$(ENV)
+      pacioli scan "$(Build.SourcesDirectory)" --non-interactive --mode gate \
+        --project $(PROJECT) --env $(ENV)
   displayName: 'Pacioli PCI gate'
 ```
 
-The `scan-gate` target calls `scan.sh --mode gate`, which exits
-non-zero on HIGH/CRITICAL findings. SARIF artifacts are emitted per
-env under `.checkov/<run-id>/<project>/<env>/*.sarif`; your CI
-runner should upload these as build artifacts for the security team
-to ingest.
+The `--mode gate` option exits non-zero on HIGH/CRITICAL findings.
+SARIF artifacts are emitted per env under
+`.checkov/<run-id>/<project>/<env>/*.sarif`; your CI runner should
+upload these as build artifacts for the security team to ingest.
 
-## Step 9: set up the pacioli-reports archive (optional but recommended)
+## Step 8: set up the pacioli-reports archive (optional but recommended)
 
-For audit prep and historical record, set up a second Azure
-storage container called `pacioli-reports`. After each scan, the
-aggregator's output (`coverage_matrix.csv`, `combined.sarif`,
-`junit.xml`, `report.html`) should be uploaded to
+For audit prep and historical record, set up a second Azure storage
+container called `pacioli-reports`. After each scan, the aggregator's
+output (`coverage_matrix.csv`, `combined.sarif`, `junit.xml`,
+`report.html`) should be uploaded to
 `pacioli-reports/<run-id>/` in that container.
 
 This is usually a separate pipeline step:
 
 ```bash
-# After scan.sh completes, upload aggregate
+# After pacioli completes, upload aggregate
 az storage blob upload \
     --account-name "$PACIOLI_STATE_STORAGE_ACCOUNT" \
     --container-name pacioli-reports \
@@ -269,22 +285,22 @@ az storage blob upload \
 ```
 
 With this archive in place, anyone with read access to the
-container can re-emit a prior report at any time using
-`scan_audit.sh --latest` or `scan_audit.sh --run-id <run-id>`.
+container can re-emit a prior report at any time using the Pacioli
+archive command described in [CLI Reference](CLI_REFERENCE.md).
 
-`scan_audit.sh` requires `PACIOLI_REPORTS_CONTAINER` to be set;
-the default in `lib/common.sh` is empty, so you must export it
-explicitly.
+`PACIOLI_REPORTS_CONTAINER` must be set explicitly for archive/audit
+operations; there is no tenant-agnostic default.
 
-## Step 10: commit your config
+## Step 9: commit your config
 
-Commit `pci_scope.yaml`, `pci_baseline.yaml`, `Makefile.pacioli`
-(or the merged `Makefile` targets), and the CI wiring to your
-Terraform repo. Do NOT commit the `.checkov/` directory — it's
-already in the standard `.gitignore` patterns.
+Commit `pci_scope.yaml`, `pci_baseline.yaml`, and the CI wiring to
+your Terraform repo. If you also use the legacy wrapper, commit
+`Makefile.pacioli` (or the merged `Makefile` targets). Do NOT commit
+the `.checkov/` directory — it's already in the standard `.gitignore`
+patterns.
 
 ```bash
-git add pci_scope.yaml pci_baseline.yaml Makefile.pacioli .gitignore
+git add pci_scope.yaml pci_baseline.yaml .gitignore
 git commit -m "feat: add pacioli PCI compliance scanning"
 ```
 
@@ -332,3 +348,19 @@ re-validated as a single coordinated change.
 - [CLI Reference](CLI_REFERENCE.md) — every argument
 - [Report Format](REPORT_FORMAT.md) — every output file
 - [Troubleshooting](TROUBLESHOOTING.md) — common failures
+
+## Appendix: legacy consumer wrapper
+
+The copy-Makefile workflow remains available for repositories that
+need a checked-in wrapper. Copy `examples/Makefile.consumer` from the
+Pacioli checkout as `Makefile.pacioli`, then set `PACIOLI_DIR` to the
+checkout location (default `../pacioli`):
+
+```bash
+cp ../pacioli/examples/Makefile.consumer ./Makefile.pacioli
+make -f Makefile.pacioli scan PACIOLI_DIR=/opt/pacioli PROJECT=myapp ENV=prod
+```
+
+You may keep `Makefile.pacioli` separate or merge its targets into an
+existing `Makefile`. The wrapper delegates to the `pacioli` CLI; use
+`pacioli scan` directly for new integrations.

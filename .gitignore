@@ -32,9 +32,13 @@ tfplan.binary
 plan.json
 coverage_matrix.csv
 
+# Pacioli global cache (per-user run metadata; never committed)
+.pacioli/runs/
+
 # IDE / editor
 .idea/
 .vscode/
 *.swp
 *.swo
-.DS_Store
+.DS_Store.omo/
+.omo/

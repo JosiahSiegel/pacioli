@@ -7,7 +7,7 @@ itself (that's a living document; live tests are in the runbook).
 import pytest
 from pathlib import Path
 
-from aggregate import load_pci_mapping, load_pci_baseline
+from scanner.aggregate import load_pci_mapping, load_pci_baseline
 
 
 def test_load_pci_mapping_parses_top_level_keys():

@@ -3,12 +3,21 @@
 # Copy this file into your Terraform repo as `Makefile.pacioli` (or merge
 # it into your existing Makefile). Update PACIOLI_DIR to point at your
 # local Pacioli checkout (or use a git submodule / pip install).
+#
+# Requires the `pacioli` CLI on $PATH:
+#   pip install -e $(PACIOLI_DIR)         # installs the `pacioli` command
+#   # Legacy alias (pre-standalone CLI): `pacioli-scan` is also accepted.
 # =============================================================================
 
-# Path to the Pacioli scanner installation.
-# Override at the command line: make -f Makefile.pacioli scan PACIOLI_DIR=...
+# Path to the Pacioli installation (used for `make test` and as the default
+# `pip install -e` source). Override at the command line:
+#   make -f Makefile.pacioli scan PACIOLI_DIR=...
 PACIOLI_DIR ?= ../pacioli
-PACIOLI_SCANNER := $(PACIOLI_DIR)/scanner
+
+# Which Pacioli binary to invoke. Defaults to `pacioli` (the standalone
+# CLI installed by `pip install -e $(PACIOLI_DIR)`). The legacy wrapper
+# `pacioli-scan` is also accepted; set PACIOLI_BIN=pacioli-scan to use it.
+PACIOLI_BIN ?= pacioli
 
 # Scope + baseline live in THIS repo (consumer-owned).
 SCOPE_FILE ?= pci_scope.yaml
@@ -36,46 +45,57 @@ help:
 	@echo "  make scan-audit              - Re-emit a prior report from the pacioli-reports archive"
 	@echo "  make scan-baseline-init      - Generate stub baseline entries from a run"
 	@echo "  make scan-fix-list           - Re-emit fix_list.md from a run"
+	@echo "  make scan-cleanup            - Post-scan safety cleanup (no-op stub; manual if needed)"
+	@echo "  make test                    - Run the pacioli test suite"
 	@echo ""
-	@echo "Common args: PROJECT=<p> ENV=<e> RUN_DIR=.checkov/<run_id>"
+	@echo "Common args: PROJECT=<p> ENV=<e> LABEL=<l> RUN_DIR=.checkov/<run_id>"
 	@echo "Audit args:  RUN_ID=<run_id> OUT=<path>  (default: --latest, no out copy)"
+	@echo ""
+	@echo "Binary:    PACIOLI_BIN=$(PACIOLI_BIN)  (override to pacioli-scan for the legacy wrapper)"
 
 scan:
-	@bash $(PACIOLI_SCANNER)/scan.sh --mode report \
+	@$(PACIOLI_BIN) scan --target-repo $(CURDIR) \
+		$(if $(MAPPING_FILE),--mapping $(MAPPING_FILE)) \
 		$(if $(PROJECT),--project $(PROJECT)) \
 		$(if $(ENV),--env $(ENV)) \
 		$(if $(LABEL),--label $(LABEL))
 
 scan-plan:
-	@bash $(PACIOLI_SCANNER)/scan.sh --mode report --scan-plan \
+	@$(PACIOLI_BIN) scan --target-repo $(CURDIR) --tier plan \
+		$(if $(MAPPING_FILE),--mapping $(MAPPING_FILE)) \
 		$(if $(PROJECT),--project $(PROJECT)) \
 		$(if $(ENV),--env $(ENV))
 
 scan-state:
-	@bash $(PACIOLI_SCANNER)/scan.sh --mode report --scan-state \
+	@$(PACIOLI_BIN) scan --target-repo $(CURDIR) --tier state \
+		$(if $(MAPPING_FILE),--mapping $(MAPPING_FILE)) \
 		$(if $(PROJECT),--project $(PROJECT)) \
 		$(if $(ENV),--env $(ENV))
 
 scan-gate:
-	@bash $(PACIOLI_SCANNER)/scan.sh --mode gate \
+	@$(PACIOLI_BIN) gate --target-repo $(CURDIR) \
+		$(if $(MAPPING_FILE),--mapping $(MAPPING_FILE)) \
 		$(if $(PROJECT),--project $(PROJECT)) \
 		$(if $(ENV),--env $(ENV))
 
 scan-audit:
-	@bash $(PACIOLI_SCANNER)/scan_audit.sh \
+	@$(PACIOLI_BIN) audit \
 		$(if $(RUN_ID),--run-id $(RUN_ID),--latest) \
 		$(if $(OUT),--out $(OUT))
 
 scan-baseline-init:
-	@bash $(PACIOLI_SCANNER)/scan_baseline_init.sh \
-		$(if $(RUN_DIR),--run-dir $(RUN_DIR))
+	@$(PACIOLI_BIN) baseline init \
+		$(if $(RUN_DIR),--run-dir $(RUN_DIR)) \
+		$(if $(BASELINE_FILE),--baseline $(BASELINE_FILE))
 
 scan-fix-list:
-	@python $(PACIOLI_SCANNER)/aggregate.py --run-dir $(RUN_DIR) --emit-fix-list
+	@$(PACIOLI_BIN) scan --target-repo $(CURDIR) --emit-fix-list \
+		$(if $(RUN_DIR),--run-dir $(RUN_DIR))
 
 scan-cleanup:
-	@bash $(PACIOLI_SCANNER)/lib/safety.sh && \
-	echo "no stale IPs to clean (manual: az storage account network-rule list ...)"
+	@echo "scan-cleanup is a no-op under the standalone CLI."
+	@echo "The legacy az storage account network-rule whitelist auto-revert is no longer performed."
+	@echo "If you need manual cleanup, run: az storage account network-rule list ..."
 
 test:
 	@cd $(PACIOLI_DIR) && make test
