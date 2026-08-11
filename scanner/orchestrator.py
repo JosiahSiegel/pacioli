@@ -76,6 +76,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scanner.checkov_runner import CheckovRunner  # noqa: E402
 from scanner.discovery import (  # noqa: E402
+    DiscoveredPair,
     NoTerraformFoundError,
     discover_pairs,
 )
@@ -180,6 +181,14 @@ class _PairState:
     plan_json: Optional[Path] = None
     state_local: Optional[Path] = None
     state_plan_json: Optional[Path] = None
+    # Backend-key precedence (scan_paths: opt-in). ``None`` means the
+    # helper will fall through to the aztfexport file / basename
+    # default. Set by ``_run_scan_loop`` from a ``DiscoveredPair``.
+    backend_key_override: Optional[str] = None
+    # Optional Terraform workspace name (scan_paths: ``workspace:``).
+    # Forwarded into the ``terraform plan -var workspace=<x>`` argv
+    # by the per-tier pass; not used in tier=source.
+    workspace: Optional[str] = None
 
 
 @dataclass
@@ -221,6 +230,7 @@ class Orchestrator:
         mapping_path: Optional[Path],
         baseline_path: Optional[Path],
         state_account: Optional[str],
+        include_modules: bool = False,
     ) -> int:
         """Run the full scan and return the SCAN_RC.
 
@@ -241,6 +251,10 @@ class Orchestrator:
             state_account: Storage account name used for the firewall
                 whitelist in tier ``plan``/``state``. Required for
                 those tiers.
+            include_modules: When ``True``, ``scan_paths:`` entries
+                whose stack root is a module library (``modules/``,
+                ``modules-<x>/``, ``.terraform/``) are honored. Default
+                is ``False``; the CLI flag (Todo 8) overrides this.
 
         Returns:
             The shell-style SCAN_RC. ``gate`` mode may return any non-
@@ -262,6 +276,7 @@ class Orchestrator:
                 env=env,
                 mapping_path=mapping_path,
                 baseline_path=baseline_path,
+                include_modules=include_modules,
             )
         )
 
@@ -295,13 +310,20 @@ class Orchestrator:
         env: Optional[str],
         mapping_path: Optional[Path],
         baseline_path: Optional[Path],
-    ) -> tuple[Path, Path, Optional[Path], list[tuple[str, str]]]:
+        include_modules: bool = False,
+    ) -> tuple[Path, Path, Optional[Path], list[DiscoveredPair]]:
         """Resolve target repo, mapping, baseline, and (project, env) pairs.
 
         Extracted from :meth:`scan` so that the top-level orchestrator
         reads as a thin glue layer (S3776). Raises :class:`OrchestratorError`
         on resolution failures (mapping, no-pair discovery) so the
         caller can convert them to a single log + non-zero rc.
+
+        ``include_modules`` is forwarded to :func:`discover_pairs` and
+        controls whether ``modules/`` / ``modules-<x>/`` / ``.terraform/``
+        entries in ``scan_paths:`` are honored. Defaults to ``False``
+        (excluded) for source-tier scans; the CLI flag (Todo 8) will
+        override.
         """
         target_repo = Path(target_repo).resolve()
         if not target_repo.is_dir():
@@ -319,6 +341,7 @@ class Orchestrator:
                 target_repo,
                 project_filter=project,
                 env_filter=env,
+                include_modules=include_modules,
             )
         except NoTerraformFoundError as exc:
             raise OrchestratorError(str(exc)) from exc
@@ -391,7 +414,7 @@ class Orchestrator:
         output_dir: Path,
         resolved_mapping: Path,
         resolved_baseline: Optional[Path],
-        pairs: list[tuple[str, str]],
+        pairs: list[DiscoveredPair],
     ) -> None:
         """Emit the per-run INFO banner before the per-pair loop starts.
 
@@ -413,7 +436,7 @@ class Orchestrator:
     def _run_scan_loop(
         self,
         runner: CheckovRunner,
-        pairs: list[tuple[str, str]],
+        pairs: list[DiscoveredPair],
         target_repo: Path,
         run_root: Path,
         state_account: Optional[str],
@@ -423,10 +446,24 @@ class Orchestrator:
         Skips pairs whose env dir is missing. The per-pair dispatch into
         the tier-specific passes is delegated to
         :meth:`_scan_one_pair`.
+
+        Each :class:`DiscoveredPair` carries the optional ``stack_root``
+        (set by ``scan_paths:``) and ``backend_key_override`` /
+        ``workspace`` (also from ``scan_paths:``). The legacy
+        ``(project, env)`` branches produce ``DiscoveredPair`` instances
+        with ``stack_root=None`` and override fields ``None``, so the
+        behavior for those is unchanged.
         """
         scan_rc = 0
-        for proj, env_name in pairs:
-            env_dir = self._resolve_env_dir(target_repo, proj, env_name)
+        for pair in pairs:
+            proj = pair.project
+            env_name = pair.env
+            env_dir = self._resolve_env_dir(
+                target_repo,
+                proj,
+                env_name,
+                stack_root=pair.stack_root,
+            )
             if not env_dir.is_dir():
                 _log(
                     "WARN",
@@ -434,7 +471,11 @@ class Orchestrator:
                 )
                 continue
 
-            env_run_dir = run_root / proj / env_name
+            # Per-pair output dir; scan_paths: stack_label is appended
+            # so two colliding (project, env) entries don't clobber
+            # each other's SARIFs.
+            label_suffix = f"-{pair.stack_label}" if pair.stack_label else ""
+            env_run_dir = run_root / proj / f"{env_name}{label_suffix}"
             env_run_dir.mkdir(parents=True, exist_ok=True)
 
             _log("INFO", f"scanning {proj}/{env_name}")
@@ -444,6 +485,8 @@ class Orchestrator:
                 env=env_name,
                 env_run_dir=env_run_dir,
                 env_dir=env_dir,
+                backend_key_override=pair.backend_key,
+                workspace=pair.workspace,
             )
 
             pair_rc = self._scan_one_pair(runner, state, state_account)
@@ -652,14 +695,27 @@ class Orchestrator:
         target_repo: Path,
         project: str,
         env_name: str,
+        stack_root: Optional[Path] = None,
     ) -> Path:
         """Resolve the env dir for a (project, env) pair.
 
-        For the flat-repo fallback (``project == 'default' and env ==
-        'default'``), the .tf files live at the repo root. Otherwise
-        the bash convention is ``<target_repo>/env/<project>/<env>/``.
-        Mirrors scan.sh line 370.
+        Precedence:
+
+          1. ``stack_root`` (set by ``scan_paths:`` entries) → used
+             verbatim. This is the path the operator declared in
+             ``pci_scope.yaml::scan_paths:`` and is authoritative for
+             stacks that don't live under
+             ``<target_repo>/env/<project>/<env>/`` (sibling checkouts,
+             monorepo roots, etc.).
+          2. Flat-repo fallback (``project == 'default' and env ==
+             'default'``) → ``target_repo`` itself.
+          3. Default bash convention → ``<target_repo>/env/<project>/<env>/``.
+
+        Mirrors scan.sh line 370 for cases (2) and (3); case (1) is the
+        new ``scan_paths:`` opt-in.
         """
+        if stack_root is not None:
+            return Path(stack_root)
         if project == "default" and env_name == "default":
             return target_repo
         return target_repo / "env" / project / env_name
@@ -915,7 +971,12 @@ class Orchestrator:
         self._check_storage_account_valid(state_account)
         _log("INFO", "  state-scan: download state blob from Azure")
 
-        backend_key = self._resolve_or_synthesize_backend_key(state)
+        backend_key = self._resolve_backend_key(
+            stack_root=state.env_dir,
+            cli_override=state.backend_key_override,
+            aztfexport_key=self._resolve_backend_key_from_aztfexport(state),
+            env_default=f"{state.env}.tfstate",
+        )
         paths = self._resolve_state_blob_paths(state)
 
         if self.dry_run:
@@ -937,23 +998,6 @@ class Orchestrator:
 
         # Shred state plan after drift extraction.
         self._shred_state_plan(paths["state_plan_json"])
-
-    def _resolve_or_synthesize_backend_key(self, state: _PairState) -> str:
-        """Return the storage backend key, synthesizing one if missing.
-
-        Reads ``<env_dir>/terraform.aztfexport.tf``; falls back to
-        ``CR_<Env>_<project>.tfstate`` so downstream download has a key.
-        """
-        backend_key = self._resolve_backend_key(state)
-        if backend_key:
-            return backend_key
-        synthesized = f"CR_{state.env[:1].upper()}{state.env[1:]}_{state.project}.tfstate"
-        _log(
-            "WARN",
-            f"no backend key in terraform.aztfexport.tf; "
-            f"falling back to synthesized: {synthesized}",
-        )
-        return synthesized
 
     @staticmethod
     def _resolve_state_blob_paths(state: _PairState) -> dict[str, Path]:
@@ -1168,11 +1212,26 @@ class Orchestrator:
         except OSError as exc:  # noqa: BLE001 — best-effort shred; logged for forensics
             _log("WARN", f"  failed to shred state plan: {exc}")
 
-    def _resolve_backend_key(self, state: _PairState) -> Optional[str]:
+    @staticmethod
+    def _resolve_backend_key_from_aztfexport(state: _PairState) -> Optional[str]:
         """Read the storage backend key from terraform.aztfexport.tf.
 
         Mirrors scan.sh lines 610-613. Returns ``None`` when the file is
         missing or the key field is absent.
+
+        This is the third tier of the documented backend-key precedence:
+
+          1. CLI override (``--backend-key`` / per-entry ``scan_paths:
+             backend_key:``) — handled by ``_resolve_backend_key`` via
+             its ``cli_override`` argument.
+          2. ``<stack_root>/terraform.aztfexport.tf`` — this method.
+          3. ``f"{env}.tfstate"`` basename default — handled by
+             ``_resolve_backend_key`` via its ``env_default`` argument.
+          4. Fail-closed: no synthesized key. The caller surfaces the
+             empty result so the operator can fix the missing input.
+
+        Splitting the reader from the precedence resolver keeps the
+        orchestrator's hot path testable without filesystem state.
         """
         aztf_file = state.env_dir / "terraform.aztfexport.tf"
         if not aztf_file.is_file():
@@ -1193,6 +1252,43 @@ class Orchestrator:
             if value:
                 return value
         return None
+
+    @staticmethod
+    def _resolve_backend_key(
+        stack_root: Path,
+        cli_override: Optional[str],
+        aztfexport_key: Optional[str],
+        env_default: str,
+    ) -> str:
+        """Return the storage backend key for a stack using documented precedence.
+
+        Documented precedence (highest → lowest):
+
+          1. ``cli_override`` — explicit per-pair value from
+             ``scan_paths:`` ``backend_key:`` (or a future CLI flag).
+             Wins unconditionally when set.
+          2. ``aztfexport_key`` — value parsed from
+             ``<stack_root>/terraform.aztfexport.tf`` (the legacy
+             bash scanner's source).
+          3. ``env_default`` — the basename-style default
+             ``f"{env}.tfstate"``. Used when neither (1) nor (2) is
+             available.
+          4. Fail-closed: when ``env_default`` is empty (caller chose
+             to disable it), return the empty string. The caller is
+             responsible for surfacing the failure — this helper does
+             NOT synthesize a key.
+
+        Replaces the prior ``_resolve_or_synthesize_backend_key``
+        helper, which silently invented a ``CR_<Env>_<project>.tfstate``
+        key when the aztfexport file was missing. Silent synthesis
+        hides configuration bugs; the fail-closed contract surfaces
+        them.
+        """
+        if cli_override:
+            return cli_override
+        if aztfexport_key:
+            return aztfexport_key
+        return env_default
 
     def _shred_plan_artifacts(self, state: _PairState) -> None:
         """Shred tfplan.binary and plan.json for this pair (PCI 10.7 hygiene).
