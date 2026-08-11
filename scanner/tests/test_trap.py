@@ -6,9 +6,13 @@ EXIT INT TERM`` from ``scanner/lib/common.sh``:
 * ``register_traps`` registers atexit + SIGINT + (POSIX) SIGTERM
 * signal handlers run the cleanup callback and re-raise so the process exits
   with the conventional ``128 + signum`` status
-* ``cleanup_ip_whitelist`` is idempotent on a missing ``.whitelist_ip`` and
-  honours the ``subprocess.run`` timeout
 * ``shred_plan_artifacts`` removes ``tfplan.binary`` and ``plan.json``
+
+The storage firewall IP whitelist cleanup (``cleanup_ip_whitelist``) was
+removed in Todo 5: the scanner no longer mutates the Azure storage
+firewall, so there is nothing to revert. The tests here assert that
+the function is no longer importable so a future regression that
+re-adds it is caught early.
 
 Signal-handling tests that send signals to the test process itself would
 interfere with pytest, so any test that needs to verify the exit-status
@@ -22,7 +26,6 @@ import signal
 import subprocess
 import sys
 import textwrap
-import time
 from pathlib import Path
 
 import pytest
@@ -177,41 +180,27 @@ def test_register_traps_skips_sigterm_on_windows():
 
 
 # ---------------------------------------------------------------------------
-# cleanup_ip_whitelist: idempotency + subprocess-timeout behaviour
+# cleanup_ip_whitelist: removed (Todo 5). The scanner no longer mutates
+# the Azure storage firewall, so there is no firewall-revert step in
+# the trap. These tests assert the function is no longer importable so
+# a future regression that re-adds it is caught early.
 # ---------------------------------------------------------------------------
-def test_cleanup_ip_whitelist_idempotent_when_no_file(tmp_path):
-    """Missing ``.whitelist_ip`` must be a no-op that returns ``True``."""
-    result = trap.cleanup_ip_whitelist(tmp_path, state_account="fakeacct")
-    assert result is True
+def test_cleanup_ip_whitelist_no_longer_importable():
+    """``cleanup_ip_whitelist`` was removed; it must NOT be importable.
 
-
-def test_cleanup_ip_whitelist_empty_file_is_idempotent(tmp_path):
-    """An empty ``.whitelist_ip`` must be treated as nothing to clean up."""
-    (tmp_path / ".whitelist_ip").write_text("", encoding="utf-8")
-    result = trap.cleanup_ip_whitelist(tmp_path, state_account="fakeacct")
-    assert result is True
-
-
-def test_cleanup_ip_whitelist_timeout_returns_false(tmp_path, monkeypatch):
-    """When ``subprocess.run`` hits its timeout, cleanup must return ``False``.
-
-    We simulate the hang by replacing ``subprocess.run`` with a function that
-    always raises ``TimeoutExpired`` after sleeping past the caller's
-    ``timeout``. The real implementation must catch this and return
-    ``False`` so the caller knows manual cleanup is required.
+    The scanner is now strictly read-only against Azure — it never
+    mutates the ``state_account`` storage firewall, so there is no
+    firewall-revert step to register in the cleanup trap. A regression
+    that re-adds the function is an audit-grade failure and must fail
+    this test loudly.
     """
-    (tmp_path / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
+    import scanner.trap as trap_module
 
-    def fake_run(*args, **kwargs):
-        # Honour the caller's timeout but always timeout.
-        timeout = kwargs.get("timeout", 10)
-        time.sleep(min(timeout, 0.1))
-        raise subprocess.TimeoutExpired(cmd=args[0] if args else "az", timeout=timeout)
-
-    monkeypatch.setattr(trap.subprocess, "run", fake_run)
-
-    result = trap.cleanup_ip_whitelist(tmp_path, state_account="fakeacct", timeout=1)
-    assert result is False
+    assert not hasattr(trap_module, "cleanup_ip_whitelist"), (
+        "cleanup_ip_whitelist was removed; its re-introduction is a "
+        "firewall-mutation regression. The scanner is read-only against "
+        "Azure."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +232,249 @@ def test_shred_plan_artifacts_idempotent_when_files_missing(tmp_path):
     """Calling shred on a directory with no plan files must succeed."""
     result = trap.shred_plan_artifacts(tmp_path)
     assert result is True
+
+
+# ---------------------------------------------------------------------------
+# safe_unlink: single helper for sensitive-artifact cleanup (Todo 11)
+# ---------------------------------------------------------------------------
+def test_safe_unlink_removes_file_inside_run_dir(tmp_path):
+    """A file inside ``run_dir`` is removed by ``safe_unlink``."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+    target.write_bytes(b"secret-bytes")
+    assert target.exists()
+
+    result = trap.safe_unlink(target, run_dir)
+    assert result is True
+    assert not target.exists()
+
+
+def test_safe_unlink_refuses_path_outside_run_dir(tmp_path):
+    """``safe_unlink`` raises :class:`ValueError` for paths outside ``run_dir``.
+
+    The containment check is the defense-in-depth guarantee: a
+    future bug that smuggles a path outside the per-run directory
+    must be caught at the helper boundary, not silently shredded.
+    We assert both directions of escape (sibling directory + parent
+    traversal) so the test catches regressions in either branch.
+    """
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+
+    # Sibling — clearly outside the run_dir tree.
+    sibling = tmp_path / "outside" / "tfplan.binary"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"nope")
+    with pytest.raises(ValueError):
+        trap.safe_unlink(sibling, run_dir)
+    # The file must NOT have been touched by the failed call.
+    assert sibling.exists()
+
+    # Parent-traversal — ``../foo`` collapses to a sibling of tmp_path,
+    # which is also outside ``run_dir``.
+    traversal = run_dir / ".." / ".." / "evil.binary"
+    if not traversal.exists():
+        traversal.parent.mkdir(parents=True, exist_ok=True)
+        traversal.write_bytes(b"evil")
+    with pytest.raises(ValueError):
+        trap.safe_unlink(traversal, run_dir)
+
+
+def test_safe_unlink_overwrites_with_zeros_when_shred_unavailable(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When shred is unavailable, ``safe_unlink`` overwrites then unlinks.
+
+    We simulate shred-unavailable by monkeypatching ``scanner_ops.run``
+    to raise :class:`scanner.ops.TrustedBinaryMissing` on the
+    ``"shred"`` operation. The helper must catch that, fall back to
+    the overwrite-with-zeros + unlink path, and remove the file.
+
+    The test also asserts that the file contents were zeroed before
+    the unlink — this is the documented best-effort data-minimization
+    step, and the only way the fallback provides any hygiene value at
+    all (the inode name alone disappearing tells an attacker nothing
+    about the prior contents).
+    """
+    from scanner.ops import TrustedBinaryMissing
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+    secret = b"\xDE\xAD\xBE\xEF" * 16  # 64 bytes, definitely non-zero
+    target.write_bytes(secret)
+    assert target.exists()
+
+    # Force shred to look missing by raising TrustedBinaryMissing
+    # from scanner_ops.run. All other ops must still work — we
+    # only intercept the "shred" name.
+    real_ops_run = trap.scanner_ops.run
+
+    def fake_ops_run(name, *args, **kwargs):  # noqa: ANN001
+        if name == "shred":
+            raise TrustedBinaryMissing(
+                "shred is not on PATH (test stub)"
+            )
+        return real_ops_run(name, *args, **kwargs)
+
+    monkeypatch.setattr(trap.scanner_ops, "run", fake_ops_run)
+
+    # Capture log output to assert the JSON-safe log line contains
+    # only the basename and action — never the path tail or contents.
+    captured: list[str] = []
+    real_emit = trap.LOGGER.info
+
+    def capturing_emit(msg, *args, **kwargs):  # noqa: ANN001
+        captured.append(msg % args if args else str(msg))
+        real_emit(msg, *args, **kwargs)
+
+    monkeypatch.setattr(trap.LOGGER, "info", capturing_emit)
+
+    # Run the cleanup.
+    result = trap.safe_unlink(target, run_dir)
+    assert result is True
+    assert not target.exists(), "safe_unlink did not unlink the file"
+
+    # The JSON-safe log line(s) must NOT contain:
+    #   - the contents of the file (the secret bytes)
+    #   - the full path tail (parent directories)
+    # and MUST contain the basename + action.
+    assert captured, "safe_unlink did not emit any log lines"
+    log_blob = "\n".join(captured)
+    assert secret.decode("latin-1") not in log_blob, (
+        "JSON-safe log line leaked file contents"
+    )
+    # The basename must appear at least once in a complete log line.
+    assert '"basename": "tfplan.binary"' in log_blob, (
+        f"log lines missing basename key: {log_blob!r}"
+    )
+    # The action key must be one of the documented values.
+    assert '"action":' in log_blob, (
+        f"log lines missing action key: {log_blob!r}"
+    )
+    # The parent directory name MUST NOT appear in the log blob.
+    # ``run_dir`` is ``<tmp_path>/runs/proj/env`` — none of those
+    # tail segments should appear in any log line.
+    for forbidden in ("/runs/", "/proj/", "/env/", "tmp_path"):
+        if forbidden == "tmp_path":
+            # The literal string "tmp_path" never appears in any log.
+            assert "tmp_path" not in log_blob, (
+                f"log blob leaked internal identifier: {log_blob!r}"
+            )
+        else:
+            assert forbidden not in log_blob, (
+                f"log blob leaked path tail {forbidden!r}: {log_blob!r}"
+            )
+
+
+def test_safe_unlink_returns_true_for_missing_file(tmp_path):
+    """A missing target is treated as success (idempotent)."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "does-not-exist.binary"
+
+    result = trap.safe_unlink(target, run_dir)
+    assert result is True
+
+
+def test_safe_unlink_log_emits_json_safe_action_on_success(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every complete ``safe_unlink`` log line is a single JSON object.
+
+    The scanner's audit-log contract is that the cleanup helper
+    emits one structured JSON object per call — never a free-form
+    string with the file's full path. We capture every ``info`` log
+    call the helper makes, parse the line as JSON, and assert the
+    schema is uniform.
+    """
+    import json
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+    target.write_bytes(b"x" * 32)
+
+    # Force the overwrite+unlink fallback so the test is platform-
+    # independent (does not require shred on PATH).
+    from scanner.ops import TrustedBinaryMissing
+
+    real_ops_run = trap.scanner_ops.run
+
+    def fake_ops_run(name, *args, **kwargs):  # noqa: ANN001
+        if name == "shred":
+            raise TrustedBinaryMissing("shred is not on PATH (test stub)")
+        return real_ops_run(name, *args, **kwargs)
+
+    monkeypatch.setattr(trap.scanner_ops, "run", fake_ops_run)
+
+    captured: list[str] = []
+
+    def capturing_emit(msg, *args, **kwargs):  # noqa: ANN001
+        captured.append(msg % args if args else str(msg))
+
+    monkeypatch.setattr(trap.LOGGER, "info", capturing_emit)
+
+    trap.safe_unlink(target, run_dir)
+
+    # Every captured line must be a single JSON object with at least
+    # the documented keys. We don't require the helper to emit
+    # exactly one line — multiple lines (overwrite, complete) are
+    # fine — but each MUST be parseable as JSON.
+    assert captured, "no log lines captured"
+    for line in captured:
+        # Let ``json.loads`` raise ``JSONDecodeError`` naturally on a
+        # non-JSON line — pytest surfaces the failure with the line
+        # content. SonarCloud S5774 prefers no try/except + manual
+        # ``pytest.fail`` when the exception already provides the
+        # failure signal. Every safe_unlink emission MUST be JSON
+        # (free-form lines are not allowed).
+        obj = json.loads(line)
+        assert "basename" in obj, f"log line missing basename: {obj!r}"
+        assert "action" in obj, f"log line missing action: {obj!r}"
+        assert "event" in obj, f"log line missing event: {obj!r}"
+
+
+def test_create_secure_file_creates_empty_file(tmp_path):
+    """``create_secure_file`` touches an empty file inside ``run_dir``."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+
+    trap.create_secure_file(target, run_dir)
+
+    assert target.exists()
+    assert target.stat().st_size == 0
+
+
+def test_create_secure_file_refuses_traversal(tmp_path):
+    """``create_secure_file`` raises :class:`ValueError` for paths outside run_dir."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError):
+        trap.create_secure_file(tmp_path / "outside" / "evil.binary", run_dir)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod assertion")
+def test_create_secure_file_applies_0o600_on_posix(tmp_path):
+    """On POSIX, the helper applies 0o600 to the created file."""
+    import stat
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+
+    trap.create_secure_file(target, run_dir)
+    mode = target.stat().st_mode
+    # Owner read+write only; group and other bits zero.
+    assert mode & stat.S_IRUSR, "owner-read bit missing"
+    assert mode & stat.S_IWUSR, "owner-write bit missing"
+    assert not (mode & stat.S_IRWXG), "group bits must be zero"
+    assert not (mode & stat.S_IRWXO), "other bits must be zero"
 
 
 # ---------------------------------------------------------------------------
@@ -389,19 +621,19 @@ def test_windows_atexit_path_runs_cleanup_on_normal_exit(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Cleanup side-effect: .whitelist_ip removal after signal
+# Cleanup side-effect: marker removal after signal
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only SIGTERM trap")
-def test_cleanup_removes_whitelist_ip_after_sigterm(tmp_path):
-    """End-to-end: SIGTERM triggers cleanup, cleanup removes .whitelist_ip.
+def test_cleanup_removes_marker_after_sigterm(tmp_path):
+    """End-to-end: SIGTERM triggers cleanup, cleanup removes a marker file.
 
-    We can't actually call ``cleanup_ip_whitelist`` from inside the handler
-    because it shells out to ``az`` (which is unlikely to be available in the
-    test environment). Instead we register a small cleanup callback that
-    deletes the marker file, then send SIGTERM and assert the marker is gone
-    — proving the handler actually ran.
+    We register a small cleanup callback that deletes the marker file,
+    then send SIGTERM and assert the marker is gone — proving the
+    handler actually ran. (The prior firewall-revert test name was
+    removed when ``cleanup_ip_whitelist`` itself was deleted in Todo 5;
+    the underlying trap mechanism is unchanged.)
     """
-    marker = tmp_path / "whitelist_ip_removed.marker"
+    marker = tmp_path / "cleanup_removed.marker"
     marker.touch()
     assert marker.exists()
 

@@ -15,6 +15,22 @@ fit together, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 This project follows the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md).
 By participating, you agree to abide by its terms.
 
+## Safety-critical changes
+
+Changes to any of the following scanner modules require two independent
+maintainer approvals before merge:
+
+- `scanner/safety.py`
+- `scanner/ops.py`
+- `scanner/orchestrator.py`
+- `scanner/trap.py`
+- `scanner/cli.py`
+- `scanner/discovery.py`
+
+This expectation is represented in `.github/CODEOWNERS`; branch protection
+settings enforce the required approvals. Reviewers should specifically verify
+that the read-only safety invariant and cleanup behavior remain intact.
+
 ## Project structure
 
 ```
@@ -295,7 +311,7 @@ All three must pass before a PR is mergeable.
   `PYTHONUTF8=1`, `sys.stdout.reconfigure`) is mandatory in every
   module that opens files or prints.
 - **Process-spawn convention**: every external command MUST go
-  through the process-spawn helpers in `scanner/orchestrator.py`
+  through the typed operation registry in `scanner/ops.py`
   so the `SafetyGuard.refuse_if_mutating` invariant is enforced.
   Do not invoke `subprocess.run` (or `os.system`, or
   `subprocess.Popen`) directly from driver code — you will bypass

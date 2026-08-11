@@ -15,11 +15,11 @@ every Checkov finding to a specific clause in a compliance framework
 (PCI DSS v4.0.1 by default; SOC 2, CIS Azure, NIST 800-53, ISO 27001
 via custom mapping packs).
 
-The scanner is **read-only against Azure**. The only Azure mutation
-is adding the runner's public IP to a storage-account firewall
-(so `terraform plan` can read remote state); the IP is removed
-automatically on exit. See [Safety Model](SAFETY_MODEL.md) for the
-complete invariant.
+The scanner is **read-only against Azure**. It does not change storage
+firewall rules. If a tier needs access that is unavailable, Pacioli emits
+an `ACCESS REQUIRED` alert and skips the dependent layer. Arrange access
+outside Pacioli, then rerun the scan. See [Safety Model](SAFETY_MODEL.md)
+for the complete invariant.
 
 ## Quick start
 
@@ -48,9 +48,12 @@ pacioli scan --project myapp --env prod
 | 2. Plan | `pacioli scan --tier plan` | Adds `terraform init` + `terraform plan -out=tfplan.binary` so Checkov can inspect *resolved* values (catches things the source can't see, like CMK buried in a module output). | Monthly deep reviews, audit prep. |
 | 3. State | `pacioli scan --tier state` | Adds `.tfstate` blob download from Azure Storage and emits a `drift_report.json` comparing source plan vs state plan. Catches `ignore_changes` drift. | Triage drift incidents, after manual Azure changes. |
 
-Tier 1 is the right default. Tier 2/3 cost minutes per env (provider
-download + state refresh + storage firewall IP) and require the runner
-to be authenticated to Azure.
+Tier 1 is the right default. Tier 2/3 may contact the Terraform registry
+for provider and module resolution, and require the runner to have the
+configured access needed for their inputs. Plan-tier execution uses
+`terraform init -backend=false` and `terraform plan -lock=false -refresh=false`;
+it is not offline. Use `--registry-mirror` with an isolated
+`TF_CLI_CONFIG_FILE` when registry resolution must be constrained.
 
 ## CI gate
 
@@ -122,7 +125,6 @@ After a successful scan, the run dir contains:
 ```
 ~/.pacioli/runs/current/<run_id>/
   .scope_pairs.tsv                # Tab-separated (project TAB env) pairs scanned
-  .whitelist_ip                  # IP added to the storage firewall (tier 2/3 only)
   <project>/<env>/
     results_terraform_source.sarif   # Tier 1 (always, for source-layer)
     results_paac.sarif                # Custom PCI checks (always)
@@ -199,7 +201,7 @@ Each layer produces its own SARIF file; the aggregator walks all five
      the plan reflects the *next-apply* state, including
      `terraform refresh`-reimported values.
    - Does NOT catch `ignore_changes` drift (see layer 5).
-   - Requires storage firewall whitelist.
+    - Does not require Pacioli to change firewall rules.
    - Output: `<env>/results_terraform_plan.sarif`.
 
 5. **State-as-plan scan** (`--framework terraform_plan` on state JSON,
@@ -393,29 +395,6 @@ Every 90 days:
    and diff against the prior quarter's snapshot. Any new rule id
    needs a row in `pci_mapping.yaml` and a severity entry in
    `SEVERITY_OVERRIDE` if the resource type is in scope.
-
-## Cleaning up stale storage-firewall IPs
-
-The scanner is supposed to remove the runner's public IP from the
-storage firewall on exit. If a run was killed mid-flight (SIGKILL,
-OOM kill, network partition), the IP may have been left behind.
-Manual cleanup:
-
-```bash
-# List IPs on the firewall
-az storage account network-rule list \
-    --account-name "$PACIOLI_STATE_STORAGE_ACCOUNT" \
-    --query "ipRules[].ipAddressOrRange" -o tsv
-
-# Remove a specific IP
-az storage account network-rule remove \
-    --account-name "$PACIOLI_STATE_STORAGE_ACCOUNT" \
-    --ip-address "<stale-ip>" --output none
-```
-
-The storage account name is set via `PACIOLI_STATE_STORAGE_ACCOUNT`
-(no default; the scanner refuses tier 2/3 and audit-mode runs if it
-is unset).
 
 ## Adding a new project to scope
 

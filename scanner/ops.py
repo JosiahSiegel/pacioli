@@ -1,0 +1,541 @@
+"""scanner/ops.py — Typed operation registry for production subprocess calls.
+
+Canonical entry point for every production subprocess. Each named
+:class:`Operation` carries exact executable identity, exact argv
+schema, per-op tier, timeout, env allowlist, cwd policy, mutation
+class, and cleanup obligation. The existing refusal matrix in
+:mod:`scanner.safety` is invoked from :func:`run` as defense-in-depth.
+
+Why: previous call sites built argv inline and relied on regex as
+the primary control. Regex is a coarse net — this registry makes
+the allowlist the primary control. A new mutation requires a new
+registered operation; you cannot smuggle it in by appending a flag.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Final, Literal
+
+# ``MutatingOperationRefused`` is intentionally re-exported from this
+# module: ``_self_test`` below resolves it as
+# ``_self.MutatingOperationRefused`` off the module namespace, which only
+# exists because of this import. Removing it breaks the self-test.
+from scanner.safety import MutatingOperationRefused, SafetyGuard  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# Exceptions + schema sentinels
+# ---------------------------------------------------------------------------
+
+class OpsError(Exception):
+    """Base class for every :mod:`scanner.ops` raised error."""
+
+
+class UnknownOperation(OpsError):
+    """Raised when :func:`run` is called with an unregistered name."""
+
+
+class ArgvSchemaViolation(OpsError):
+    """Raised when caller-supplied argv does not match the registered schema."""
+
+
+class TrustedBinaryMissing(OpsError):
+    """Raised when :func:`shutil.which` returns ``None`` for the op's executable."""
+
+
+class TierViolation(OpsError):
+    """Raised when the caller's tier is not in the op's ``allowed_tiers``."""
+
+
+# Sentinel for ``Operation.argv_schema`` positions that accept arbitrary
+# caller-supplied tokens.
+ANY: Final[str] = "ANY"
+
+# Operation names referenced more than once in this module. Centralising
+# them keeps the registry table and self-test assertions in lockstep —
+# a typo would surface immediately rather than as a confusing
+# ``UnknownOperation`` from a mismatched string.
+OP_INIT_LOCAL: Final[str] = "terraform.init_local"
+OP_TEST_DANGEROUS_APPLY: Final[str] = "test.dangerous_apply"
+
+# Common ``terraform init`` flags reused by the schema + self-test
+# argv tuple + the length-mismatch assertion. Literal for literal.
+ARG_NO_INPUT: Final[str] = "-input=false"
+ARG_NO_BACKEND: Final[str] = "-backend=false"
+
+Tier = Literal["source", "plan", "state"]
+CwdPolicy = Literal["caller", "run_dir", "stack_root"]
+MutationClass = Literal["read", "write", "network", "mutate_azure"]
+CleanupObligation = Literal["none", "shred", "unlink"]
+
+
+# Default env blocklist applied to every operation. ``TF_PLUGIN_CACHE_DIR``
+# causes Terraform to use a stale plugin cache if it leaks through;
+# ``TF_DATA_DIR`` and ``TF_CLI_CONFIG_FILE`` redirect Terraform's own
+# state store. The scanner drives ``init``/``plan`` explicitly via the
+# registry, so these ambient hints must never reach any op.
+_DEFAULT_ENV_BLOCKLIST: Final[tuple[str, ...]] = (
+    "TF_PLUGIN_CACHE_DIR",
+    "TF_DATA_DIR",
+    "TF_CLI_CONFIG_FILE",
+    "TF_INPUT",
+    "TF_VAR_",
+    "TF_CLI_ARGS",
+)
+
+
+# Operation dataclass
+
+
+@dataclass(frozen=True)
+class Operation:
+    """A typed, registered subprocess the scanner is allowed to launch.
+
+    ``argv_schema`` is walked position-by-position against the caller's
+    variable tail: literal tokens must match exactly, :data:`ANY`
+    tokens accept any caller value.
+    """
+
+    name: str
+    executable: str
+    argv_schema: tuple[str, ...]
+    allowed_tiers: tuple[Tier, ...]
+    default_timeout: int
+    mutation_class: MutationClass
+    cleanup_obligation: CleanupObligation
+    cwd_policy: CwdPolicy = "caller"
+    env_allowlist: tuple[str, ...] = field(default_factory=tuple)
+    env_blocklist: tuple[str, ...] = field(
+        default_factory=lambda: _DEFAULT_ENV_BLOCKLIST
+    )
+
+
+# Operation registry
+#
+# allow: SIZE_OK — 10 ops × ~10 lines each is a pure data table;
+# splitting would scatter the safety-critical operation list across
+# files without reducing its size.
+
+OPERATION_REGISTRY: Final[dict[str, Operation]] = {
+    # Azure storage blob ops (state-only download; plan/state list).
+    "az.blob_download": Operation(
+        name="az.blob_download", executable="az",
+        argv_schema=("storage", "blob", "download",
+                     "--account-name", ANY, "--container-name", ANY,
+                     "--name", ANY, "--file", ANY,
+                     "--auth-mode", "login", "--output", "none"),
+        allowed_tiers=("state",), default_timeout=60,
+        mutation_class="read", cleanup_obligation="none",
+        env_allowlist=("AZURE_CONFIG_DIR", "AZURE_CORE_OUTPUT"),
+    ),
+    "az.blob_list": Operation(
+        name="az.blob_list", executable="az",
+        argv_schema=("storage", "blob", "list",
+                     "--account-name", ANY, "--container-name", ANY,
+                     "--auth-mode", "login", "--query", ANY, "-o", "tsv"),
+        allowed_tiers=("plan", "state"), default_timeout=60,
+        mutation_class="read", cleanup_obligation="none",
+        env_allowlist=("AZURE_CONFIG_DIR", "AZURE_CORE_OUTPUT"),
+    ),
+    # Terraform (tier=plan/state only). Argv mirrors scanner/orchestrator.py.
+    OP_INIT_LOCAL: Operation(
+        name=OP_INIT_LOCAL, executable="terraform",
+        argv_schema=(
+            "-chdir", ANY, "init",
+            ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color",
+        ),
+        allowed_tiers=("plan", "state"), default_timeout=300,
+        mutation_class="network", cleanup_obligation="none",
+        env_allowlist=("*",),
+    ),
+    "terraform.plan_local": Operation(
+        name="terraform.plan_local", executable="terraform",
+        argv_schema=(
+            "-chdir", ANY, "plan",
+            "-no-color", ANY,
+            "-lock=false", "-refresh=false",
+        ),
+        allowed_tiers=("plan", "state"), default_timeout=600,
+        mutation_class="network", cleanup_obligation="shred",
+        env_allowlist=("*",),
+    ),
+    "terraform.show_json": Operation(
+        name="terraform.show_json", executable="terraform",
+        argv_schema=("-chdir", ANY, "show", "-json", ANY),
+        allowed_tiers=("plan", "state"), default_timeout=120,
+        mutation_class="read", cleanup_obligation="none",
+        env_allowlist=("*",),
+    ),
+    # Python helper scripts (state-only). Argv mirrors scanner/orchestrator.py.
+    "python.tfstate_to_plan": Operation(
+        name="python.tfstate_to_plan", executable=sys.executable,
+        argv_schema=(ANY, ANY, ANY),
+        allowed_tiers=("state",), default_timeout=120,
+        mutation_class="write", cleanup_obligation="shred",
+        env_allowlist=("PYTHONPATH", "PYTHONHOME"),
+    ),
+    "python.drift_report": Operation(
+        name="python.drift_report", executable=sys.executable,
+        argv_schema=(ANY, ANY, ANY, ANY),
+        allowed_tiers=("state",), default_timeout=120,
+        mutation_class="write", cleanup_obligation="none",
+        env_allowlist=("PYTHONPATH", "PYTHONHOME"),
+    ),
+    # Secure file removal. Argv mirrors scanner/trap.py (`shred -u <path>`).
+    "shred": Operation(
+        name="shred", executable="shred",
+        argv_schema=("-u", ANY),
+        allowed_tiers=("plan", "state"), default_timeout=5,
+        mutation_class="write", cleanup_obligation="none",
+        env_allowlist=(),
+    ),
+}
+
+
+# Public API: run()
+
+
+# Public API: run()
+
+
+def run(
+    name: str,
+    *args: str,
+    tier: str = "source",
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess:
+    """Execute the registered :class:`Operation` named ``name``.
+
+    Canonical subprocess entry point. Validates tier, argv schema,
+    binary identity; scrubs env; calls :func:`subprocess.run` with
+    ``check=False``. Raises UnknownOperation, TierViolation,
+    TrustedBinaryMissing, ArgvSchemaViolation, MutatingOperationRefused,
+    or subprocess.TimeoutExpired.
+    """
+    op = _lookup(name)
+    _check_tier(op, tier)
+    _validate_argv(op, args)
+    executable = _resolve_binary(op)
+    final_argv = _build_argv(executable, args)
+
+    # Defense-in-depth: existing refusal matrix still fires on the
+    # composed argv so a future schema change can't widen a mutating
+    # op past the regex net.
+    SafetyGuard().refuse_if_mutating(" ".join(final_argv))
+
+    return subprocess.run(
+        final_argv,
+        cwd=_resolve_cwd(cwd),
+        env=_build_env(op, env),
+        timeout=timeout if timeout is not None else op.default_timeout,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+# Internal helpers (single-responsibility; each ≤ 1 job)
+
+
+def _lookup(name: str) -> Operation:
+    """Return the registered :class:`Operation` for ``name``."""
+    try:
+        return OPERATION_REGISTRY[name]
+    except KeyError as exc:
+        raise UnknownOperation(
+            f"unknown operation: {name!r}; "
+            f"registered: {sorted(OPERATION_REGISTRY)}"
+        ) from exc
+
+
+def _check_tier(op: Operation, tier: str) -> None:
+    """Raise :class:`TierViolation` if ``tier`` is not in ``op.allowed_tiers``."""
+    if tier not in op.allowed_tiers:
+        raise TierViolation(
+            f"operation {op.name!r} does not permit tier {tier!r}; "
+            f"allowed tiers: {op.allowed_tiers}"
+        )
+
+
+def _validate_argv(op: Operation, args: tuple[str, ...]) -> None:
+    """Reject argv that does not match ``op.argv_schema``.
+
+    Literal tokens must match the caller argv exactly; :data:`ANY`
+    slots accept any caller token. Caller argv length must equal
+    ``len(op.argv_schema)``.
+
+    Iterates over the schema tuple (NOT over ``args``) using
+    ``enumerate`` and ``zip``. The loop bound is the static schema
+    tuple length; SonarCloud ``pythonsecurity:S6680`` cannot trace
+    ``op.argv_schema`` to a static literal because it flows from
+    ``OPERATION_REGISTRY[name]`` where ``name`` is the caller's op
+    name. The narrow ``sonar-project.properties`` E7 suppression
+    documents this as a documented false positive.
+    """
+    schema = op.argv_schema
+    schema_len = len(schema)
+    if len(args) != schema_len:
+        raise ArgvSchemaViolation(
+            f"operation {op.name!r} argv length mismatch: "
+            f"expected {schema_len} tokens, got {len(args)}: {args!r}"
+        )
+    for i, (expected, actual) in enumerate(zip(schema, args)):
+        if expected == ANY:
+            continue
+        if actual != expected:
+            raise ArgvSchemaViolation(
+                f"operation {op.name!r} argv mismatch at position {i}: "
+                f"expected {expected!r}, got {actual!r}"
+            )
+
+def _resolve_binary(op: Operation) -> str:
+    """Return the absolute path of ``op.executable`` via :func:`shutil.which`."""
+    resolved = shutil.which(op.executable)
+    if resolved is None:
+        raise TrustedBinaryMissing(
+            f"operation {op.name!r} requires executable {op.executable!r} "
+            f"on PATH; not found"
+        )
+    return resolved
+
+
+def _build_argv(executable: str, args: tuple[str, ...]) -> list[str]:
+    """Compose the final argv list passed to :func:`subprocess.run`.
+
+    Every schema slot consumes one caller token; :data:`ANY` is a
+    validation marker (consumed by :func:`_validate_argv`), not a
+    runtime token. The :func:`_validate_argv` call earlier in
+    :func:`run` already pins ``len(args) == len(op.argv_schema)``,
+    so the spread here is bounded by the static schema length.
+    """
+    return [executable, *args]
+
+
+def _build_env(op: Operation, caller_env: dict[str, str] | None) -> dict[str, str]:
+    """Compose the per-op environment.
+
+    Ambient ``os.environ`` minus ``op.env_blocklist``, merged with
+    caller ``env``, then restricted to ``op.env_allowlist`` (pass-
+    through if ``"*"``).
+    """
+    ambient = {k: v for k, v in os.environ.items() if k not in op.env_blocklist}
+    if caller_env:
+        ambient.update(caller_env)
+    if op.env_allowlist == ("*",):
+        return ambient
+    allowed = set(op.env_allowlist)
+    return {k: v for k, v in ambient.items() if k in allowed}
+
+
+def _resolve_cwd(caller_cwd: Path | None) -> Path | None:
+    """TODO 5 wires ``"run_dir"`` and ``"stack_root"``; today every policy
+    falls back to the caller-supplied cwd."""
+    return caller_cwd
+
+
+# Self-test (no third-party deps; pure stdlib)
+
+
+def _expect_raises(
+    label: str,
+    exc_type: type[BaseException],
+    fn,
+    *args,
+    ops_module: object,
+    **kwargs,
+) -> bool:
+    """Run ``fn(*args, **kwargs)`` and assert it raises ``exc_type``.
+
+    Catches :class:`OpsError` (the common base for every typed error
+    :func:`run` may raise) rather than ``BaseException`` so a stray
+    ``KeyboardInterrupt`` or ``SystemExit`` still propagates. SonarCloud
+    S2738 demands a specific catch; ``OpsError`` is the right
+    granularity because every expected exception in this self-test
+    inherits from it.
+
+    ``ops_module`` is the runtime-resolved :mod:`scanner.ops` reference
+    (passed in by :func:`_self_test` to defeat the
+    ``__main__``-vs-``scanner.ops`` class-identity split). The
+    except clause uses ``ops_module.OpsError`` rather than the local
+    module's ``OpsError`` for the same reason — the exception that
+    ``_self.run`` raises is built from ``ops_module``'s globals.
+    """
+    module_ops_error = getattr(ops_module, "OpsError")
+    try:
+        fn(*args, **kwargs)
+    except module_ops_error as exc:  # type: ignore[misc]
+        if isinstance(exc, exc_type):
+            return True
+        print(
+            f"FAIL: {label}: wrong exception type: "
+            f"got {type(exc).__name__}, expected {exc_type.__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    print(f"FAIL: {label}: expected {exc_type.__name__}, no exception raised",
+          file=sys.stderr)
+    return False
+
+
+def _self_test() -> bool:
+    """Exercise the registry end-to-end. Returns True on success.
+
+    Verifies: registry shape, UnknownOperation, ArgvSchemaViolation
+    (literal mismatch + length), TierViolation, TrustedBinaryMissing,
+    defense-in-depth refusal, and TF_PLUGIN_CACHE_DIR blocklist.
+
+    Exception classes are pulled via :func:`getattr` off the ``_self``
+    module reference so we defeat the ``__main__``-vs-``scanner.ops``
+    class-identity split (which would otherwise make ``isinstance``
+    return ``False`` for same-named classes imported under both names).
+    ``getattr`` also avoids local CamelCase variable names that would
+    violate SonarCloud naming conventions (S117 / python:S117).
+    """
+    import scanner.ops as _self  # late import: avoid module-load cycle
+
+    def _exc(name: str) -> type[BaseException]:
+        """Return the exception class from ``_self`` by name.
+
+        Lookup at runtime defeats the ``__main__``-vs-``scanner.ops``
+        class-identity split; using :func:`getattr` keeps the variable
+        name lowercase so SonarCloud's naming rule is satisfied.
+        """
+        return getattr(_self, name)
+
+    ok = True
+    # Full valid argv for terraform.init_local. Schema:
+    #   ("-chdir", ANY, "init",
+    #    ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color") — 6 slots.
+    # Caller supplies ALL 6 tokens (literals must match exactly).
+    init_args = (
+        "-chdir", "/some/path", "init",
+        ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color",
+    )
+
+    # 1. Registry shape.
+    for name, op in OPERATION_REGISTRY.items():
+        if not op.argv_schema or op.default_timeout <= 0 or op.executable == "":
+            print(f"FAIL: {name}: malformed entry", file=sys.stderr)
+            ok = False
+
+    # 2. UnknownOperation.
+    ok &= _expect_raises(
+        "UnknownOperation", _exc("UnknownOperation"), _self.run,
+        "nope", "x", ops_module=_self,
+    )
+
+    # 3. ArgvSchemaViolation (literal mismatch at position 0: "-chdir"
+    # replaced with "-WRONG"). Pass a valid tier so the tier check
+    # doesn't fire first.
+    ok &= _expect_raises(
+        "ArgvSchemaViolation-literal",
+        _exc("ArgvSchemaViolation"),
+        _self.run,
+        OP_INIT_LOCAL,
+        "-WRONG", "/some/path", "init",
+        ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color",
+        tier="plan",
+        ops_module=_self,
+    )
+
+    # 4. ArgvSchemaViolation (length mismatch — zero args).
+    ok &= _expect_raises(
+        "ArgvSchemaViolation-length",
+        _exc("ArgvSchemaViolation"),
+        _self.run,
+        OP_INIT_LOCAL, tier="plan",
+        ops_module=_self,
+    )
+
+    # 5. TierViolation: terraform.init_local does not allow tier=source.
+    ok &= _expect_raises(
+        "TierViolation",
+        _exc("TierViolation"),
+        _self.run,
+        OP_INIT_LOCAL, *init_args, tier="source",
+        ops_module=_self,
+    )
+
+    # 6. TrustedBinaryMissing: monkeypatch _self.shutil.which so
+    # _self.run's lookup of ``shutil.which`` resolves to None. We
+    # patch the module-level binding on _self.shutil (not this
+    # module's local ``shutil``) because _self.run looks up the
+    # attribute via its own module's namespace.
+    original_which = _self.shutil.which
+    _self.shutil.which = lambda _name: None  # type: ignore[assignment]
+    try:
+        ok &= _expect_raises(
+            "TrustedBinaryMissing",
+            _exc("TrustedBinaryMissing"),
+            _self.run,
+            OP_INIT_LOCAL, *init_args, tier="plan",
+            ops_module=_self,
+        )
+    finally:
+        _self.shutil.which = original_which  # type: ignore[assignment]
+
+    # 7. Defense-in-depth: temp op whose argv composes to a refused
+    # pattern. Patch _self.OPERATION_REGISTRY (the lookup _self.run
+    # consults), not the local OPERATION_REGISTRY. Schema is fully
+    # literal ("apply", "-auto-approve") so caller must pass both.
+    saved = dict(_self.OPERATION_REGISTRY)
+    _self.OPERATION_REGISTRY[OP_TEST_DANGEROUS_APPLY] = Operation(
+        name=OP_TEST_DANGEROUS_APPLY, executable="terraform",
+        argv_schema=("apply", "-auto-approve"),
+        allowed_tiers=("plan", "state"), default_timeout=60,
+        mutation_class="mutate_azure", cleanup_obligation="none",
+        env_allowlist=("*",),
+    )
+    try:
+        try:
+            _self.run(OP_TEST_DANGEROUS_APPLY, "apply", "-auto-approve", tier="plan")
+        except (_exc("MutatingOperationRefused"), _exc("TrustedBinaryMissing")):
+            pass  # both acceptable: refusal OR no terraform binary
+        else:
+            print("FAIL: defense-in-depth refusal did not fire", file=sys.stderr)
+            ok = False
+    finally:
+        _self.OPERATION_REGISTRY.clear()
+        _self.OPERATION_REGISTRY.update(saved)
+
+    # 8. Env blocklist strips TF_PLUGIN_CACHE_DIR. Use a private
+    # per-run temp dir (NOT ``/tmp``) so the test path is itself
+    # safe; SonarCloud flags the public ``/tmp`` path as a publicly
+    # writable directory.
+    saved_environ = os.environ.copy()
+    private_tmp = tempfile.mkdtemp(prefix="pacioli-selftest-")
+    try:
+        os.environ["TF_PLUGIN_CACHE_DIR"] = os.path.join(
+            private_tmp, "plugin-cache-should-not-leak"
+        )
+        cleaned = _self._build_env(OPERATION_REGISTRY[OP_INIT_LOCAL], caller_env=None)
+        if "TF_PLUGIN_CACHE_DIR" in cleaned:
+            print("FAIL: TF_PLUGIN_CACHE_DIR not stripped from env", file=sys.stderr)
+            ok = False
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_environ)
+        shutil.rmtree(private_tmp, ignore_errors=True)
+
+    return ok
+
+
+# CLI entry
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        if _self_test():
+            print("ops_selftest: PASS")
+            sys.exit(0)
+        print("ops_selftest: FAIL", file=sys.stderr)
+        sys.exit(1)
+    print("usage: python -m scanner.ops --self-test", file=sys.stderr)
+    sys.exit(2)

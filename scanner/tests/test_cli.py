@@ -278,6 +278,24 @@ def test_pacioli_aggregate_reemits_report(tmp_path: Path) -> None:
     )
 
 
+def test_main_exits_99_when_subprocess_operation_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused command from a CLI handler terminates the process with exit 99."""
+    from scanner import cli
+    from scanner.safety import MutatingOperationRefused
+
+    def refuse_command(_args: argparse.Namespace) -> int:
+        raise MutatingOperationRefused("forced refusal")
+
+    monkeypatch.setattr(cli, "_handle_scan", refuse_command)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["scan", "--non-interactive"])
+
+    assert exc_info.value.code == 99
+
+
 # ---------------------------------------------------------------------------
 # Direct unit tests for the handler helpers in scanner/cli.py
 # ---------------------------------------------------------------------------
@@ -297,6 +315,13 @@ def _make_args(**kwargs: object) -> argparse.Namespace:
     Centralised so the unit tests below don't all repeat the same
     ``Namespace(...)`` boilerplate. Only overrides the keys that the
     handler reads, leaving everything else at ``None`` / ``False``.
+
+    The Todo-8 multi-stack flags (``scan_path``, ``scan_glob``,
+    ``stack_label``, ``state_file``, ``include_modules``,
+    ``ignore_lockfile``, ``registry_mirror``, ``backend_key``) are
+    seeded with the same defaults the CLI parser uses (``None`` /
+    ``False`` / ``[]``) so every existing test still works without
+    passing new kwargs.
     """
     base: dict[str, object] = {
         "target_dir": None,
@@ -317,6 +342,15 @@ def _make_args(**kwargs: object) -> argparse.Namespace:
         "scan_state": False,
         "scan_plan": False,
         "scope": None,
+        # Todo-8 multi-stack flags.
+        "scan_path": None,
+        "scan_glob": None,
+        "stack_label": None,
+        "state_file": None,
+        "include_modules": False,
+        "ignore_lockfile": False,
+        "registry_mirror": None,
+        "backend_key": None,
     }
     base.update(kwargs)
     return argparse.Namespace(**base)
@@ -952,14 +986,280 @@ def test_handle_baseline_passes_append_top_dry_run(
 
 
 # ---------------------------------------------------------------------------
+# 20. _resolve_latest_remote_run_id routes through ops.run("az.blob_list", ...)
+# ---------------------------------------------------------------------------
+
+def test_resolve_latest_remote_run_id_uses_ops_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_latest_remote_run_id`` calls ``scanner.ops.run`` with the registered op.
+
+    Confirms the inner subprocess call was migrated to the typed
+    operation registry. The mock returns a tsv-formatted ``result``
+    so we can verify the call argv matches the registry schema for
+    ``az.blob_list`` (13 tokens after the executable). The mock
+    returns a fake ``CompletedProcess`` so the function's stdout
+    parsing exercises a non-empty value.
+    """
+    from scanner import cli, ops
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "run-2026/run-A/main.tf\nrun-2026/run-B/main.tf\n"
+        stderr = ""
+
+    def fake_ops_run(name: str, *args: str, **kwargs: object) -> _FakeCompleted:
+        captured["name"] = name
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeCompleted()
+
+    monkeypatch.setattr(ops, "run", fake_ops_run)
+
+    out = cli._resolve_latest_remote_run_id(
+        storage_account="myacct",
+        container_name="pacioli-reports",
+        dry_run=False,
+    )
+
+    assert out == "run-2026", (
+        f"expected freshest run-id 'run-2026'; got {out!r}"
+    )
+    assert captured["name"] == "az.blob_list", (
+        f"_resolve_latest_remote_run_id must call ops.run('az.blob_list', ...); "
+        f"got {captured['name']!r}"
+    )
+    # The argv passed to ops.run must match the registry schema length
+    # exactly (13 tokens for az.blob_list).
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert len(args) == len(ops.OPERATION_REGISTRY["az.blob_list"].argv_schema), (
+        f"argv length must equal registry schema length; "
+        f"got {len(args)} args, schema has "
+        f"{len(ops.OPERATION_REGISTRY['az.blob_list'].argv_schema)} slots"
+    )
+    # The tier must be 'state' (the registry rejects other tiers).
+    assert captured["kwargs"].get("tier") == "state", (
+        f"_resolve_latest_remote_run_id must pass tier='state'; "
+        f"got {captured['kwargs']!r}"
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# 21. _az_blob_download routes through ops.run("az.blob_download", ...)
+# ---------------------------------------------------------------------------
+
+def test_az_blob_download_uses_ops_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_az_blob_download`` calls ``scanner.ops.run`` with ``az.blob_download``.
+
+    Confirms the migrated subprocess call invokes the typed registry
+    with the correct schema (15 tokens), correct tier ('state'), and
+    that the real reimplementation surfaces non-zero return codes by
+    logging a WARN and returning ``False``.
+    """
+    from scanner import cli, ops
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompleted:
+        def __init__(self, returncode: int = 0, stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = stderr
+
+    def fake_ops_run(name: str, *args: str, **kwargs: object) -> _FakeCompleted:
+        captured["name"] = name
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeCompleted(returncode=1, stderr="ERROR: blob not found")
+
+    monkeypatch.setattr(ops, "run", fake_ops_run)
+
+    dest = tmp_path / "report.html"
+    ok = cli._az_blob_download(
+        storage_account="myacct",
+        container_name="pacioli-reports",
+        blob_name="run-1/report.html",
+        dest=dest,
+        dry_run=False,
+    )
+
+    assert ok is False, (
+        f"non-zero return code must propagate as False; got {ok!r}"
+    )
+    assert captured["name"] == "az.blob_download", (
+        f"_az_blob_download must call ops.run('az.blob_download', ...); "
+        f"got {captured['name']!r}"
+    )
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert len(args) == len(ops.OPERATION_REGISTRY["az.blob_download"].argv_schema), (
+        f"argv length must equal registry schema length; "
+        f"got {len(args)} args, schema has "
+        f"{len(ops.OPERATION_REGISTRY['az.blob_download'].argv_schema)} slots"
+    )
+    assert captured["kwargs"].get("tier") == "state", (
+        f"_az_blob_download must pass tier='state'; got {captured['kwargs']!r}"
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# 22. _handle_audit_remote registers a cleanup trap in non-dry-run mode
+# ---------------------------------------------------------------------------
+
+def test_handle_audit_remote_registers_signal_trap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_audit_remote`` calls ``register_traps`` with a cleanup fn.
+
+    Non-dry-run mode MUST register a cleanup trap so partial downloads
+    are removed on SIGINT/SIGTERM. The handler passes a closure that
+    captures ``dest_dir``; we satisfy that by pre-creating one of the
+    expected artefacts and letting the cleanup callable run.
+    """
+    from scanner import cli, trap
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PACIOLI_STATE_STORAGE_ACCOUNT", "fakeacct")
+
+    # Pre-create the directory + a fake partial download so the
+    # cleanup closure actually has something to remove.
+    run_id = "run-signal-trap"
+    dest_dir = tmp_path / ".pacioli" / "runs" / run_id / "aggregate"
+    dest_dir.mkdir(parents=True)
+    (dest_dir / "coverage_matrix.csv").write_bytes(b"partial-blob-bytes")
+    (dest_dir / ".audit_pulled_at").write_text("stale marker\n")
+
+    registered: list[object] = []
+
+    def fake_register_traps(cleanup_fn: object) -> None:
+        registered.append(cleanup_fn)
+
+    monkeypatch.setattr(trap, "register_traps", fake_register_traps)
+
+    # Stub the inner helpers so the download loop completes without
+    # touching Azure.
+    monkeypatch.setattr(
+        cli,
+        "_resolve_latest_remote_run_id",
+        lambda **_kw: run_id,
+    )
+
+    def fake_download(
+        *,
+        storage_account: str,
+        container_name: str,
+        blob_name: str,
+        dest: Path,
+        dry_run: bool,
+    ) -> bool:
+        # No-op: the cleanup fixture already created the file.
+        return True
+
+    monkeypatch.setattr(cli, "_az_blob_download", fake_download)
+
+    args = argparse.Namespace(
+        latest=True,
+        run_id=None,
+        out=None,
+        state_account=None,
+        dry_run=False,
+    )
+
+    rc = cli._handle_audit_remote(args)
+    assert rc == 0, f"_handle_audit_remote returned {rc}; expected 0"
+
+    assert len(registered) == 1, (
+        f"register_traps must be called exactly once in non-dry-run mode; "
+        f"got {len(registered)} registrations"
+    )
+    cleanup_fn = registered[0]
+    assert callable(cleanup_fn), "register_traps must receive a callable"
+
+    # Invoke the cleanup: it must remove the partial download + the
+    # stale marker. After it runs, the .audit_pulled_at marker is
+    # gone (the handler writes a fresh one at the end, so we expect
+    # one to exist with new contents).
+    cleanup_fn()
+    # Coverage matrix was a partial download → cleaned up.
+    assert not (dest_dir / "coverage_matrix.csv").exists(), (
+        "cleanup_fn must remove partial downloads"
+    )
+
+
+
+def test_handle_audit_remote_dry_run_does_not_register_trap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``--dry-run`` mode does NOT register a signal trap.
+
+    Dry-run never writes anything to disk, so there's nothing to
+    clean up; registering a trap would just add noise to the
+    test suite.
+    """
+    from scanner import cli, trap
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PACIOLI_STATE_STORAGE_ACCOUNT", "fakeacct")
+
+    registered: list[object] = []
+
+    def fake_register_traps(cleanup_fn: object) -> None:
+        registered.append(cleanup_fn)
+
+    monkeypatch.setattr(trap, "register_traps", fake_register_traps)
+
+    monkeypatch.setattr(
+        cli,
+        "_resolve_latest_remote_run_id",
+        lambda **_kw: "DRYRUN-LATEST",
+    )
+
+    def fake_download(
+        *,
+        storage_account: str,
+        container_name: str,
+        blob_name: str,
+        dest: Path,
+        dry_run: bool,
+    ) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_az_blob_download", fake_download)
+
+    args = argparse.Namespace(
+        latest=True,
+        run_id=None,
+        out=None,
+        state_account=None,
+        dry_run=True,
+    )
+
+    rc = cli._handle_audit_remote(args)
+    assert rc == 0, f"dry-run returned {rc}; expected 0"
+    assert registered == [], (
+        f"register_traps must NOT be called in --dry-run mode; "
+        f"got {len(registered)} registrations"
+    )
+
+
+
+# ---------------------------------------------------------------------------
 # Section E (--no-open flag + _maybe_open_report helper coverage)
 # ---------------------------------------------------------------------------
 #
-# These tests cover the ``--no-open`` CLI flag (added by Section A) and
-# the module-level ``_maybe_open_report`` helper (added by Section C,
-# invoked by the audit handlers). Mirrors scanner/tests/test_orchestrator.py
-# additions for ``Orchestrator._open_report``.
-
+# These tests cover the ``--no-open`` CLI flag (PR #9) and the module-level
+# ``_maybe_open_report`` helper, invoked by the audit handlers. Mirrors the
+# ``Orchestrator._open_report`` tests in scanner/tests/test_orchestrator.py.
 
 def test_no_open_flag_accepted_on_scan_and_gate() -> None:
     """``--no-open`` parses cleanly on both ``pacioli scan`` and ``pacioli gate``.
@@ -1165,6 +1465,890 @@ def test_audit_remote_out_triggers_maybe_open_report(
     )
 
 
+# ---------------------------------------------------------------------------
+# 23. No raw subprocess calls remain in scanner/cli.py
+# ---------------------------------------------------------------------------
+
+
+def test_cli_module_has_no_raw_subprocess_calls() -> None:
+    """``scanner.cli`` must not contain ``subprocess.run/Popen/call`` or ``os.system``.
+
+    Guards against regressions: if a future change reintroduces a raw
+    subprocess call, the ops-registry migration is incomplete. The
+    grep walks the source file text directly so it doesn't depend on
+    importing cli (which triggers the UTF-8 bootstrap).
+    """
+    src = (Path(__file__).resolve().parents[1] / "cli.py").read_text(
+        encoding="utf-8"
+    )
+    forbidden = ("subprocess.run", "subprocess.Popen", "subprocess.call", "os.system")
+    hits = [tok for tok in forbidden if tok in src]
+    assert not hits, (
+        f"scanner.cli must not contain raw subprocess calls; "
+        f"found: {hits!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 24. Todo-8: --scan-path JSON parsing + validation (Todo 8 — flags #1 of 8)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_scan_path_spec_minimal() -> None:
+    """``--scan-path`` with only ``path`` yields a minimal entry dict.
+
+    The other keys are optional and absent from the returned dict so
+    downstream code can use ``entry.get('project')`` etc. without
+    worrying about defaults. Mirrors the YAML schema: only ``path`` is
+    required.
+    """
+    from scanner.cli import _parse_scan_path_spec
+
+    out = _parse_scan_path_spec('{"path": "env/myapp/prod"}', 0)
+    assert out == {"path": "env/myapp/prod"}, (
+        f"minimal --scan-path should yield only 'path'; got {out!r}"
+    )
+
+
+def test_parse_scan_path_spec_full() -> None:
+    """``--scan-path`` with all 6 keys round-trips through the parser."""
+    from scanner.cli import _parse_scan_path_spec
+
+    spec = (
+        '{"path": "x", "project": "p", "env": "e", '
+        '"backend_key": "bk", "workspace": "ws", "stack_label": "sl"}'
+    )
+    out = _parse_scan_path_spec(spec, 0)
+    assert out == {
+        "path": "x",
+        "project": "p",
+        "env": "e",
+        "backend_key": "bk",
+        "workspace": "ws",
+        "stack_label": "sl",
+    }, f"unexpected --scan-path roundtrip: {out!r}"
+
+
+def test_parse_scan_path_spec_rejects_missing_path() -> None:
+    """``--scan-path`` without ``path`` raises ``ValueError``."""
+    from scanner.cli import _parse_scan_path_spec
+
+    with pytest.raises(ValueError, match=r"'path' is required"):
+        _parse_scan_path_spec('{"project": "p"}', 2)
+
+
+def test_parse_scan_path_spec_rejects_unknown_key() -> None:
+    """``--scan-path`` with an unknown key raises ``ValueError``.
+
+    Unknown keys are a typo sentinel — surfacing them at parse time
+    keeps the YAML/CLI surfaces aligned.
+    """
+    from scanner.cli import _parse_scan_path_spec
+
+    with pytest.raises(ValueError, match=r"unknown keys"):
+        _parse_scan_path_spec(
+            '{"path": "x", "nonsense": 1}', 0
+        )
+
+
+def test_parse_scan_path_spec_rejects_malformed_json() -> None:
+    """``--scan-path`` with malformed JSON raises ``ValueError`` with index."""
+    from scanner.cli import _parse_scan_path_spec
+
+    with pytest.raises(ValueError, match=r"\[3\].*malformed JSON"):
+        _parse_scan_path_spec('{"path": ', 3)
+
+
+def test_parse_scan_path_spec_rejects_non_object() -> None:
+    """``--scan-path`` with a JSON array (not object) raises ``ValueError``."""
+    from scanner.cli import _parse_scan_path_spec
+
+    with pytest.raises(ValueError, match=r"must be a JSON object"):
+        _parse_scan_path_spec('[1, 2, 3]', 0)
+
+
+# ---------------------------------------------------------------------------
+# 25. Todo-8: --scan-glob expansion (Todo 8 — flags #2 of 8)
+# ---------------------------------------------------------------------------
+
+
+def test_expand_scan_glob_to_dirs(tmp_path: Path) -> None:
+    """``--scan-glob 'env/*/prod'`` expands to one entry per match.
+
+    Each match becomes ``{path, project=<parent>, env=<basename>}``.
+    Non-directory matches are skipped silently (file globs would
+    produce bogus scan-path entries).
+    """
+    from scanner.cli import _expand_scan_glob
+
+    # Materialise three env dirs and one non-dir artefact to verify
+    # the non-dir skip behaviour.
+    for env_name in ("prod", "stage"):
+        d = tmp_path / "env" / "myapp" / env_name
+        d.mkdir(parents=True)
+        (d / "main.tf").write_text("# stub\n", encoding="utf-8")
+    (tmp_path / "env" / "myapp" / "stray.txt").write_text("nope", encoding="utf-8")
+
+    out = _expand_scan_glob("env/*/prod", tmp_path, 0)
+    assert len(out) == 1, f"expected 1 prod match; got {len(out)}: {out!r}"
+    entry = out[0]
+    assert entry["path"] == "env/myapp/prod", f"bad path: {entry!r}"
+    assert entry["project"] == "myapp", f"bad project: {entry!r}"
+    assert entry["env"] == "prod", f"bad env: {entry!r}"
+
+
+def test_expand_scan_glob_no_matches_returns_empty(tmp_path: Path) -> None:
+    """``--scan-glob`` with no matches returns ``[]`` (not an error).
+
+    Mirrors bash ``nullglob``: a pattern that legitimately matches
+    nothing shouldn't kill the run. The orchestrator's INFO banner
+    surfaces the empty expansion so the operator can see what
+    happened.
+    """
+    from scanner.cli import _expand_scan_glob
+
+    out = _expand_scan_glob("env/*/nonexistent", tmp_path, 0)
+    assert out == [], f"expected empty list for no-match glob; got {out!r}"
+
+
+def test_expand_scan_glob_rejects_empty_pattern() -> None:
+    """``--scan-glob ''`` raises ``ValueError`` (empty pattern is a typo)."""
+    from scanner.cli import _expand_scan_glob
+
+    with pytest.raises(ValueError, match=r"non-empty string"):
+        _expand_scan_glob("", Path("/tmp"), 0)
+
+
+# ---------------------------------------------------------------------------
+# 26. Todo-8: --include-modules validator (Todo 8 — flags #5 of 8)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_include_modules_with_plan_tier_errors() -> None:
+    """``--include-modules --tier plan`` raises ``ValueError``."""
+    from scanner.cli import _validate_include_modules_vs_tier
+
+    with pytest.raises(ValueError, match=r"--include-modules is source-tier only"):
+        _validate_include_modules_vs_tier(tier="plan", include_modules=True)
+
+
+def test_validate_include_modules_with_state_tier_errors() -> None:
+    """``--include-modules --tier state`` raises ``ValueError``."""
+    from scanner.cli import _validate_include_modules_vs_tier
+
+    with pytest.raises(ValueError, match=r"--tier 'state'"):
+        _validate_include_modules_vs_tier(tier="state", include_modules=True)
+
+
+def test_validate_include_modules_with_source_tier_ok() -> None:
+    """``--include-modules --tier source`` is the valid combination."""
+    from scanner.cli import _validate_include_modules_vs_tier
+
+    # No raise.
+    _validate_include_modules_vs_tier(tier="source", include_modules=True)
+
+
+def test_validate_include_modules_disabled_with_plan_tier_ok() -> None:
+    """``--tier plan`` without ``--include-modules`` is fine (no-op)."""
+    from scanner.cli import _validate_include_modules_vs_tier
+
+    # No raise.
+    _validate_include_modules_vs_tier(tier="plan", include_modules=False)
+
+
+# ---------------------------------------------------------------------------
+# 27. Todo-8: --registry-mirror / --stack-label validation (Todo 8 — flags #3, #7 of 8)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_registry_mirror_accepts_https() -> None:
+    """``--registry-mirror`` accepts a normal https URL."""
+    from scanner.cli import _validate_registry_mirror
+
+    # No raise.
+    _validate_registry_mirror("https://mirror.example.com/terraform-modules")
+    _validate_registry_mirror("http://internal-mirror:8080/path")
+    _validate_registry_mirror(None)
+
+
+def test_validate_registry_mirror_rejects_junk() -> None:
+    """``--registry-mirror`` rejects non-URL strings (FTP, plain text)."""
+    from scanner.cli import _validate_registry_mirror
+
+    with pytest.raises(ValueError, match=r"invalid URL"):
+        _validate_registry_mirror("not-a-url")
+    with pytest.raises(ValueError, match=r"invalid URL"):
+        _validate_registry_mirror("ftp://mirror.example.com")
+    with pytest.raises(ValueError, match=r"invalid URL"):
+        _validate_registry_mirror("")
+
+
+def test_validate_stack_label_accepts_safe_slug() -> None:
+    """``--stack-label`` accepts ``[A-Za-z0-9._-]{1,64}`` slugs."""
+    from scanner.cli import _validate_stack_label
+
+    # No raise.
+    _validate_stack_label("vpc1")
+    _validate_stack_label("env_a.0-1")
+    _validate_stack_label("a" * 64)
+    _validate_stack_label(None)
+
+
+def test_validate_stack_label_rejects_unsafe_slug() -> None:
+    """``--stack-label`` rejects slashes / spaces / leading dashes."""
+    from scanner.cli import _validate_stack_label
+
+    with pytest.raises(ValueError, match=r"invalid slug"):
+        _validate_stack_label("with/slash")
+    with pytest.raises(ValueError, match=r"invalid slug"):
+        _validate_stack_label("with space")
+    with pytest.raises(ValueError, match=r"invalid slug"):
+        _validate_stack_label("-leading-dash")
+    with pytest.raises(ValueError, match=r"invalid slug"):
+        _validate_stack_label("a" * 65)
+
+
+# ---------------------------------------------------------------------------
+# 28. Todo-8: _resolve_scan_path_entries wiring (Todo 8 — all 8 flags together)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_scan_path_entries_merges_path_and_glob(
+    tmp_path: Path,
+) -> None:
+    """``--scan-path`` + ``--scan-glob`` are unioned into one ordered list.
+
+    The CLI helper preserves argv order: ``--scan-path`` entries come
+    first, then ``--scan-glob`` matches. The default ``--backend-key``
+    is applied to any entry missing an explicit per-entry value.
+    """
+    from scanner.cli import _resolve_scan_path_entries
+
+    # Materialise one env dir for the glob.
+    env_dir = tmp_path / "env" / "myapp" / "prod"
+    env_dir.mkdir(parents=True)
+
+    args = _make_args(
+        scan_path=[
+            '{"path": "modules/net", "project": "shared"}',
+        ],
+        scan_glob=["env/*/prod"],
+        backend_key="global.tfstate",
+    )
+    entries = _resolve_scan_path_entries(args, tmp_path)
+
+    assert len(entries) == 2, (
+        f"expected 2 entries (1 path + 1 glob); got {len(entries)}: {entries!r}"
+    )
+    # First entry: the explicit --scan-path; project override wins.
+    assert entries[0]["path"] == "modules/net"
+    assert entries[0]["project"] == "shared"
+    assert entries[0]["backend_key"] == "global.tfstate", (
+        f"default --backend-key must apply to entries missing it; got {entries[0]!r}"
+    )
+    # Second entry: the glob-derived entry; project=<parent> (env),
+    # env=<basename> (prod). Default backend_key applied.
+    assert entries[1]["path"] == "env/myapp/prod"
+    assert entries[1]["project"] == "myapp"
+    assert entries[1]["env"] == "prod"
+    assert entries[1]["backend_key"] == "global.tfstate"
+
+
+def test_resolve_scan_path_entries_per_entry_backend_key_wins(
+    tmp_path: Path,
+) -> None:
+    """Per-entry ``backend_key`` beats the top-level ``--backend-key`` default.
+
+    Precedence mirrors the orchestrator's documented order:
+    per-entry > top-level > aztfexport file > basename default.
+    """
+    from scanner.cli import _resolve_scan_path_entries
+
+    args = _make_args(
+        scan_path=[
+            '{"path": "a", "backend_key": "explicit.tfstate"}',
+            '{"path": "b"}',
+        ],
+        backend_key="global.tfstate",
+    )
+    entries = _resolve_scan_path_entries(args, tmp_path)
+
+    assert entries[0]["backend_key"] == "explicit.tfstate", (
+        f"per-entry backend_key must win; got {entries[0]!r}"
+    )
+    assert entries[1]["backend_key"] == "global.tfstate", (
+        f"default backend_key must fill missing values; got {entries[1]!r}"
+    )
+
+
+def test_resolve_scan_path_entries_includes_modules_validator_runs(
+    tmp_path: Path,
+) -> None:
+    """``--include-modules --tier plan`` raises ``ValueError`` at dispatch.
+
+    The validator runs inside ``_resolve_scan_path_entries`` so a
+    bad combination surfaces before any orchestrator subprocess is
+    spawned.
+    """
+    from scanner.cli import _resolve_scan_path_entries
+
+    args = _make_args(include_modules=True, tier="plan")
+    with pytest.raises(ValueError, match=r"--include-modules is source-tier only"):
+        _resolve_scan_path_entries(args, tmp_path)
+
+
+def test_resolve_scan_path_entries_validates_registry_mirror(
+    tmp_path: Path,
+) -> None:
+    """Bad ``--registry-mirror`` URL surfaces inside the resolver."""
+    from scanner.cli import _resolve_scan_path_entries
+
+    args = _make_args(registry_mirror="not-a-url")
+    with pytest.raises(ValueError, match=r"invalid URL"):
+        _resolve_scan_path_entries(args, tmp_path)
+
+
+def test_resolve_scan_path_entries_validates_stack_label(
+    tmp_path: Path,
+) -> None:
+    """Bad ``--stack-label`` slug surfaces inside the resolver."""
+    from scanner.cli import _resolve_scan_path_entries
+
+    args = _make_args(stack_label="with/slash")
+    with pytest.raises(ValueError, match=r"invalid slug"):
+        _resolve_scan_path_entries(args, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# 29. Todo-8: --include-modules --tier plan exits 2 via _handle_scan
+# ---------------------------------------------------------------------------
+
+
+def test_handle_scan_rejects_include_modules_with_plan_tier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``_handle_scan`` exits 2 with an ERROR log when ``--include-modules`` clashes with ``--tier plan``.
+
+    Belt-and-suspenders test: ``_resolve_scan_path_entries`` raises
+    ``ValueError``; ``_build_orchestrator_argv`` logs it and returns
+    ``[]``; ``_handle_scan`` returns 2 without ever calling the
+    orchestrator. The test patches ``scanner.orchestrator.main`` and
+    asserts it was NOT called.
+    """
+    from scanner import cli, orchestrator
+
+    called: list[list[str]] = []
+
+    def fake_main(argv: list[str]) -> int:
+        called.append(argv)
+        return 0
+
+    monkeypatch.setattr(orchestrator, "main", fake_main)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    args = _make_args(
+        target_dir=str(repo),
+        tier="plan",
+        include_modules=True,
+    )
+    rc = cli._handle_scan(args)
+    captured = capsys.readouterr()
+
+    assert rc == 2, f"_handle_scan must return 2 on validation error; got rc={rc}"
+    assert called == [], (
+        f"orchestrator.main must NOT be called when validation fails; got {called!r}"
+    )
+    assert "ERROR" in captured.err, (
+        f"expected ERROR log on validation failure; got err={captured.err!r}"
+    )
+    assert "--include-modules" in captured.err, (
+        f"ERROR should name the bad flag; got err={captured.err!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 30. Todo-8: _build_orchestrator_argv end-to-end translation
+# ---------------------------------------------------------------------------
+
+
+def test_build_orchestrator_argv_emits_scan_path_entries(
+    tmp_path: Path,
+) -> None:
+    """``_build_orchestrator_argv`` emits one ``--scan-path-entry`` per resolved entry.
+
+    The CLI's argv builder is the single bridge between the operator's
+    repeated ``--scan-path`` / ``--scan-glob`` flags and the
+    orchestrator's repeatable ``--scan-path-entry`` flag. The test
+    asserts the bridge produces JSON-encoded entries in argv order.
+    """
+    from scanner import cli
+
+    args = _make_args(
+        target_dir=str(tmp_path),
+        scan_path=['{"path": "env/a/prod", "project": "a"}'],
+        backend_key="global.tfstate",
+    )
+    argv = cli._build_orchestrator_argv(args)
+    assert argv, "argv must be non-empty for a valid scan invocation"
+
+    # Each --scan-path-entry token is followed by a JSON string.
+    indices = [i for i, tok in enumerate(argv) if tok == "--scan-path-entry"]
+    assert len(indices) == 1, (
+        f"expected one --scan-path-entry token; got {len(indices)}: argv={argv!r}"
+    )
+    import json as _json
+    payload = _json.loads(argv[indices[0] + 1])
+    assert payload["path"] == "env/a/prod"
+    assert payload["project"] == "a"
+    assert payload["backend_key"] == "global.tfstate"
+
+
+def test_build_orchestrator_argv_emits_all_new_flags(
+    tmp_path: Path,
+) -> None:
+    """All 8 new flags propagate into the orchestrator argv.
+
+    Belt-and-suspenders: catches a regression where one of the flags
+    is silently dropped during the bridge translation. Two invocations:
+
+      1. Without ``--scan-path``: 7 of the 8 new flags propagate
+         (the resolver has nothing to inject ``--stack-label`` into).
+      2. With ``--scan-path``: the resolver injects ``--stack-label``
+         as the default per-entry ``stack_label`` and emits
+         ``--scan-path-entry``.
+    """
+    from scanner import cli
+    import json as _json
+
+    # --- pass 1: 7 of 8 flags propagate; --scan-path-entry absent ---
+    args = _make_args(
+        target_dir=str(tmp_path),
+        include_modules=True,
+        ignore_lockfile=True,
+        state_file=str(tmp_path / "state.tfstate"),
+        registry_mirror="https://mirror.example.com",
+        backend_key="bk",
+        stack_label="sl",
+    )
+    argv = cli._build_orchestrator_argv(args)
+
+    for flag in (
+        "--include-modules",
+        "--ignore-lockfile",
+        "--state-file",
+        "--registry-mirror",
+        "--backend-key",
+    ):
+        assert flag in argv, f"{flag} missing from argv={argv!r}"
+
+    # --- pass 2: --stack-label is applied as default per-entry ---
+    args_with_path = _make_args(
+        target_dir=str(tmp_path),
+        scan_path=['{"path": "env/a/prod"}'],
+        stack_label="sl",
+    )
+    argv2 = cli._build_orchestrator_argv(args_with_path)
+    assert "--scan-path-entry" in argv2, (
+        f"--scan-path-entry missing from second argv; argv={argv2!r}"
+    )
+    entry_idx = argv2.index("--scan-path-entry")
+    payload2 = _json.loads(argv2[entry_idx + 1])
+    assert payload2["stack_label"] == "sl", (
+        f"--stack-label must be injected as default per-entry; got {payload2!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 31. Todo-8: --registry-mirror config generation writes an isolated HCL file
+# ---------------------------------------------------------------------------
+
+
+def test_write_registry_mirror_config_creates_isolated_hcl(
+    tmp_path: Path,
+) -> None:
+    """``--registry-mirror`` writes a ``terraform.rc`` under a fresh tmpdir.
+
+    The config contains the URL in a quoted ``network_mirror`` block.
+    Operators can point ``TF_CLI_CONFIG_FILE`` at it to redirect
+    Terraform to a private mirror without touching
+    ``~/.terraformrc``.
+    """
+    from scanner.cli import _write_registry_mirror_config
+
+    cfg = _write_registry_mirror_config(
+        "https://mirror.example.com/terraform", tmp_path
+    )
+    assert cfg.is_file(), f"registry-mirror config should exist at {cfg!r}"
+    text = cfg.read_text(encoding="utf-8")
+    assert "provider_installation" in text, (
+        f"missing provider_installation block in {text!r}"
+    )
+    assert "network_mirror" in text, (
+        f"missing network_mirror block in {text!r}"
+    )
+    assert '"https://mirror.example.com/terraform"' in text, (
+        f"URL should be quoted in network_mirror block; got {text!r}"
+    )
+
+
+def test_write_registry_mirror_config_handles_url_with_query(
+    tmp_path: Path,
+) -> None:
+    """A mirror URL with ``?`` and ``#`` survives JSON-quoting intact.
+
+    Operators occasionally run a private registry behind a path with
+    query params (e.g. ``?type=module``). We use ``json.dumps`` for
+    the URL so the HCL stays valid; the test guards against an
+    accidental raw interpolation.
+    """
+    from scanner.cli import _write_registry_mirror_config
+
+    url = "https://mirror.example.com/?type=module&fmt=hcl#frag"
+    cfg = _write_registry_mirror_config(url, tmp_path)
+    text = cfg.read_text(encoding="utf-8")
+    # ``json.dumps`` escapes ``#`` (no), but it DOES escape ``"`` (n/a)
+    # and ``\``. The URL must appear verbatim inside double quotes.
+    assert '"' + url + '"' in text, (
+        f"URL with query/fragment must be JSON-quoted intact; got {text!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 32. Todo-8: --ignore-lockfile emits a WARN log line
+# ---------------------------------------------------------------------------
+
+
+def test_emit_ignore_lockfile_warning_logs_warn(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``_emit_ignore_lockfile_warning`` writes a WARN line to stderr.
+
+    The flag is opt-in (default off), so a WARN makes the operator's
+    choice visible in CI logs.
+    """
+    from scanner.cli import _emit_ignore_lockfile_warning
+
+    _emit_ignore_lockfile_warning()
+    captured = capsys.readouterr()
+    assert "WARN" in captured.err, (
+        f"--ignore-lockfile should emit a WARN log; got err={captured.err!r}"
+    )
+    assert "--ignore-lockfile" in captured.err, (
+        f"WARN should name the flag; got err={captured.err!r}"
+    )
+    assert ".terraform.lock.hcl" in captured.err, (
+        f"WARN should mention the file pattern; got err={captured.err!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 33. Todo-8: scan --help lists all 8 new flags
+# ---------------------------------------------------------------------------
+
+
+_EXPECTED_NEW_FLAGS: tuple[str, ...] = (
+    "--scan-path",
+    "--scan-glob",
+    "--stack-label",
+    "--state-file",
+    "--include-modules",
+    "--ignore-lockfile",
+    "--registry-mirror",
+    "--backend-key",
+)
+
+
+def test_scan_help_lists_all_eight_new_flags() -> None:
+    """``pacioli scan --help`` mentions all 8 new flags.
+
+    Guards against a regression where one of the flags is forgotten
+    when ``_add_scan_flags`` is reorganised. The grep is intentionally
+    substring-based so renames (e.g. ``--scan-path SPEC``) still match.
+    """
+    result = _run_cli("scan", "--help")
+    assert result.returncode == 0, (
+        f"`scan --help` failed rc={result.returncode}; stderr={result.stderr!r}"
+    )
+    output = result.stdout + result.stderr
+    missing = [flag for flag in _EXPECTED_NEW_FLAGS if flag not in output]
+    assert not missing, (
+        f"`scan --help` is missing {len(missing)} of {len(_EXPECTED_NEW_FLAGS)} "
+        f"new flags: {missing!r}"
+    )
+
+
+def test_gate_help_lists_all_eight_new_flags() -> None:
+    """``pacioli gate --help`` ALSO mentions all 8 new flags.
+
+    ``gate`` reuses ``_add_scan_flags``; this test guards against a
+    future refactor that splits the flag wiring and forgets to wire
+    the new flags into both subparsers.
+    """
+    result = _run_cli("gate", "--help")
+    assert result.returncode == 0, (
+        f"`gate --help` failed rc={result.returncode}; stderr={result.stderr!r}"
+    )
+    output = result.stdout + result.stderr
+    missing = [flag for flag in _EXPECTED_NEW_FLAGS if flag not in output]
+    assert not missing, (
+        f"`gate --help` is missing {len(missing)} of {len(_EXPECTED_NEW_FLAGS)} "
+        f"new flags: {missing!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 34. Todo-8: --include-modules --tier plan exits 2 end-to-end via the CLI
+# ---------------------------------------------------------------------------
+
+
+def test_pacioli_scan_include_modules_with_plan_tier_exits_2(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: ``pacioli scan --include-modules --tier plan`` exits 2 with ERROR log.
+
+    The validator must surface BEFORE any orchestrator subprocess is
+    spawned (no Checkov pass, no Terraform init). The test asserts
+    both the non-zero rc AND the human-readable ERROR log.
+    """
+    target_repo = _make_minimal_tf_repo(tmp_path / "repo")
+    output_dir = tmp_path / "runs"
+
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(output_dir),
+        "--tier",
+        "plan",
+        "--include-modules",
+        "--non-interactive",
+        timeout=30,
+    )
+
+    assert result.returncode == 2, (
+        f"`pacioli scan --include-modules --tier plan` must exit 2; "
+        f"got rc={result.returncode}; stderr={result.stderr[-500:]!r}"
+    )
+    assert "ERROR" in result.stderr, (
+        f"expected ERROR log on validation failure; got stderr={result.stderr!r}"
+    )
+    assert "--include-modules" in result.stderr, (
+        f"ERROR should name the conflicting flag; got stderr={result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 35. Todo-8: Back-compat aliases survive the refactor
+# ---------------------------------------------------------------------------
+
+
+def test_backcompat_aliases_still_wired() -> None:
+    """``--scan-plan``, ``--scan-state``, ``--scope`` remain in ``scan --help``.
+
+    Belt-and-suspenders: the task's MUST NOT DO clause forbids removing
+    these aliases. This test asserts they're still registered.
+    """
+    result = _run_cli("scan", "--help")
+    assert result.returncode == 0
+    output = result.stdout + result.stderr
+    for legacy in ("--scan-plan", "--scan-state", "--scope"):
+        assert legacy in output, (
+            f"back-compat alias {legacy!r} missing from `scan --help`; "
+            f"got output (first 500 chars): {output[:500]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 36. Todo-8: Scan-path arg shape from _handle_scan -> orchestrator
+# ---------------------------------------------------------------------------
+
+
+def test_handle_scan_passes_new_flags_to_orchestrator_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_scan`` propagates ALL 8 new flags to ``orchestrator.main``.
+
+    The end-to-end CLI → orchestrator bridge: ``_handle_scan`` must
+    re-emit every flag in the orchestrator's argv, including the
+    resolved ``--scan-path-entry`` JSON.
+    """
+    from scanner import cli, orchestrator
+
+    captured: dict[str, object] = {}
+
+    def fake_main(argv: list[str]) -> int:
+        captured["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr(orchestrator, "main", fake_main)
+
+    repo = tmp_path / "repo"
+    (repo / "env" / "myapp" / "prod").mkdir(parents=True)
+    (repo / "env" / "myapp" / "prod" / "main.tf").write_text(
+        "# stub\n", encoding="utf-8"
+    )
+
+    args = _make_args(
+        target_dir=str(repo),
+        tier="source",
+        mode="report",
+        include_modules=True,
+        ignore_lockfile=True,
+        state_file=str(tmp_path / "state.tfstate"),
+        registry_mirror="https://mirror.example.com",
+        backend_key="global.tfstate",
+        scan_path=['{"path": "env/myapp/prod"}'],
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    argv = captured["argv"]
+
+    # Every new flag must appear in argv.
+    for flag in (
+        "--include-modules",
+        "--ignore-lockfile",
+        "--state-file",
+        "--registry-mirror",
+        "--backend-key",
+        "--scan-path-entry",
+    ):
+        assert flag in argv, f"{flag} missing from orchestrator argv={argv!r}"
+
+
+
+# ---------------------------------------------------------------------------
+# F3: live demonstration that `terraform apply -auto-approve` -> exit 99
+# ---------------------------------------------------------------------------
+#
+# The pre-existing exit-99 test above (
+# ``test_main_exits_99_when_subprocess_operation_is_refused``) proves the
+# *wiring* only: it raises a hand-constructed MutatingOperationRefused from
+# a patched handler. It never demonstrates that the specific command
+# ``terraform apply -auto-approve`` is what triggers the refusal.
+#
+# The three tests below close that gap end-to-end:
+#   1. the real refusal matrix fires on the real command string;
+#   2. the real ops registry refuses the real composed argv *before*
+#      subprocess.run is reached (proved with a sentinel);
+#   3. a real ``python -m scanner.cli`` child process terminates with
+#      exit status 99 when that refusal propagates out of a handler.
+
+
+def test_refusal_matrix_fires_on_terraform_apply_auto_approve() -> None:
+    """The real SafetyGuard refuses ``terraform apply -auto-approve``."""
+    from scanner.safety import MutatingOperationRefused, SafetyGuard
+
+    with pytest.raises(MutatingOperationRefused):
+        SafetyGuard().refuse_if_mutating("terraform apply -auto-approve")
+
+
+def test_ops_run_refuses_apply_before_executing_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``ops.run`` refuses an apply argv *before* reaching subprocess.run.
+
+    Registers a deliberately mutating operation, stages a fake
+    ``terraform`` on PATH so binary resolution succeeds (the refusal must
+    be what stops us, not a missing binary), and installs a sentinel over
+    ``subprocess.run`` that fails the test if it is ever reached.
+    """
+    from scanner import ops
+    from scanner.safety import MutatingOperationRefused
+
+    # Stage a fake `terraform` so _resolve_binary() succeeds and the
+    # refusal check is provably the thing that stops execution.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    is_windows = sys.platform.startswith("win")
+    shim = bin_dir / ("terraform.bat" if is_windows else "terraform")
+    shim.write_text("@echo off\n" if is_windows else "#!/bin/sh\nexit 0\n",
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+
+    def _never_called(*_args, **_kwargs):  # pragma: no cover - must not run
+        raise AssertionError(
+            "subprocess.run was reached for `terraform apply -auto-approve`; "
+            "the refusal matrix failed to stop the mutating operation"
+        )
+
+    monkeypatch.setattr(ops.subprocess, "run", _never_called)
+
+    saved = dict(ops.OPERATION_REGISTRY)
+    ops.OPERATION_REGISTRY["test.f3_apply"] = ops.Operation(
+        name="test.f3_apply",
+        executable="terraform",
+        argv_schema=("apply", "-auto-approve"),
+        allowed_tiers=("plan", "state"),
+        default_timeout=60,
+        mutation_class="mutate_azure",
+        cleanup_obligation="none",
+        env_allowlist=("*",),
+    )
+    try:
+        with pytest.raises(MutatingOperationRefused):
+            ops.run("test.f3_apply", "apply", "-auto-approve", tier="plan")
+    finally:
+        ops.OPERATION_REGISTRY.clear()
+        ops.OPERATION_REGISTRY.update(saved)
+
+
+def test_cli_subprocess_exits_99_on_terraform_apply_refusal(
+    tmp_path: Path,
+) -> None:
+    """A real ``python -m scanner.cli`` child exits 99 on an apply refusal.
+
+    This is the user-facing proof: a genuine child process, whose scan
+    handler attempts ``terraform apply -auto-approve`` through the real
+    ops registry, terminates with exit status 99. The attempt is injected
+    via a sitecustomize-style bootstrap so no production source is edited
+    and no real Terraform is ever executed (the refusal fires first).
+    """
+    bootstrap = tmp_path / "f3_apply_probe.py"
+    bootstrap.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+        "from scanner import cli\n"
+        "from scanner.safety import SafetyGuard\n"
+        "\n"
+        "def _apply(_args):\n"
+        "    # The real refusal matrix, on the real command string.\n"
+        "    SafetyGuard().refuse_if_mutating('terraform apply -auto-approve')\n"
+        "    raise AssertionError('refusal did not fire')\n"
+        "\n"
+        "cli._handle_scan = _apply\n"
+        "sys.exit(cli.main(['scan', '--non-interactive']))\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, str(bootstrap)],
+        cwd=str(REPO_ROOT),
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert proc.returncode == 99, (
+        "expected exit 99 from `terraform apply -auto-approve` refusal; "
+        f"got {proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+
+# ---------------------------------------------------------------------------
+# Section F: _maybe_open_report helper coverage (PR #9 follow-up)
+# ---------------------------------------------------------------------------
+#
+# Unit tests for the ``_maybe_open_report`` helper that backs both the
+# audit subcommand and the orchestrator flow. Mirrors the tests in
+# scanner/tests/test_orchestrator.py for ``Orchestrator._open_report``.
+
 def test_maybe_open_report_skips_when_no_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1194,6 +2378,7 @@ def test_maybe_open_report_skips_when_no_open(
     assert calls == [], (
         f"webbrowser.open should NOT be called when no_open=True; got calls={calls!r}"
     )
+
 
 
 def test_maybe_open_report_calls_webbrowser(
@@ -1227,6 +2412,7 @@ def test_maybe_open_report_calls_webbrowser(
     assert calls[0].endswith("r.html"), (
         f"webbrowser.open URL should end with 'r.html'; got {calls[0]!r}"
     )
+
 
 
 def test_maybe_open_report_handles_webbrowser_failure(

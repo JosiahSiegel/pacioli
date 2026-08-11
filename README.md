@@ -28,6 +28,10 @@ The report is written under `~/.pacioli/runs/<run-id>/aggregate/report.html`. Us
 pip install -e .
 ```
 
+## Safety model
+
+Pacioli refuses Terraform mutations, Checkov `--fix`, and Azure mutations through a typed operation registry. If a scan tier needs access that is unavailable, Pacioli emits an `ACCESS REQUIRED` alert and skips the dependent layer; it never modifies Azure state or firewall rules. A refused mutation exits with code `99` so CI can distinguish it from a finding-driven gate failure. Pacioli reports findings only for the files and inputs it can discover and verify, and makes no universal safety or coverage claim. See [docs/SAFETY_MODEL.md](docs/SAFETY_MODEL.md) for the operation registry, alert-only access behavior, constrained Terraform plan, and residual risks.
+
 ## Three scan tiers
 
 | Tier | Command | Description |

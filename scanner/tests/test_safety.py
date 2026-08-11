@@ -64,10 +64,23 @@ REFUSE_FIXTURES: list[tuple[str, str]] = [
     (r"terraform\s+untaint\b", "terraform untaint azurerm_resource_group.main"),
     (r"terraform\s+import\b",
      "terraform import azurerm_resource_group.main /subscriptions/abc"),
-    # terraform lock bypass (note: contains additional flags)
-    (r"terraform\s+plan.*-lock=false", "terraform plan -lock=false"),
+    # terraform lock bypass on mutating subcommands (note: contains
+    # additional flags). The `terraform plan -lock=false` form is no
+    # longer refused here — the privileged-tier argv is now
+    # `terraform plan -lock=false -refresh=false` per Todo 6, and the
+    # registry's argv_schema is the primary enforcement. apply/destroy
+    # lock bypass remains a refusal because those are mutations.
     (r"terraform\s+apply.*-lock=false", "terraform apply -lock=false"),
     (r"terraform\s+destroy.*-lock=false", "terraform destroy -lock=false"),
+    # Init lock bypass — `terraform init -lock=false` would let two
+    # concurrent runners race on state-file initialization and corrupt
+    # state. The privileged init argv uses ``-backend=false`` (no lock
+    # bypass), so this is a hard invariant on the init subcommand. Todo
+    # 13 added this refusal: the typed operation registry
+    # (scanner/ops.py::terraform.init_local) is the PRIMARY control —
+    # it never emits ``-lock=false`` — but the regex refusal matrix
+    # catches any rogue code path that tries to bypass the registry.
+    (r"terraform\s+init.*-lock=false", "terraform init -lock=false"),
     # auto-approve bypass
     (r"-auto-approve", "terraform apply -auto-approve"),
     # Azure CLI destructive operations
@@ -85,6 +98,9 @@ REFUSE_FIXTURES: list[tuple[str, str]] = [
      "az appservice plan delete -n myplan -g myrg"),
     (r"az\s+role\s+assignment\s+delete\b",
      "az role assignment delete --assignee user@contoso.com"),
+    # Azure CLI: storage firewall mutations (refused since Todo 5).
+    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
+     "az storage account network-rule add --account-name myaccount --ip-address 1.2.3.4"),
     # checkov auto-fix
     (r"checkov.*--fix", "checkov -d . --fix"),
 ]
@@ -175,17 +191,6 @@ def _refuse_compiled_match(pattern: str, command: str) -> bool:
 # ---------------------------------------------------------------------------
 
 ALLOWED_FIXTURES: list[tuple[str, str]] = [
-    # network-rule add
-    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
-     "az storage account network-rule add "
-     "--account-name myaccount --ip-address 1.2.3.4"),
-    # network-rule remove
-    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
-     "az storage account network-rule remove "
-     "--account-name myaccount --ip-address 1.2.3.4"),
-    # network-rule list
-    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
-     "az storage account network-rule list --account-name myaccount"),
     # state blob download (read-only)
     (r"az\s+storage\s+blob\s+download\b",
      "az storage blob download "
@@ -239,11 +244,138 @@ def test_refuse_if_mutating_allows_pure_readonly_terraform(
 
     These are the read-only commands the scanner actually uses. If
     the refusal matrix ever tightens to block them, this test fails
-    and forces a deliberate decision.
+    and forces a deliberate decision. The privileged-tier argv is
+    ``-lock=false -refresh=false`` on plan (Todo 6); the refusal
+    matrix must not block this shape because the registry's argv
+    schema is the primary enforcement (regex is defense-in-depth).
     """
     guard.refuse_if_mutating("terraform plan -out=tfplan.binary")
+    guard.refuse_if_mutating(
+        "terraform plan -out=tfplan.binary -lock=false -refresh=false"
+    )
     guard.refuse_if_mutating("terraform show -json tfplan.binary")
     guard.refuse_if_mutating("terraform init -backend=false")
+
+
+def test_refuse_if_mutating_refuses_lock_bypass_on_apply_and_destroy(
+    guard: SafetyGuard,
+) -> None:
+    """``terraform apply -lock=false`` and ``destroy -lock=false`` MUST refuse.
+
+    Todo 6 removed the ``terraform plan -lock=false`` refusal because
+    the privileged plan argv now uses ``-lock=false -refresh=false``.
+    The apply/destroy lock-bypass refusals remain in REFUSE_PATTERN
+    (those subcommands mutate state, so lock bypass on them is a
+    defense-in-depth invariant). If anyone re-weaksens the matrix by
+    removing these, this test fails before the operator hits prod.
+    """
+    with pytest.raises(MutatingOperationRefused):
+        guard.refuse_if_mutating("terraform apply -lock=false")
+    with pytest.raises(MutatingOperationRefused):
+        guard.refuse_if_mutating("terraform destroy -lock=false")
+
+
+def test_refuse_if_mutating_refuses_lock_bypass_on_init(
+    guard: SafetyGuard,
+) -> None:
+    """``terraform init -lock=false`` MUST refuse (Todo 13).
+
+    `init` initializes the state file. Two concurrent ``init`` runs that
+    both pass ``-lock=false`` can race and corrupt state — neither is
+    gated by the others' lock check. The privileged init argv in
+    scanner/ops.py::terraform.init_local uses ``-backend=false`` only
+    (never ``-lock=false``), so the registry's argv_schema is the
+    primary control. This regex refusal is defense-in-depth: any rogue
+    code path that constructs ``terraform init -lock=false`` argv
+    outside the registry is still blocked here.
+
+    Note: ``terraform plan -lock=false`` is allowed (Todo 6) — the
+    privileged plan argv uses ``-lock=false -refresh=false``. This
+    test does NOT cover plan; see
+    test_refuse_if_mutating_allows_pure_readonly_terraform for the
+    plan positive case.
+    """
+    with pytest.raises(MutatingOperationRefused) as excinfo:
+        guard.refuse_if_mutating("terraform init -lock=false")
+    # Operator-facing message must mention "init" so triage is obvious
+    # from a log line. The exact phrase is part of the audit contract.
+    assert "init" in str(excinfo.value).lower(), (
+        f"init-lock-bypass refusal must mention 'init' so log triage "
+        f"is obvious. Got: {excinfo.value!s}"
+    )
+
+    # Common operator mistake: ``terraform init -input=false -lock=false``.
+    # Must still refuse.
+    with pytest.raises(MutatingOperationRefused):
+        guard.refuse_if_mutating(
+            "terraform init -input=false -lock=false"
+        )
+
+    # Negative case: ``terraform init -backend=false`` (the privileged
+    # argv shape used in production) MUST pass. ``-backend=false`` is
+    # the safe flag; ``-lock=false`` is the unsafe one. If a future
+    # pattern tightening accidentally refuses the privileged shape,
+    # this test fails before the operator hits prod.
+    guard.refuse_if_mutating(
+        "terraform init -input=false -backend=false -no-color"
+    )
+
+
+def test_typed_operation_registry_is_primary_control() -> None:
+    """The typed operation registry (scanner.ops) is the PRIMARY control.
+
+    The refusal matrix in :mod:`scanner.safety` is defense-in-depth.
+    The canonical subprocess entry point is :func:`scanner.ops.run`,
+    which only accepts argv matching a registered :class:`Operation`\'s
+    ``argv_schema``. The ``terraform.init_local`` op's schema is
+    ``("-chdir", ANY, "init", "-input=false", "-backend=false",
+    "-no-color")`` — there is no schema slot for ``-lock=false``, so
+    the registry cannot be tricked into emitting an init with lock
+    bypass.
+
+    This test asserts that invariant directly: every registered
+    Terraform op's argv_schema must NOT contain a token that matches
+    the init lock-bypass refusal pattern. If a future schema edit
+    adds a wildcard or literal that lets ``-lock=false`` slip through,
+    the test fails before the registry ships a dangerous op.
+
+    The companion surface-enforcement test in
+    scanner/tests/test_subprocess_surface.py ensures no production
+    code calls ``subprocess.run`` directly outside the registry —
+    together these tests prove the registry IS the primary control
+    and the refusal matrix is only a backstop.
+    """
+    import re as _re
+
+    from scanner.ops import OPERATION_REGISTRY
+
+    # Pattern must match the refusal matrix entry. If the matrix
+    # changes, this test must be re-aligned.
+    init_lock_bypass = _re.compile(r"terraform\s+init.*-lock=false")
+
+    # Build the joined argv for each Terraform op the same way
+    # scanner.ops._build_argv does: schema tokens + ANY-slot
+    # placeholders. We use a sentinel for ANY because the literal
+    # text of ANY is irrelevant — only the presence of ``-lock=false``
+    # as a literal schema token matters.
+    sentinel = "X"
+    for op_name, op in OPERATION_REGISTRY.items():
+        if not op.executable.startswith("terraform"):
+            continue
+        composed = " ".join(
+            token if token != "ANY" else sentinel for token in op.argv_schema
+        )
+        # If the composed argv — which is exactly what _build_argv would
+        # produce for a maximally permissive caller — would match the
+        # init lock-bypass refusal, the registry itself would emit a
+        # refused command. That's a contradiction: the registry is
+        # supposed to be the primary control.
+        assert not init_lock_bypass.search(composed), (
+            f"operation {op_name!r} argv_schema produces an argv that "
+            f"matches the init lock-bypass refusal pattern; the typed "
+            f"registry must NEVER emit ``-lock=false`` for init. "
+            f"Composed argv: {composed!r}"
+        )
 
 
 def test_refuse_if_mutating_refuses_strange_command(guard: SafetyGuard) -> None:
@@ -361,3 +493,95 @@ def test_checkov_version_negative_checkov_missing(
     with pytest.raises(AuditPinViolation) as excinfo:
         check_checkov_version()
     assert "checkov" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Network-required alert format (Todo 5). The orchestrator emits a single
+# one-line warning whenever tier=plan/state is requested and network
+# access to the storage account is not pre-granted. The format is the
+# machine-grep-friendly token ``STORAGE_ACCOUNT=<x>; RUNNER_IP=<y>; you
+# need network access to this storage account from this IP`` so operators
+# can audit logs for missing-network-access pairs after the fact.
+# ---------------------------------------------------------------------------
+
+
+def test_alert_network_required_message_includes_storage_account_and_runner_ip(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alert emits ``STORAGE_ACCOUNT=<x>; RUNNER_IP=<y>; ...``.
+
+    The exact format is the contract — operators grep logs for
+    ``STORAGE_ACCOUNT=`` and ``RUNNER_IP=`` to find pairs that were
+    skipped because no firewall access was pre-granted. Any drift from
+    this format is an audit-grade regression because post-run log
+    triage becomes impossible.
+    """
+    from scanner import orchestrator as scanner_orchestrator
+
+    state_account = "mystorageacct"
+    expected_runner_ip = "203.0.113.42"
+
+    # Stub out _discover_public_ip so the test is hermetic — the real
+    # call would hit Azure IMDS / ipify and slow the suite down.
+    monkeypatch.setattr(
+        scanner_orchestrator,
+        "_discover_public_ip",
+        lambda: expected_runner_ip,
+    )
+
+    state = scanner_orchestrator._PairState(
+        project="payments",
+        env="prod",
+        env_run_dir=tmp_path,
+        env_dir=tmp_path,
+    )
+
+    # Capture the formatted warning. ``logging.warning`` uses the root
+    # logger; we attach a capture handler so we can introspect the
+    # exact formatted message.
+    import logging as _logging
+
+    captured: list[str] = []
+
+    class _CaptureHandler(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:  # noqa: D401 — stdlib signature
+            captured.append(record.getMessage())
+
+    handler = _CaptureHandler(level=_logging.WARNING)
+    handler.setFormatter(_logging.Formatter("%(message)s"))
+    root_logger = _logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        result = scanner_orchestrator.Orchestrator._alert_network_required(
+            scanner_orchestrator.Orchestrator(),
+            state,
+            state_account,
+        )
+    finally:
+        root_logger.removeHandler(handler)
+
+    # Fail-closed: the caller MUST treat this as a per-pair skip.
+    assert result is False, (
+        "_alert_network_required must return False so the per-pair "
+        "plan/state passes are skipped (fail-closed)."
+    )
+
+    # The alert must include both the storage account and the runner IP,
+    # in the documented format.
+    assert captured, (
+        "no warning was emitted by _alert_network_required; the alert "
+        "format is the only signal operators have for missing-network "
+        "pairs."
+    )
+    message = captured[0]
+    assert f"STORAGE_ACCOUNT={state_account}" in message, (
+        f"alert must include STORAGE_ACCOUNT={state_account}; got: {message!r}"
+    )
+    assert f"RUNNER_IP={expected_runner_ip}" in message, (
+        f"alert must include RUNNER_IP={expected_runner_ip}; got: {message!r}"
+    )
+    assert "you need network access" in message, (
+        f"alert must include the human-readable directive; got: {message!r}"
+    )
+

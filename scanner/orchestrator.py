@@ -8,10 +8,13 @@ What it does
 ------------
 For each ``(project, env)`` pair discovered in ``target_repo``:
 
-1. (Tier ``plan``/``state`` only) Whitelist current IP on the
-   ``state_account`` storage firewall. ``terraform init`` + ``terraform
-   plan -out=tfplan.binary -lock=true`` + ``terraform show -json``. No
-   mutation beyond the firewall rule (auto-reverted by the EXIT trap).
+1. (Tier ``plan``/``state`` only) Emit an alert that network access to
+   the ``state_account`` storage account is required (fail-closed: if
+   access is missing the per-pair plan/state passes are skipped).
+   ``terraform init -backend=false`` + ``terraform plan -out=tfplan.binary
+   -lock=false -refresh=false`` + ``terraform show -json``. The scanner
+   never mutates the storage firewall — the operator is responsible
+   for granting access.
 2. ``checkov`` --framework terraform  + --external-checks-dir (paac).
 3. ``checkov`` --framework terraform  built-in source scan.
 4. (Tier ``plan``/``state`` only) ``checkov`` --framework terraform_plan
@@ -51,14 +54,21 @@ Console scripts
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
-import subprocess
+import shutil
+import stat
 import sys
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
+
+# Lazy import: scanner/ops.py at module-load would import subprocess and
+# the safety guard; that's fine, but we keep the symbol local so call
+# sites read as ``ops.run(...)``.
+from scanner import ops as scanner_ops  # noqa: E402
 
 # Bootstrap UTF-8 I/O before any scan work (mirrors lib/common.sh).
 import scanner._utf8  # noqa: F401  -- side-effect import
@@ -69,6 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scanner.checkov_runner import CheckovRunner  # noqa: E402
 from scanner.discovery import (  # noqa: E402
+    DiscoveredPair,
     NoTerraformFoundError,
     discover_pairs,
 )
@@ -77,10 +88,11 @@ from scanner.paths import (  # noqa: E402
     resolve_mapping as resolve_mapping_path,
     resolve_paths,
 )
-from scanner.safety import SafetyGuard  # noqa: E402
+from scanner.safety import MutatingOperationRefused, SafetyGuard  # noqa: E402
 from scanner.trap import (  # noqa: E402
-    cleanup_ip_whitelist,
+    create_secure_file,
     register_traps,
+    safe_unlink,
     shred_plan_artifacts,
 )
 
@@ -116,7 +128,7 @@ VALID_MODES: tuple[str, ...] = ("gate", "report", "audit")
 #  - 3-24 characters
 #  - lowercase letters and digits only
 # Used to validate the `--state-account` CLI flag before it reaches
-# `subprocess.run` (S8705 — subprocess invocation with tainted CLI value).
+# any subprocess (S8705 — subprocess invocation with tainted CLI value).
 AZURE_STORAGE_ACCOUNT_PATTERN: str = r"^[a-z0-9]{3,24}$"
 
 # Azure Instance Metadata Service (IMDS) link-local address. Only
@@ -140,6 +152,21 @@ AZURE_IMDS_IPV4_PATH: str = (
 
 class OrchestratorError(RuntimeError):
     """Raised on unrecoverable orchestrator misconfiguration."""
+
+
+class PreflightError(OrchestratorError):
+    """Raised when a stack root fails the pre-terraform preflight checks.
+
+    Todo 10: defense-in-depth against symlinked roots, ``..`` traversal,
+    module-library directories (``modules/``, ``modules-<x>/``,
+    ``.terraform/``) being scanned as Terraform roots, and missing
+    ``.terraform.lock.hcl``. The orchestrator catches this in
+    :meth:`Orchestrator._scan_one_pair` and fails the pair (per-pair
+    scan_rc stays 0 in report mode; gate mode propagates it).
+
+    Inherits from :class:`OrchestratorError` so existing callers that
+    catch ``OrchestratorError`` still fire.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +201,14 @@ class _PairState:
     plan_json: Optional[Path] = None
     state_local: Optional[Path] = None
     state_plan_json: Optional[Path] = None
+    # Backend-key precedence (scan_paths: opt-in). ``None`` means the
+    # helper will fall through to the aztfexport file / basename
+    # default. Set by ``_run_scan_loop`` from a ``DiscoveredPair``.
+    backend_key_override: Optional[str] = None
+    # Optional Terraform workspace name (scan_paths: ``workspace:``).
+    # Forwarded into the ``terraform plan -var workspace=<x>`` argv
+    # by the per-tier pass; not used in tier=source.
+    workspace: Optional[str] = None
 
 
 @dataclass
@@ -205,6 +240,11 @@ class Orchestrator:
     no_open: bool = False
     verbose: bool = False
     safety: SafetyGuard = field(default_factory=SafetyGuard)
+    # Optional Terraform registry mirror URL (--registry-mirror). When
+    # set, ``_isolate_terraform_env`` writes a ``network_mirror`` block
+    # into the per-run ``terraformrc`` so provider downloads go through
+    # the declared mirror instead of registry.terraform.io.
+    registry_mirror: Optional[str] = None
 
     # -- public --------------------------------------------------------
 
@@ -219,6 +259,9 @@ class Orchestrator:
         mapping_path: Optional[Path],
         baseline_path: Optional[Path],
         state_account: Optional[str],
+        include_modules: bool = False,
+        ignore_lockfile: bool = False,
+        registry_mirror: Optional[str] = None,
     ) -> int:
         """Run the full scan and return the SCAN_RC.
 
@@ -239,49 +282,70 @@ class Orchestrator:
             state_account: Storage account name used for the firewall
                 whitelist in tier ``plan``/``state``. Required for
                 those tiers.
+            include_modules: When ``True``, ``scan_paths:`` entries
+                whose stack root is a module library (``modules/``,
+                ``modules-<x>/``, ``.terraform/``) are honored. Default
+                is ``False``; the CLI flag (Todo 8) overrides this.
 
         Returns:
             The shell-style SCAN_RC. ``gate`` mode may return any non-
             zero from aggregate.py (including 7); ``report`` mode
             returns ``0`` unless aggregate.py failed with rc != 7.
         """
-        # Mode / tier validation first — fail fast before doing work.
-        self._validate_mode_and_tier()
+        try:
+            # Mode / tier validation first — fail fast before doing work.
+            self._validate_mode_and_tier()
 
-        output_dir = Path(output_dir).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+            # Store registry_mirror so _run_terraform_* call sites can
+            # generate the per-run TF_CLI_CONFIG_FILE (Todo 9).
+            self.registry_mirror = registry_mirror
 
-        run_root = self._setup_run_root(output_dir, label)
+            # Store preflight-related flags (Todo 10) so the per-pair
+            # preflight helper can read them without having to thread them
+            # through every helper signature. ``include_modules`` doubles
+            # as the discovery-time filter (already used in
+            # :meth:`_resolve_scan_inputs`) and the per-stack-root preflight
+            # opt-out for ``modules/``-style stack roots.
+            self._include_modules = bool(include_modules)
+            self._ignore_lockfile = bool(ignore_lockfile)
 
-        target_repo, resolved_mapping, resolved_baseline, pairs = (
-            self._resolve_scan_inputs(
-                target_repo=target_repo,
-                project=project,
-                env=env,
-                mapping_path=mapping_path,
-                baseline_path=baseline_path,
+            output_dir = Path(output_dir).resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            run_root = self._setup_run_root(output_dir, label)
+
+            target_repo, resolved_mapping, resolved_baseline, pairs = (
+                self._resolve_scan_inputs(
+                    target_repo=target_repo,
+                    project=project,
+                    env=env,
+                    mapping_path=mapping_path,
+                    baseline_path=baseline_path,
+                    include_modules=include_modules,
+                )
             )
-        )
 
-        if not pairs:
-            _log("WARN", "no (project, env) pairs matched --project/--env filters")
-            return 0
+            if not pairs:
+                _log("WARN", "no (project, env) pairs matched --project/--env filters")
+                return 0
 
-        self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs)
+            self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs)
 
-        runner = CheckovRunner(mode=self.mode)
+            runner = CheckovRunner(mode=self.mode)
 
-        # SCAN_RC accumulates per checkov pass (max-of) AND aggregate
-        # findings rc (gate mode only). See module docstring.
-        scan_rc = self._run_scan_loop(runner, pairs, target_repo, run_root, state_account)
+            # SCAN_RC accumulates per checkov pass (max-of) AND aggregate
+            # findings rc (gate mode only). See module docstring.
+            scan_rc = self._run_scan_loop(runner, pairs, target_repo, run_root, state_account)
 
-        # -- aggregate ------------------------------------------------
-        scan_rc = self._run_aggregate_and_report(
-            run_root, resolved_mapping, resolved_baseline, scan_rc
-        )
+            # -- aggregate ------------------------------------------------
+            scan_rc = self._run_aggregate_and_report(
+                run_root, resolved_mapping, resolved_baseline, scan_rc
+            )
 
-        _log("INFO", f"scan complete: {output_dir}")
-        return scan_rc
+            _log("INFO", f"scan complete: {output_dir}")
+            return scan_rc
+        except MutatingOperationRefused:
+            sys.exit(99)
 
     # -- scan() helpers ----------------------------------------------
 
@@ -293,13 +357,20 @@ class Orchestrator:
         env: Optional[str],
         mapping_path: Optional[Path],
         baseline_path: Optional[Path],
-    ) -> tuple[Path, Path, Optional[Path], list[tuple[str, str]]]:
+        include_modules: bool = False,
+    ) -> tuple[Path, Path, Optional[Path], list[DiscoveredPair]]:
         """Resolve target repo, mapping, baseline, and (project, env) pairs.
 
         Extracted from :meth:`scan` so that the top-level orchestrator
         reads as a thin glue layer (S3776). Raises :class:`OrchestratorError`
         on resolution failures (mapping, no-pair discovery) so the
         caller can convert them to a single log + non-zero rc.
+
+        ``include_modules`` is forwarded to :func:`discover_pairs` and
+        controls whether ``modules/`` / ``modules-<x>/`` / ``.terraform/``
+        entries in ``scan_paths:`` are honored. Defaults to ``False``
+        (excluded) for source-tier scans; the CLI flag (Todo 8) will
+        override.
         """
         target_repo = Path(target_repo).resolve()
         if not target_repo.is_dir():
@@ -317,6 +388,7 @@ class Orchestrator:
                 target_repo,
                 project_filter=project,
                 env_filter=env,
+                include_modules=include_modules,
             )
         except NoTerraformFoundError as exc:
             raise OrchestratorError(str(exc)) from exc
@@ -389,7 +461,7 @@ class Orchestrator:
         output_dir: Path,
         resolved_mapping: Path,
         resolved_baseline: Optional[Path],
-        pairs: list[tuple[str, str]],
+        pairs: list[DiscoveredPair],
     ) -> None:
         """Emit the per-run INFO banner before the per-pair loop starts.
 
@@ -411,7 +483,7 @@ class Orchestrator:
     def _run_scan_loop(
         self,
         runner: CheckovRunner,
-        pairs: list[tuple[str, str]],
+        pairs: list[DiscoveredPair],
         target_repo: Path,
         run_root: Path,
         state_account: Optional[str],
@@ -421,10 +493,24 @@ class Orchestrator:
         Skips pairs whose env dir is missing. The per-pair dispatch into
         the tier-specific passes is delegated to
         :meth:`_scan_one_pair`.
+
+        Each :class:`DiscoveredPair` carries the optional ``stack_root``
+        (set by ``scan_paths:``) and ``backend_key_override`` /
+        ``workspace`` (also from ``scan_paths:``). The legacy
+        ``(project, env)`` branches produce ``DiscoveredPair`` instances
+        with ``stack_root=None`` and override fields ``None``, so the
+        behavior for those is unchanged.
         """
         scan_rc = 0
-        for proj, env_name in pairs:
-            env_dir = self._resolve_env_dir(target_repo, proj, env_name)
+        for pair in pairs:
+            proj = pair.project
+            env_name = pair.env
+            env_dir = self._resolve_env_dir(
+                target_repo,
+                proj,
+                env_name,
+                stack_root=pair.stack_root,
+            )
             if not env_dir.is_dir():
                 _log(
                     "WARN",
@@ -432,7 +518,11 @@ class Orchestrator:
                 )
                 continue
 
-            env_run_dir = run_root / proj / env_name
+            # Per-pair output dir; scan_paths: stack_label is appended
+            # so two colliding (project, env) entries don't clobber
+            # each other's SARIFs.
+            label_suffix = f"-{pair.stack_label}" if pair.stack_label else ""
+            env_run_dir = run_root / proj / f"{env_name}{label_suffix}"
             env_run_dir.mkdir(parents=True, exist_ok=True)
 
             _log("INFO", f"scanning {proj}/{env_name}")
@@ -442,6 +532,8 @@ class Orchestrator:
                 env=env_name,
                 env_run_dir=env_run_dir,
                 env_dir=env_dir,
+                backend_key_override=pair.backend_key,
+                workspace=pair.workspace,
             )
 
             pair_rc = self._scan_one_pair(runner, state, state_account)
@@ -579,6 +671,14 @@ class Orchestrator:
         Returns 0 on success, -1 when an early bail-out was logged (caller
         should skip the pair's checkov passes). Logs the reason for
         skipping.
+
+        Preflight (Todo 10): the per-pair ``terraform`` invocations
+        call :meth:`_preflight_stack_root` first; a :class:`PreflightError`
+        is caught HERE (not swallowed) and converted into a logged
+        bail-out so the per-pair checkov passes still run on the
+        stack-root's source files. The exception is re-raised to the
+        caller only if the message is malformed — by policy we always
+        log + bail.
         """
         if not self.dry_run and not state_account:
             _log(
@@ -588,31 +688,41 @@ class Orchestrator:
             )
             return -1
 
-        if not self._whitelist_my_ip(state, state_account):
+        if not self._alert_network_required(state, state_account):
             _log(
                 "ERROR",
-                f"failed to whitelist IP; cannot read remote state; "
+                f"network access to {state_account} storage account is "
+                f"required; cannot read remote state; "
                 f"skipping {state.project}/{state.env}",
             )
             return -1
 
-        if not self._run_terraform_init(state):
+        try:
+            if not self._run_terraform_init(state):
+                _log(
+                    "ERROR",
+                    f"terraform init failed for {state.project}/{state.env}; "
+                    "skipping plan layer",
+                )
+                return -1
+
+            if not self._run_terraform_plan(state):
+                _log(
+                    "ERROR",
+                    f"terraform plan failed for {state.project}/{state.env}; "
+                    "skipping plan layer",
+                )
+                return -1
+
+            self._run_terraform_show(state)
+        except PreflightError as exc:
             _log(
                 "ERROR",
-                f"terraform init failed for {state.project}/{state.env}; "
-                "skipping plan layer",
+                f"preflight refused {state.project}/{state.env}: {exc}; "
+                "skipping plan/state layer",
             )
             return -1
 
-        if not self._run_terraform_plan(state):
-            _log(
-                "ERROR",
-                f"terraform plan failed for {state.project}/{state.env}; "
-                "skipping plan layer",
-            )
-            return -1
-
-        self._run_terraform_show(state)
         return 0
 
     def _emit_paac(self, runner: CheckovRunner, state: _PairState) -> int:
@@ -655,7 +765,7 @@ class Orchestrator:
 
     @staticmethod
     def _check_storage_account_valid(account: str) -> None:
-        """Validate a storage account name before it reaches ``subprocess``.
+        """Validate a storage account name before it reaches any subprocess.
 
         Azure storage account naming rules:
           * 3-24 characters
@@ -683,14 +793,27 @@ class Orchestrator:
         target_repo: Path,
         project: str,
         env_name: str,
+        stack_root: Optional[Path] = None,
     ) -> Path:
         """Resolve the env dir for a (project, env) pair.
 
-        For the flat-repo fallback (``project == 'default' and env ==
-        'default'``), the .tf files live at the repo root. Otherwise
-        the bash convention is ``<target_repo>/env/<project>/<env>/``.
-        Mirrors scan.sh line 370.
+        Precedence:
+
+          1. ``stack_root`` (set by ``scan_paths:`` entries) → used
+             verbatim. This is the path the operator declared in
+             ``pci_scope.yaml::scan_paths:`` and is authoritative for
+             stacks that don't live under
+             ``<target_repo>/env/<project>/<env>/`` (sibling checkouts,
+             monorepo roots, etc.).
+          2. Flat-repo fallback (``project == 'default' and env ==
+             'default'``) → ``target_repo`` itself.
+          3. Default bash convention → ``<target_repo>/env/<project>/<env>/``.
+
+        Mirrors scan.sh line 370 for cases (2) and (3); case (1) is the
+        new ``scan_paths:`` opt-in.
         """
+        if stack_root is not None:
+            return Path(stack_root)
         if project == "default" and env_name == "default":
             return target_repo
         return target_repo / "env" / project / env_name
@@ -715,129 +838,361 @@ class Orchestrator:
             return current
         return max(current, new)
 
+    # -- terraform env isolation (Todo 9) -----------------------------
+
+    def _isolate_terraform_env(self, state: _PairState) -> dict[str, str]:
+        """Create an ephemeral TF_DATA_DIR + TF_CLI_CONFIG_FILE for this run.
+
+        Generates ``<run_dir>/terraform-tmp/`` with mode 0o700 on POSIX,
+        writes a minimal ``terraformrc`` inside it, and returns the env
+        dict to pass to ``ops.run(..., env=...)``.
+
+        The generated terraformrc content:
+
+          * If ``self.registry_mirror`` is set: a ``provider_installation``
+            block with a ``network_mirror`` pointing at the mirror URL.
+            This forces Terraform to resolve providers through the
+            declared mirror instead of ``registry.terraform.io``.
+          * Otherwise: a minimal empty config. The file's mere existence
+            (and the fact that ``TF_CLI_CONFIG_FILE`` points here) prevents
+            the consumer's ``~/.terraformrc`` from leaking into the scan.
+
+        The returned dict does NOT include ``TF_PLUGIN_CACHE_DIR``; the
+        registry's ``_DEFAULT_ENV_BLOCKLIST`` already strips it from the
+        ambient env, and we intentionally never re-add it.
+
+        Returns:
+            A dict with ``TF_DATA_DIR`` and ``TF_CLI_CONFIG_FILE`` keys,
+            ready to pass as ``env=`` to :func:`scanner.ops.run`.
+        """
+        tf_tmp = state.env_run_dir / "terraform-tmp"
+        tf_tmp.mkdir(parents=True, exist_ok=True)
+        # Restrict permissions on POSIX (0o700 — rwx------).
+        if sys.platform != "win32":
+            try:
+                os.chmod(tf_tmp, stat.S_IRWXU)
+            except OSError as exc:
+                _log("WARN", f"  failed to chmod terraform-tmp: {exc}")
+
+        terraformrc = tf_tmp / "terraformrc"
+        if self.registry_mirror:
+            # Network mirror config: force provider resolution through
+            # the declared mirror URL.
+            terraformrc_content = (
+                'provider_installation {\n'
+                '  network_mirror {\n'
+                f'    url = "{self.registry_mirror}"\n'
+                '  }\n'
+                '}\n'
+            )
+        else:
+            # Minimal allow-only-default-registry config. An empty file
+            # is sufficient — Terraform reads it, finds no overrides,
+            # and proceeds with defaults. The key security property is
+            # that the consumer's ~/.terraformrc is NOT consulted.
+            terraformrc_content = "# Generated by pacioli — no overrides\n"
+
+        terraformrc.write_text(terraformrc_content, encoding="utf-8")
+
+        return {
+            "TF_DATA_DIR": str(tf_tmp),
+            "TF_CLI_CONFIG_FILE": str(terraformrc),
+        }
+
+    @staticmethod
+    def _shred_terraform_tmp(state: _PairState) -> None:
+        """Shred the ephemeral ``<run_dir>/terraform-tmp/`` directory.
+
+        Called after each ``_run_terraform_*`` invocation (or sequence
+        thereof) to prevent sensitive Terraform state (credentials,
+        plugin cache, etc.) from lingering on disk. Best-effort: errors
+        are logged at WARN and swallowed.
+        """
+        tf_tmp = state.env_run_dir / "terraform-tmp"
+        if not tf_tmp.exists():
+            return
+        try:
+            # Overwrite files with zeros before removing (best-effort
+            # secure delete; ``shred`` may not be available on all
+            # platforms, and rmtree is the reliable cross-platform path).
+            for item in tf_tmp.rglob("*"):
+                if item.is_file():
+                    try:
+                        size = item.stat().st_size
+                        with open(item, "wb") as fh:
+                            fh.write(b"\x00" * size)
+                    except OSError:
+                        pass  # best-effort overwrite
+            shutil.rmtree(tf_tmp)
+            _log("INFO", "  shredded terraform-tmp directory")
+        except OSError as exc:
+            _log("WARN", f"  failed to shred terraform-tmp: {exc}")
+
     # -- terraform + state-blob --------------------------------------
 
-    def _whitelist_my_ip(
+    def _alert_network_required(
         self,
         state: _PairState,
         state_account: Optional[str],
     ) -> bool:
-        """Add the current public IP to the state storage firewall.
+        """Emit a one-line warning that this storage account needs network access.
 
-        Stores the IP in ``<env_run_dir>/.whitelist_ip`` so the EXIT
-        trap can find it. Idempotent: re-running overwrites the file.
+        Replaces the prior helper which fired an Azure CLI storage-account
+        network-rule mutation to whitelist the runner's IP. That mutation
+        is now deliberately NOT performed: the orchestrator is read-only
+        and the firewall-whitelist step was the only mutation it issued.
+        The caller (``_run_plan_tier``) treats the ``False`` return as a
+        bail-out so the per-pair plan/state passes are skipped.
 
-        Returns True on success (or dry-run). Mirrors scan.sh lines
-        398-410.
+        The alert format is the single-line, machine-grep-friendly token
+        ``STORAGE_ACCOUNT=<x>; RUNNER_IP=<y>; you need network access
+        to this storage account from this IP`` so an operator can
+        audit logs for missing-network-access pairs after the fact.
+
+        Args:
+            state: Per-pair working state. ``state.env_run_dir`` is
+                unused (no artifact is written) but is kept on the
+                signature for parity with the prior helper.
+            state_account: Storage account name. May be ``None`` when
+                the caller failed the early-bail check; in that case
+                ``runner_ip`` is reported as ``"unknown"`` so the log
+                line is still useful.
+
+        Returns:
+            ``False`` — the caller MUST treat this as a per-pair skip
+            (fail-closed: tier=plan/state cannot read remote state
+            without firewall access, and the scanner will not mutate
+            Azure to grant it).
         """
-        assert state_account is not None  # checked by caller
-        _log("INFO", f"  whitelist current IP on {state_account} storage firewall")
+        # Defense-in-depth: still validate the CLI-derived value so a
+        # bogus ``--state-account`` lands in the log with a clear shape
+        # rather than being echoed raw.
+        if state_account is not None:
+            try:
+                self._check_storage_account_valid(state_account)
+            except ValueError as exc:
+                _log("ERROR", f"  invalid state_account for alert: {exc}")
+                state_account = "<invalid>"
 
-        if self.dry_run:
-            # Defense-in-depth: validate the CLI-derived value before any
-            # subprocess invocation (S8705 — taint from CLI flag).
-            self._check_storage_account_valid(state_account)
-            print("[dry-run] whitelist_my_ip")
-            return True
+        # Best-effort discovery: if it fails we still want the alert.
+        runner_ip = _discover_public_ip() or "unknown"
+        storage = state_account if state_account is not None else "<unset>"
 
-        # Defense-in-depth: validate the CLI-derived value before any
-        # subprocess invocation (S8705 — taint from CLI flag). Bind the
-        # validated value to a local so the static analyzer sees the
-        # taint cleared at the point subprocess.run is called.
-        self._check_storage_account_valid(state_account)
-        validated_account = state_account
-
-        # Discover the public IP via the canonical Azure metadata
-        # endpoint. Falls back to ipify if the metadata endpoint is
-        # unreachable (e.g. dev box without Azure metadata service).
-        ip = _discover_public_ip()
-        if not ip:
-            _log("ERROR", "  could not determine current public IP")
-            return False
-
-        # Refuse if the command matches a forbidden mutating pattern.
-        # The whitelist command is in ALLOWED_EXCEPTIONS so the guard
-        # passes — but the defense-in-depth check still fires.
-        cmd = (
-            f"az storage account network-rule add "
-            f"--account-name {validated_account} --ip-address {ip}"
+        logging.warning(
+            "STORAGE_ACCOUNT=%s; RUNNER_IP=%s; you need network access "
+            "to this storage account from this IP",
+            storage,
+            runner_ip,
         )
-        self.safety.refuse_if_mutating(cmd)
+        return False
 
-        # Defense-in-depth re-validation immediately before the
-        # subprocess call (S8705 — taint from CLI flag). Use an inline
-        # ``re.fullmatch`` guard so the static analyzer sees the
-        # sanitization at the immediate use-site, then bind the
-        # validated value to a local for the subprocess argv.
-        if not re.fullmatch(AZURE_STORAGE_ACCOUNT_PATTERN, validated_account):
-            raise ValueError(f"invalid state_account: {validated_account!r}")
-        sanitized_account: str = validated_account
+    # -- preflight (Todo 10) ------------------------------------------
 
-        result = subprocess.run(
-            [
-                "az",
-                "storage",
-                "account",
-                "network-rule",
-                "add",
-                "--account-name",
-                sanitized_account,
-                "--ip-address",
-                ip,
-                "--output",
-                "none",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode != 0:
-            _log(
-                "ERROR",
-                f"  az network-rule add failed (rc={result.returncode}): "
-                f"{(result.stderr or '').strip()}",
+    @staticmethod
+    def _is_symlinked(path: Path) -> bool:
+        """Return True if ``path`` is itself a symlink.
+
+        Thin wrapper around :meth:`Path.is_symlink` so the preflight
+        test list reads as a flat checklist and the symlink-detection
+        policy lives in one place.
+        """
+        return path.is_symlink()
+
+    @staticmethod
+    def _has_parent_traversal(resolved_path: Path) -> bool:
+        """Return True if ``resolved_path`` still contains ``..`` segments.
+
+        Defends against a path that survives :meth:`Path.resolve` but
+        was assembled from segments like ``a/../../etc`` that resolve
+        to an unexpected location. ``resolve()`` collapses ``..`` on
+        POSIX by walking up; on Windows it does the same. We re-check
+        the segments anyway so the policy is portable and the
+        preflight never depends on OS-specific resolve behavior.
+        """
+        return ".." in resolved_path.parts
+
+    @staticmethod
+    def _find_disallowed_subdir(stack_root: Path) -> Optional[str]:
+        """Return the first disallowed module-library subdir, or ``None``.
+
+        Scans the immediate children of ``stack_root`` for entries
+        whose name matches ``modules``, ``modules-<x>``, or
+        ``.terraform``. These are Terraform's well-known module-library
+        directories and are NEVER valid scan targets: scanning them
+        would re-enter the consumer's ``modules/`` library as if it were
+        a stack, generating massive false-positive SARIFs. The check
+        is a one-level listing (``iterdir``) so a nested
+        ``modules/foo/modules`` does NOT trigger it; only direct
+        children of ``stack_root`` count, matching the scan_paths:
+        exclusion semantics in :mod:`scanner.discovery`.
+
+        Returns the offending directory name (basename) so the error
+        message can name it specifically.
+        """
+        if not stack_root.is_dir():
+            return None
+        for child in stack_root.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name
+            if name == "modules":
+                return name
+            if name.startswith("modules-"):
+                return name
+            if name == ".terraform":
+                return name
+        return None
+
+    def _preflight_stack_root(self, state: _PairState) -> None:
+        """Validate ``state.env_dir`` before any ``terraform`` subprocess fires.
+
+        Todo 10: the last line of defense between the orchestrator and
+        a real ``terraform init`` / ``terraform plan`` /
+        ``terraform show`` invocation. Each check exists for a reason:
+
+        * **Symlink check**: a symlinked stack root could escape the
+          declared target repo (e.g. ``env/payments/prod`` → a sibling
+          checkout, an attacker's writable directory, or ``/tmp``).
+          ``Path.is_symlink`` returns True for the link itself, not
+          its target; we reject before resolve() so a chained symlink
+          doesn't accidentally pass.
+        * **Path-traversal check**: any remaining ``..`` segment in
+          the resolved path means the resolved path crossed outside
+          the declared root. We refuse rather than follow.
+        * **Module-library subdir check**: scanning ``modules/``,
+          ``modules-<x>/``, or ``.terraform/`` would emit thousands of
+          duplicate findings (one per consumer module that re-uses the
+          library). The ``--include-modules`` flag (Todo 8) is the
+          documented opt-out; preflight honors it.
+        * **Lockfile presence check**: ``.terraform.lock.hcl`` is the
+          canonical Terraform dependency-lock file. When missing, the
+          consumer's provider set is ambiguous, and ``terraform
+          init`` will silently download whatever is on the registry —
+          which is exactly the "pull from registry.terraform.io" path
+          Todo 9's ``network_mirror`` exists to redirect. The
+          ``--ignore-lockfile`` flag (Todo 8) is the documented opt-out;
+          preflight honors it.
+
+        ``include_modules`` and ``ignore_lockfile`` are read off
+        ``self`` (set by :meth:`scan`) so the helper signature stays
+        single-arg. Passes the per-pair ``_PairState`` so the error
+        message names the offending path.
+
+        Raises:
+            PreflightError: when any of the four checks fails. The
+                caller (:meth:`_scan_one_pair`) catches this and fails
+                the pair.
+        """
+        include_modules = bool(getattr(self, "_include_modules", False))
+        ignore_lockfile = bool(getattr(self, "_ignore_lockfile", False))
+
+        env_dir = Path(state.env_dir)
+
+        # 1. Symlink check. Reject the link itself (not the target) so a
+        #    consumer cannot smuggle a stack root through a symlink that
+        #    resolves to a directory outside the declared scope.
+        if self._is_symlinked(env_dir):
+            raise PreflightError(
+                f"preflight: stack root is a symlink: {env_dir} "
+                f"(refusing to follow symlinks; move the stack to its "
+                f"real location or update scan_paths:)"
             )
-            return False
 
-        # Record the IP for the cleanup trap.
-        (state.env_run_dir / ".whitelist_ip").write_text(ip, encoding="utf-8")
-        _log("INFO", f"  whitelisted IP {ip}")
-        return True
+        # 2. Path-traversal check. ``..`` segments in the resolved
+        #    path mean the resolver walked up outside the intended
+        #    root. Reject — never follow.
+        try:
+            resolved = env_dir.resolve()
+        except OSError as exc:
+            raise PreflightError(
+                f"preflight: cannot resolve stack root {env_dir}: {exc}"
+            ) from exc
+        if self._has_parent_traversal(resolved):
+            raise PreflightError(
+                f"preflight: stack root resolves to a path containing "
+                f"'..' segments: {resolved} (refusing parent traversal; "
+                f"fix scan_paths: or env dir layout)"
+            )
+
+        # 3. Module-library subdir check. Direct children only; nested
+        #    module libraries are intentionally not flagged (matching
+        #    scanner.discovery's exclusion semantics).
+        if not include_modules:
+            disallowed = self._find_disallowed_subdir(env_dir)
+            if disallowed is not None:
+                raise PreflightError(
+                    f"preflight: stack root contains excluded module "
+                    f"library '{disallowed}/' (refusing to scan module "
+                    f"libraries as stacks; pass --include-modules to "
+                    f"override)"
+                )
+
+        # 4. Lockfile presence check. Skip when --ignore-lockfile.
+        if not ignore_lockfile:
+            lockfile = env_dir / ".terraform.lock.hcl"
+            if not lockfile.is_file():
+                raise PreflightError(
+                    f"preflight: missing {env_dir / '.terraform.lock.hcl'} "
+                    f"(refusing to run 'terraform init' without a "
+                    f"declared provider lock; pass --ignore-lockfile to "
+                    f"override)"
+                )
 
     def _run_terraform_init(self, state: _PairState) -> bool:
         """Run ``terraform init -input=false`` in the env dir.
 
         Mirrors scan.sh line 418. ``-input=false`` disables interactive
         prompts. Providers are downloaded from the registry or
-        filesystem_mirror; no Azure mutations.
+        filesystem_mirror; no Azure mutations. Routed through the
+        :mod:`scanner.ops` registry; argv schema is the 5 tokens
+        ``("-chdir", <env_dir>, "init", "-input=false", "-no-color")``.
+
+        TF env isolation (Todo 9): before the run, an ephemeral
+        ``<run_dir>/terraform-tmp/`` directory is created with a
+        generated ``terraformrc``. ``TF_DATA_DIR`` and
+        ``TF_CLI_CONFIG_FILE`` are set to point into it, and
+        ``TF_PLUGIN_CACHE_DIR`` is never set (the registry blocklist
+        strips it from ambient env). After the run, the directory is
+        shredded.
+
+        Preflight (Todo 10): :meth:`_preflight_stack_root` is invoked
+        first thing so a malformed stack root never reaches the real
+        ``terraform`` binary. The check is cheap (4 stat-style
+        inspections) and re-runs at the top of ``_run_terraform_plan``
+        and ``_run_terraform_show`` for defense-in-depth.
         """
+        self._preflight_stack_root(state)
         _log("INFO", "  terraform init")
         if self.dry_run:
             print("[dry-run] terraform init")
             return True
 
+        tf_env = self._isolate_terraform_env(state)
         try:
-            result = subprocess.run(
-                [
-                    "terraform",
-                    "-chdir",
-                    str(state.env_dir),
-                    "init",
-                    "-input=false",
-                    "-no-color",
-                ],
-                capture_output=True,
-                text=True,
+            result = scanner_ops.run(
+                "terraform.init_local",
+                "-chdir",
+                str(state.env_dir),
+                "init",
+                "-input=false",
+                "-backend=false",
+                "-no-color",
+                tier=self.tier,
                 timeout=300,
-                check=False,
+                env=tf_env,
             )
-        except subprocess.TimeoutExpired:
-            _log("ERROR", "  terraform init timed out")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  terraform binary not found on PATH: {exc}")
             return False
-        except FileNotFoundError:
-            _log("ERROR", "  terraform binary not found on PATH")
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  terraform.init_local tier refused: {exc}")
             return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  terraform.init_local argv rejected: {exc}")
+            return False
+        finally:
+            # Shred the ephemeral TF env on ALL exit paths. Idempotent.
+            self._shred_terraform_tmp(state)
 
         if result.returncode != 0:
             _log(
@@ -851,41 +1206,68 @@ class Orchestrator:
     def _run_terraform_plan(self, state: _PairState) -> bool:
         """Run ``terraform plan -out=tfplan.binary`` in the env dir.
 
-        Acquires state lock and reads remote state. NO mutation. The
-        plan binary is shredded on exit by the trap (or by
-        :meth:`_shred_plan_artifacts` per-pair). Mirrors scan.sh
-        lines 425-431.
+        Reads remote state but does NOT mutate it (no lock acquisition,
+        no refresh). The plan binary is shredded on exit by the trap
+        (or by :meth:`_shred_plan_artifacts` per-pair). Mirrors scan.sh
+        lines 425-431. Routed through the :mod:`scanner.ops` registry;
+        argv schema is the 8 tokens ``("-chdir", <env_dir>, "plan",
+        "-no-color", "-out=<plan_bin>", "-lock=false",
+        "-refresh=false")``.
+
+        TF env isolation (Todo 9): same as :meth:`_run_terraform_init`.
+
+        Preflight (Todo 10): same as :meth:`_run_terraform_init`.
         """
+        self._preflight_stack_root(state)
         plan_bin = state.env_run_dir / "tfplan.binary"
         state.plan_bin = plan_bin
+
+        # Pre-create the plan binary with restrictive POSIX mode
+        # (0o600) so terraform inherits the permissions when it
+        # writes the file. This is the creation-side companion to
+        # safe_unlink: the artifact is owner-only from the moment it
+        # exists, narrowing the window where it could be read by a
+        # second local user. On Windows the helper logs a one-line
+        # note that POSIX-mode narrowing is skipped; we accept that
+        # gap rather than introducing a new dependency (no portable
+        # stdlib ACL helper).
+        try:
+            create_secure_file(plan_bin, state.env_run_dir)
+        except ValueError as exc:
+            _log("ERROR", f"  refused to prepare plan binary: {exc}")
+            return False
 
         _log("INFO", f"  terraform plan -out={plan_bin.name}")
         if self.dry_run:
             print(f"[dry-run] terraform plan -out={plan_bin}")
             return True
 
+        tf_env = self._isolate_terraform_env(state)
         try:
-            result = subprocess.run(
-                [
-                    "terraform",
-                    "-chdir",
-                    str(state.env_dir),
-                    "plan",
-                    "-no-color",
-                    f"-out={plan_bin}",
-                    "-lock=true",
-                ],
-                capture_output=True,
-                text=True,
+            result = scanner_ops.run(
+                "terraform.plan_local",
+                "-chdir",
+                str(state.env_dir),
+                "plan",
+                "-no-color",
+                f"-out={plan_bin}",
+                "-lock=false",
+                "-refresh=false",
+                tier=self.tier,
                 timeout=600,
-                check=False,
+                env=tf_env,
             )
-        except subprocess.TimeoutExpired:
-            _log("ERROR", "  terraform plan timed out")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  terraform binary not found on PATH: {exc}")
             return False
-        except FileNotFoundError:
-            _log("ERROR", "  terraform binary not found on PATH")
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  terraform.plan_local tier refused: {exc}")
             return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  terraform.plan_local argv rejected: {exc}")
+            return False
+        finally:
+            self._shred_terraform_tmp(state)
 
         if result.returncode != 0:
             _log(
@@ -900,38 +1282,77 @@ class Orchestrator:
         """Run ``terraform show -json`` and write plan.json.
 
         Mirrors scan.sh line 435. Idempotent: overwrites plan_json if
-        it already exists.
+        it already exists. Routed through the :mod:`scanner.ops`
+        registry; the registry captures stdout (it cannot redirect),
+        so the caller's flow is: invoke the op, then write
+        ``result.stdout`` to ``plan_json``. argv schema is the 5 tokens
+        ``("-chdir", <env_dir>, "show", "-json", <plan_bin>)``.
+
+        TF env isolation (Todo 9): same as :meth:`_run_terraform_init`.
+
+        Preflight (Todo 10): same as :meth:`_run_terraform_init`.
         """
         if state.plan_bin is None:
             return
+        self._preflight_stack_root(state)
         plan_json = state.env_run_dir / "plan.json"
         state.plan_json = plan_json
+
+        # Pre-create plan.json with restrictive POSIX mode so the
+        # registry-captured stdout write (line below) lands on a
+        # file that is already owner-only. See the matching call in
+        # ``_run_terraform_plan`` for the rationale.
+        try:
+            create_secure_file(plan_json, state.env_run_dir)
+        except ValueError as exc:
+            _log("ERROR", f"  refused to prepare plan.json: {exc}")
+            return
 
         _log("INFO", "  terraform show -json")
         if self.dry_run:
             print(f"[dry-run] terraform show -json {state.plan_bin} > {plan_json}")
             return
 
+        tf_env = self._isolate_terraform_env(state)
         try:
-            with plan_json.open("w", encoding="utf-8") as fh:
-                subprocess.run(
-                    [
-                        "terraform",
-                        "-chdir",
-                        str(state.env_dir),
-                        "show",
-                        "-json",
-                        str(state.plan_bin),
-                    ],
-                    stdout=fh,
-                    text=True,
-                    timeout=120,
-                    check=True,
-                )
-        except subprocess.TimeoutExpired:
-            _log("ERROR", "  terraform show timed out")
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            _log("ERROR", f"  terraform show failed: {exc}")
+            result = scanner_ops.run(
+                "terraform.show_json",
+                "-chdir",
+                str(state.env_dir),
+                "show",
+                "-json",
+                str(state.plan_bin),
+                tier=self.tier,
+                timeout=120,
+                env=tf_env,
+            )
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  terraform binary not found on PATH: {exc}")
+            return
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  terraform.show_json tier refused: {exc}")
+            return
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  terraform.show_json argv rejected: {exc}")
+            return
+        finally:
+            self._shred_terraform_tmp(state)
+
+        if result.returncode != 0:
+            _log(
+                "ERROR",
+                f"  terraform show failed (rc={result.returncode}): "
+                f"{(result.stderr or result.stdout or '').strip()[:500]}",
+            )
+            return
+
+        # The registry captured stdout; write it to plan_json. This
+        # preserves the prior ``stdout=fh`` semantics (overwrite on
+        # each run; idempotent).
+        try:
+            plan_json.write_text(result.stdout or "", encoding="utf-8")
+        except OSError as exc:
+            _log("ERROR", f"  failed to write plan.json: {exc}")
 
     # -- state-blob scan (tier=state) --------------------------------
 
@@ -953,7 +1374,12 @@ class Orchestrator:
         self._check_storage_account_valid(state_account)
         _log("INFO", "  state-scan: download state blob from Azure")
 
-        backend_key = self._resolve_or_synthesize_backend_key(state)
+        backend_key = self._resolve_backend_key(
+            stack_root=state.env_dir,
+            cli_override=state.backend_key_override,
+            aztfexport_key=self._resolve_backend_key_from_aztfexport(state),
+            env_default=f"{state.env}.tfstate",
+        )
         paths = self._resolve_state_blob_paths(state)
 
         if self.dry_run:
@@ -976,35 +1402,38 @@ class Orchestrator:
         # Shred state plan after drift extraction.
         self._shred_state_plan(paths["state_plan_json"])
 
-    def _resolve_or_synthesize_backend_key(self, state: _PairState) -> str:
-        """Return the storage backend key, synthesizing one if missing.
-
-        Reads ``<env_dir>/terraform.aztfexport.tf``; falls back to
-        ``CR_<Env>_<project>.tfstate`` so downstream download has a key.
-        """
-        backend_key = self._resolve_backend_key(state)
-        if backend_key:
-            return backend_key
-        synthesized = f"CR_{state.env[:1].upper()}{state.env[1:]}_{state.project}.tfstate"
-        _log(
-            "WARN",
-            f"no backend key in terraform.aztfexport.tf; "
-            f"falling back to synthesized: {synthesized}",
-        )
-        return synthesized
-
     @staticmethod
     def _resolve_state_blob_paths(state: _PairState) -> dict[str, Path]:
         """Return the local paths used by the state-blob scan pipeline.
 
         Also annotates ``state.state_local`` / ``state.state_plan_json``
         so downstream helpers (e.g. shred, drift) find them.
+
+        Pre-creates ``state.tfstate`` and ``state_as_plan.json`` with
+        restrictive POSIX permissions (0o600) so the subsequent
+        ``az storage blob download`` and ``tfstate_to_plan.py``
+        invocations inherit owner-only mode. The state blob may
+        contain sensitive Azure resource attributes; the same
+        best-effort data minimization that applies to plan
+        artifacts applies here.
         """
         state_local = state.env_run_dir / "state.tfstate"
         state_plan_json = state.env_run_dir / "state_as_plan.json"
         drift_report = state.env_run_dir / "drift_report.json"
         state.state_local = state_local
         state.state_plan_json = state_plan_json
+        # Pre-create with restrictive mode. Containment is guaranteed
+        # because the paths are constructed from ``state.env_run_dir``
+        # which is itself resolved+contained by ``_run_scan_loop``.
+        for sensitive in (state_local, state_plan_json):
+            try:
+                create_secure_file(sensitive, state.env_run_dir)
+            except ValueError as exc:
+                # Programming error — paths were just constructed
+                # from a resolved run_dir, so this should never fire.
+                # Surface it so the pair is failed rather than
+                # silently continuing with world-readable state.
+                _log("ERROR", f"  refused to prepare state artifact: {exc}")
         return {
             "state_local": state_local,
             "state_plan_json": state_plan_json,
@@ -1036,41 +1465,47 @@ class Orchestrator:
     ) -> bool:
         """Download the state blob to ``state_local``; True on success.
 
-        Logs and returns False on timeout, missing binary, non-zero rc,
-        or empty result. The downloaded blob is shredded ASAP in the
-        caller (PCI 10.7 hygiene).
+        Logs and returns False on registry refusal, timeout, missing
+        binary, non-zero rc, or empty result. The downloaded blob is
+        shredded ASAP in the caller (PCI 10.7 hygiene). Routed through
+        the :mod:`scanner.ops` registry; argv schema is the 15 tokens
+        ``("storage", "blob", "download", "--account-name", <account>,
+        "--container-name", "iac", "--name", <key>, "--file",
+        <state_local>, "--auth-mode", "login", "--output", "none")``.
         """
         # Defense-in-depth: validate the CLI-derived value here too so
         # the data-flow analyzer sees the check immediately before the
         # subprocess invocation (S8705 — taint from CLI flag).
         self._check_storage_account_valid(state_account)
         try:
-            dl = subprocess.run(
-                [
-                    "az",
-                    "storage",
-                    "blob",
-                    "download",
-                    "--account-name",
-                    state_account,
-                    "--container-name",
-                    "iac",
-                    "--name",
-                    backend_key,
-                    "--file",
-                    str(state_local),
-                    "--auth-mode",
-                    "login",
-                    "--output",
-                    "none",
-                ],
-                capture_output=True,
-                text=True,
+            dl = scanner_ops.run(
+                "az.blob_download",
+                "storage",
+                "blob",
+                "download",
+                "--account-name",
+                state_account,
+                "--container-name",
+                "iac",
+                "--name",
+                backend_key,
+                "--file",
+                str(state_local),
+                "--auth-mode",
+                "login",
+                "--output",
+                "none",
+                tier=self.tier,
                 timeout=60,
-                check=False,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            _log("ERROR", f"  state blob download failed: {exc}")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  az binary not found on PATH: {exc}")
+            return False
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  az.blob_download tier refused: {exc}")
+            return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  az.blob_download argv rejected: {exc}")
             return False
 
         if dl.returncode != 0:
@@ -1100,30 +1535,46 @@ class Orchestrator:
 
         Shreds ``state_local`` on a successful conversion (PCI 10.7).
         Returns False if conversion failed or output is missing.
+        Routed through the :mod:`scanner.ops` registry; argv schema is
+        the 3 ``ANY`` slots ``(<tfstate_to_plan.py>, <state_local>,
+        <state_plan_json>)`` (executable resolves to ``sys.executable``
+        inside the registry).
         """
         try:
-            conv = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve().parent / "tfstate_to_plan.py"),
-                    str(state_local),
-                    str(state_plan_json),
-                ],
-                capture_output=True,
-                text=True,
+            conv = scanner_ops.run(
+                "python.tfstate_to_plan",
+                str(Path(__file__).resolve().parent / "tfstate_to_plan.py"),
+                str(state_local),
+                str(state_plan_json),
+                tier=self.tier,
                 timeout=120,
-                check=False,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            _log("ERROR", f"  tfstate_to_plan failed: {exc}")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  python interpreter not found on PATH: {exc}")
+            return False
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  python.tfstate_to_plan tier refused: {exc}")
+            return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  python.tfstate_to_plan argv rejected: {exc}")
             return False
 
         # Shred the encrypted state blob ASAP (PCI 10.7 hygiene).
         if state_local.is_file():
             try:
-                state_local.unlink()
-            except OSError as exc:
-                _log("WARN", f"  failed to remove state blob: {exc}")
+                # safe_unlink enforces run_dir containment and
+                # prefers shred with an overwrite-with-zeros fallback.
+                # Failure is logged inside the helper; we do not
+                # surface a duplicate WARN here.
+                # ``state_local`` is built as
+                # ``state.env_run_dir / "state.tfstate"`` in
+                # _resolve_state_blob_paths, so its parent IS the
+                # env run dir and the containment guarantee holds.
+                safe_unlink(state_local, state_local.parent)
+            except ValueError as exc:
+                # Containment failure is a programming error; surface
+                # it loudly so the caller can fail the pair.
+                _log("ERROR", f"  refused to remove state blob: {exc}")
 
         if conv.returncode != 0 or not state_plan_json.is_file():
             _log("ERROR", "  tfstate_to_plan did not produce a plan JSON")
@@ -1160,44 +1611,68 @@ class Orchestrator:
         """Run ``drift_report.py`` to diff ``state.plan_json`` vs state-as-plan.
 
         Best-effort: errors are logged at WARN, never raised. Skipped
-        when ``state.plan_json`` is unavailable.
+        when ``state.plan_json`` is unavailable. Routed through the
+        :mod:`scanner.ops` registry; argv schema is the 4 ``ANY`` slots
+        ``(<drift_report.py>, <plan_json>, <state_plan_json>,
+        <drift_report>)``.
         """
         if not (state.plan_json and state.plan_json.is_file() and state_plan_json.is_file()):
             return
         try:
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve().parent / "drift_report.py"),
-                    str(state.plan_json),
-                    str(state_plan_json),
-                    str(drift_report),
-                ],
-                capture_output=True,
-                text=True,
+            scanner_ops.run(
+                "python.drift_report",
+                str(Path(__file__).resolve().parent / "drift_report.py"),
+                str(state.plan_json),
+                str(state_plan_json),
+                str(drift_report),
+                tier=self.tier,
                 timeout=120,
-                check=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            _log("WARN", f"  drift_report.py timed out: {exc}")
-        except FileNotFoundError as exc:
+        except scanner_ops.TrustedBinaryMissing as exc:
             _log("WARN", f"  drift_report.py unavailable: {exc}")
+        except scanner_ops.TierViolation as exc:
+            _log("WARN", f"  python.drift_report tier refused: {exc}")
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("WARN", f"  python.drift_report argv rejected: {exc}")
 
     @staticmethod
     def _shred_state_plan(state_plan_json: Path) -> None:
-        """Shred the state-as-plan JSON (PCI 10.7 hygiene, best-effort)."""
+        """Shred the state-as-plan JSON (PCI 10.7 hygiene, best-effort).
+
+        Routes through :func:`scanner.trap.safe_unlink` so the
+        containment check, shred-vs-overwrite policy, and JSON-safe
+        log line are uniform across every sensitive-artifact cleanup
+        site. The :class:`ValueError` from the containment check is
+        a programming error — surface it loudly so the caller can
+        fail the pair rather than silently skipping cleanup.
+        """
         if not state_plan_json.is_file():
             return
         try:
-            state_plan_json.unlink()
-        except OSError as exc:  # noqa: BLE001 — best-effort shred; logged for forensics
-            _log("WARN", f"  failed to shred state plan: {exc}")
+            safe_unlink(state_plan_json, state_plan_json.parent)
+        except ValueError as exc:  # noqa: BLE001 — surface containment failures
+            _log("ERROR", f"  refused to shred state plan: {exc}")
 
-    def _resolve_backend_key(self, state: _PairState) -> Optional[str]:
+    @staticmethod
+    def _resolve_backend_key_from_aztfexport(state: _PairState) -> Optional[str]:
         """Read the storage backend key from terraform.aztfexport.tf.
 
         Mirrors scan.sh lines 610-613. Returns ``None`` when the file is
         missing or the key field is absent.
+
+        This is the third tier of the documented backend-key precedence:
+
+          1. CLI override (``--backend-key`` / per-entry ``scan_paths:
+             backend_key:``) — handled by ``_resolve_backend_key`` via
+             its ``cli_override`` argument.
+          2. ``<stack_root>/terraform.aztfexport.tf`` — this method.
+          3. ``f"{env}.tfstate"`` basename default — handled by
+             ``_resolve_backend_key`` via its ``env_default`` argument.
+          4. Fail-closed: no synthesized key. The caller surfaces the
+             empty result so the operator can fix the missing input.
+
+        Splitting the reader from the precedence resolver keeps the
+        orchestrator's hot path testable without filesystem state.
         """
         aztf_file = state.env_dir / "terraform.aztfexport.tf"
         if not aztf_file.is_file():
@@ -1219,11 +1694,51 @@ class Orchestrator:
                 return value
         return None
 
+    @staticmethod
+    def _resolve_backend_key(
+        stack_root: Path,
+        cli_override: Optional[str],
+        aztfexport_key: Optional[str],
+        env_default: str,
+    ) -> str:
+        """Return the storage backend key for a stack using documented precedence.
+
+        Documented precedence (highest → lowest):
+
+          1. ``cli_override`` — explicit per-pair value from
+             ``scan_paths:`` ``backend_key:`` (or a future CLI flag).
+             Wins unconditionally when set.
+          2. ``aztfexport_key`` — value parsed from
+             ``<stack_root>/terraform.aztfexport.tf`` (the legacy
+             bash scanner's source).
+          3. ``env_default`` — the basename-style default
+             ``f"{env}.tfstate"``. Used when neither (1) nor (2) is
+             available.
+          4. Fail-closed: when ``env_default`` is empty (caller chose
+             to disable it), return the empty string. The caller is
+             responsible for surfacing the failure — this helper does
+             NOT synthesize a key.
+
+        Replaces the prior ``_resolve_or_synthesize_backend_key``
+        helper, which silently invented a ``CR_<Env>_<project>.tfstate``
+        key when the aztfexport file was missing. Silent synthesis
+        hides configuration bugs; the fail-closed contract surfaces
+        them.
+        """
+        if cli_override:
+            return cli_override
+        if aztfexport_key:
+            return aztfexport_key
+        return env_default
+
     def _shred_plan_artifacts(self, state: _PairState) -> None:
         """Shred tfplan.binary and plan.json for this pair (PCI 10.7 hygiene).
 
         Mirrors scan.sh lines 686-694. Idempotent: missing files are
-        silently skipped.
+        silently skipped. Every cleanup goes through
+        :func:`scanner.trap.safe_unlink` so the run_dir containment
+        check, shred-vs-overwrite policy, and JSON-safe log line are
+        uniform across the orchestrator.
         """
         if state.plan_bin is None and state.plan_json is None:
             return
@@ -1238,10 +1753,15 @@ class Orchestrator:
             if not path.exists():
                 continue
             try:
-                path.unlink()
-                _log("INFO", f"  removed {path.name}")
-            except OSError as exc:
-                _log("WARN", f"  failed to remove {path}: {exc}")
+                # safe_unlink enforces containment, prefers shred
+                # (via ops.run) with an overwrite-with-zeros
+                # fallback, and emits a JSON-safe log line. The
+                # helper handles all error paths internally; a
+                # ValueError here is a programming error (path not
+                # under env_run_dir) and is surfaced loudly.
+                safe_unlink(path, state.env_run_dir)
+            except ValueError as exc:  # noqa: BLE001 — surface containment failures
+                _log("ERROR", f"  refused to shred {path.name}: {exc}")
 
     # -- mapping resolution ------------------------------------------
 
@@ -1486,6 +2006,67 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Storage account name (required for tier=plan|state).",
     )
+    # Multi-stack flags (Todo 8). Each ``--scan-path-entry`` token is a
+    # JSON object produced by ``scanner.cli._resolve_scan_path_entries``
+    # (after glob expansion + per-entry validation). ``action="append"``
+    # preserves argv order so the orchestrator sees entries in the
+    # priority the operator typed.
+    parser.add_argument(
+        "--scan-path-entry",
+        action="append",
+        default=None,
+        metavar="JSON",
+        help=(
+            "Repeatable. One resolved scan-path entry as a JSON object "
+            "(CLI-only; populated by scanner.cli from --scan-path / "
+            "--scan-glob). Keys: path, project?, env?, backend_key?, "
+            "workspace?, stack_label?."
+        ),
+    )
+    parser.add_argument(
+        "--include-modules",
+        action="store_true",
+        help=(
+            "Source-tier only: honor scan_path entries whose stack root "
+            "is a module library (modules/, modules-<x>/, .terraform/)."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-lockfile",
+        action="store_true",
+        help=(
+            "Scan .terraform.lock.hcl even when it lives inside an "
+            "excluded directory."
+        ),
+    )
+    parser.add_argument(
+        "--state-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Offline tier=plan|state bypass: read .tfstate from a local "
+            "file instead of running 'az storage blob download'."
+        ),
+    )
+    parser.add_argument(
+        "--registry-mirror",
+        default=None,
+        metavar="URL",
+        help=(
+            "URL of a private Terraform module registry mirror. Sets "
+            "TF_CLI_CONFIG_FILE to an isolated, generated config for "
+            "this run."
+        ),
+    )
+    parser.add_argument(
+        "--backend-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Default storage backend key for entries that don't carry "
+            "an explicit per-entry backend_key."
+        ),
+    )
     parser.add_argument(
         "--no-open",
         action="store_true",
@@ -1494,20 +2075,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _register_cleanup_trap(output_dir: Path, state_account: Optional[str]) -> None:
+def _register_cleanup_trap(output_dir: Path) -> None:
     """Wire the EXIT/SIGINT/SIGTERM cleanup trap.
 
-    Mirrors scan.sh's ``trap trap_on_exit EXIT INT TERM``. The
-    cleanup lambda calls :func:`scanner.trap.cleanup_ip_whitelist` and
-    :func:`scanner.trap.shred_plan_artifacts`. Both are best-effort:
-    missing files or missing `az` binary are logged and swallowed.
+    Mirrors scan.sh's ``trap trap_on_exit EXIT INT TERM``. The cleanup
+    lambda calls :func:`scanner.trap.shred_plan_artifacts` to remove
+    sensitive plan artifacts (PCI 10.7 hygiene). Best-effort: missing
+    files or missing ``shred`` binary are logged and swallowed.
+
+    The prior firewall-revert step (the storage-account network-rule
+    cleanup) was removed: the scanner never mutates the Azure storage
+    firewall, so there is nothing to revert. ``output_dir`` is kept on
+    the signature for parity with the prior wiring; ``state_account``
+    is no longer needed.
     """
     captured_run_dir = output_dir
-    captured_account = state_account
 
     def _cleanup() -> None:
-        if captured_account:
-            cleanup_ip_whitelist(captured_run_dir, captured_account)
         shred_plan_artifacts(captured_run_dir)
 
     register_traps(_cleanup)
@@ -1573,10 +2157,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 2
 
     # Register the EXIT/SIGINT/SIGTERM cleanup trap NOW, before any
-    # work that might fail. The cleanup_fn captures output_dir and
-    # state_account via closure so it has access to them on signal
-    # delivery.
-    _register_cleanup_trap(run_dir.path, args.state_account)
+    # work that might fail. The cleanup_fn captures output_dir via
+    # closure so it has access to it on signal delivery. The trap
+    # only shreds plan artifacts now (the firewall-whitelist revert
+    # was removed: the scanner is read-only against Azure).
+    _register_cleanup_trap(run_dir.path)
 
     if args.verbose or os.environ.get("PCI_VERBOSE", "").strip() == "1":
         _log("INFO", "verbose logging enabled")
@@ -1600,6 +2185,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             mapping_path=mapping_pack.path,
             baseline_path=baseline.path,
             state_account=args.state_account,
+            include_modules=bool(getattr(args, "include_modules", False)),
+            ignore_lockfile=bool(getattr(args, "ignore_lockfile", False)),
+            registry_mirror=getattr(args, "registry_mirror", None),
         )
     except OrchestratorError as exc:
         _log("ERROR", str(exc))

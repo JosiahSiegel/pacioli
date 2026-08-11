@@ -1,9 +1,10 @@
 """scanner/safety.py — Hard refusals for any operation that mutates Azure.
 
 Python port of lib/safety.sh. Enforces the scanner's READ-ONLY invariant
-against Azure. The ONLY Azure mutations permitted are the storage firewall
-IP whitelist additions done by tf_init.sh, and they MUST be paired with
-cleanup in a trap.
+against Azure. The ONLY Azure access permitted is the read-only state
+blob download used by the state tier (``az storage blob download``).
+The storage firewall IP whitelist mutations formerly done by tf_init.sh
+were removed: the scanner never modifies the Azure storage firewall.
 
 To extend: add a new forbidden pattern to REFUSE_PATTERN (regex) and a
 human-readable reason to REFUSE_REASON (dict entry).
@@ -47,9 +48,14 @@ REFUSE_PATTERN: Final[tuple[str, ...]] = (
     r"terraform\s+untaint\b",
     r"terraform\s+import\b",
     # Terraform: locking bypass
-    r"terraform\s+plan.*-lock=false",
     r"terraform\s+apply.*-lock=false",
     r"terraform\s+destroy.*-lock=false",
+    # `init` must keep state locking — a concurrent init on a different
+    # runner that wins the race would overwrite the locked state. The
+    # privileged init argv (``-backend=false``) never uses ``-lock=false``,
+    # so this refusal is a hard invariant on the init subcommand even
+    # though plan no longer carries the same restriction.
+    r"terraform\s+init.*-lock=false",
     # Terraform: auto-approve bypass
     r"-auto-approve",
     # Azure CLI: stateful / destructive operations
@@ -60,6 +66,10 @@ REFUSE_PATTERN: Final[tuple[str, ...]] = (
     r"az\s+sql\s+(server|db)\s+delete\b",
     r"az\s+appservice\s+(plan|webapp)\s+delete\b",
     r"az\s+role\s+assignment\s+delete\b",
+    # Azure CLI: storage firewall mutations (formerly an ALLOWED_EXCEPTION
+    # paired with a trap-and-cleanup helper; the scanner is now strictly
+    # read-only and refuses every firewall mutation).
+    r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
     # Checkov: never auto-apply fixes
     r"checkov.*--fix",
 )
@@ -73,9 +83,11 @@ REFUSE_REASON: Final[dict[str, str]] = {
     r"terraform\s+taint\b": "Taint triggers destroy on next apply. Forbidden.",
     r"terraform\s+untaint\b": "Untaint clears taint marker. Forbidden.",
     r"terraform\s+import\b": "Import mutates state. Use aztfexport for legitimate imports.",
-    r"terraform\s+plan.*-lock=false": "Lock bypass defeats drift detection. Forbidden.",
     r"terraform\s+apply.*-lock=false": "Lock bypass on apply. Forbidden.",
     r"terraform\s+destroy.*-lock=false": "Lock bypass on destroy. Forbidden.",
+    r"terraform\s+init.*-lock=false": (
+        "Init lock bypass would corrupt state on concurrent init. Forbidden."
+    ),
     r"-auto-approve": "Auto-approve bypasses confirmation. Forbidden.",
     r"az\s+storage\s+account\s+delete\b": "Storage account deletion. Forbidden.",
     r"az\s+resource\s+(delete|update|create)\b": "Azure resource mutation. Forbidden.",
@@ -84,21 +96,19 @@ REFUSE_REASON: Final[dict[str, str]] = {
     r"az\s+sql\s+(server|db)\s+delete\b": "SQL deletion. Forbidden.",
     r"az\s+appservice\s+(plan|webapp)\s+delete\b": "App Service deletion. Forbidden.",
     r"az\s+role\s+assignment\s+delete\b": "RBAC mutation. Forbidden.",
+    r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b": "Storage firewall mutation. Forbidden — the scanner is read-only against Azure.",
     r"checkov.*--fix": "Checkov auto-fix is forbidden. Triage findings manually.",
 }
 
 
-# ALLOWED EXCEPTIONS — commands that look mutating but are scoped to the
-# storage firewall IP whitelist ONLY. These are checked first; if the command
+# ALLOWED EXCEPTIONS — commands that look mutating but are scoped to
+# read-only Azure state access. These are checked first; if the command
 # matches one of these patterns, the broader refusal is skipped.
 # Pattern: regex that, if matched, exempts the command from the wider refusal.
 #
 # NOTE: see REFUSE_PATTERN — `[[:space:]]` is translated to `\s` for
 # Python regex validity. Same audit-grade set of allowed exceptions.
 ALLOWED_EXCEPTIONS: Final[tuple[str, ...]] = (
-    # The storage account network-rule add/remove is the only allowed mutation,
-    # and only inside tf_init.sh and the trap-and-cleanup helper.
-    r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
     # Read-only state blob download for --scan-state (no --overwrite, no
     # delete, no copy, no upload). Strict regex restricts to download.
     r"az\s+storage\s+blob\s+download\b",
@@ -120,8 +130,8 @@ class SafetyGuard:
 
     A refusal matrix ported from lib/safety.sh — every mutating Terraform,
     Azure CLI, and Checkov command is refused unless it matches an
-    explicit ALLOWED_EXCEPTION (storage firewall network-rule add/remove/list
-    or state blob download).
+    explicit ALLOWED_EXCEPTION (state blob download only — the firewall
+    network-rule mutation is no longer permitted and was removed).
     """
 
     def refuse_if_mutating(self, cmd: str) -> None:
@@ -209,18 +219,17 @@ def safety_selftest() -> bool:
         "terraform apply -auto-approve",
         "terraform destroy",
         "terraform state rm foo",
-        "terraform plan -lock=false",
+        "terraform apply -lock=false",
+        "terraform destroy -lock=false",
         "az group delete -n foo",
         "az storage account delete -n foo",
         "checkov -d . --fix",
     )
     should_allow = (
-        "terraform plan -out=tfplan.binary",
+        "terraform plan -out=tfplan.binary -lock=false -refresh=false",
         "terraform show -json tfplan.binary",
         "terraform init -backend=false",
-        "az storage account network-rule add --account-name $PCI_STATE_STORAGE_ACCOUNT --ip-address 1.2.3.4",
-        "az storage account network-rule remove --account-name $PCI_STATE_STORAGE_ACCOUNT --ip-address 1.2.3.4",
-        "az storage account network-rule list --account-name $PCI_STATE_STORAGE_ACCOUNT",
+        "az storage blob download --account-name foo --container-name iac --name prod.tfstate",
     )
 
     failed = False
