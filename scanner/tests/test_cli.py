@@ -278,6 +278,24 @@ def test_pacioli_aggregate_reemits_report(tmp_path: Path) -> None:
     )
 
 
+def test_main_exits_99_when_subprocess_operation_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused command from a CLI handler terminates the process with exit 99."""
+    from scanner import cli
+    from scanner.safety import MutatingOperationRefused
+
+    def refuse_command(_args: argparse.Namespace) -> int:
+        raise MutatingOperationRefused("forced refusal")
+
+    monkeypatch.setattr(cli, "_handle_scan", refuse_command)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["scan", "--non-interactive"])
+
+    assert exc_info.value.code == 99
+
+
 # ---------------------------------------------------------------------------
 # Direct unit tests for the handler helpers in scanner/cli.py
 # ---------------------------------------------------------------------------

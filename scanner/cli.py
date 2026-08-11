@@ -106,6 +106,9 @@ from typing import Any, Optional, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+from scanner.safety import MutatingOperationRefused  # noqa: E402
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1536,26 +1539,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     Parses argv, dispatches to the registered subcommand handler, and
     returns the handler's process exit code.
     """
-    parser = _build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    try:
+        parser = _build_parser()
+        args = parser.parse_args(list(argv) if argv is not None else None)
 
-    handler = getattr(args, "handler", None)
-    if handler is None:
-        # Should be unreachable because subparsers are required=True,
-        # but be defensive in case a future subcommand forgets to wire
-        # a handler.
-        parser.print_help(sys.stderr)
-        return 2
+        handler = getattr(args, "handler", None)
+        if handler is None:
+            # Should be unreachable because subparsers are required=True,
+            # but be defensive in case a future subcommand forgets to wire
+            # a handler.
+            parser.print_help(sys.stderr)
+            return 2
 
-    # Honor the global --non-interactive flag: when True, scrub stdin so
-    # any first-run picker the orchestrator or aggregate might invoke
-    # short-circuits to its default. The first-run picker lives in
-    # scanner.config; we don't import it eagerly here to keep `--help`
-    # snappy, but we set the env var that config.py consults.
-    if getattr(args, "non_interactive", False):
-        os.environ["PACIOLI_NON_INTERACTIVE"] = "1"
+        # Honor the global --non-interactive flag: when True, scrub stdin so
+        # any first-run picker the orchestrator or aggregate might invoke
+        # short-circuits to its default. The first-run picker lives in
+        # scanner.config; we don't import it eagerly here to keep `--help`
+        # snappy, but we set the env var that config.py consults.
+        if getattr(args, "non_interactive", False):
+            os.environ["PACIOLI_NON_INTERACTIVE"] = "1"
 
-    return handler(args)
+        return handler(args)
+    except MutatingOperationRefused:
+        sys.exit(99)
 
 
 if __name__ == "__main__":

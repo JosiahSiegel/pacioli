@@ -1078,6 +1078,41 @@ def test_tier_state_safety_guard_refuses_mutating_command() -> None:
     ) is None
 
 
+def test_scan_exits_99_when_subprocess_operation_is_refused(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused subprocess operation terminates the orchestrator with exit 99."""
+    _make_env_tree(tmp_path, {"payments": {"prod": ["main.tf"]}})
+
+    def refuse_subprocess(*_args, **_kwargs):
+        raise scanner_safety.MutatingOperationRefused("forced refusal")
+
+    monkeypatch.setattr(scanner_orchestrator.scanner_ops, "run", refuse_subprocess)
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_alert_network_required",
+        lambda self, state, account: True,
+    )
+
+    orchestrator = Orchestrator(mode="report", tier="plan", no_aggregate=True)
+    with pytest.raises(SystemExit) as exc_info:
+        orchestrator.scan(
+            target_repo=tmp_path,
+            project=None,
+            env=None,
+            label=None,
+            output_dir=tmp_path / "runs",
+            mapping_path=None,
+            baseline_path=None,
+            state_account="mystorageacct",
+            ignore_lockfile=True,
+        )
+
+    assert exc_info.value.code == 99
+
+
 # ---------------------------------------------------------------------------
 # 9. _discover_public_ip (direct)
 # ---------------------------------------------------------------------------

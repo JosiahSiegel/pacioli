@@ -87,7 +87,7 @@ from scanner.paths import (  # noqa: E402
     resolve_mapping as resolve_mapping_path,
     resolve_paths,
 )
-from scanner.safety import SafetyGuard  # noqa: E402
+from scanner.safety import MutatingOperationRefused, SafetyGuard  # noqa: E402
 from scanner.trap import (  # noqa: E402
     create_secure_file,
     register_traps,
@@ -290,57 +290,60 @@ class Orchestrator:
             zero from aggregate.py (including 7); ``report`` mode
             returns ``0`` unless aggregate.py failed with rc != 7.
         """
-        # Mode / tier validation first — fail fast before doing work.
-        self._validate_mode_and_tier()
+        try:
+            # Mode / tier validation first — fail fast before doing work.
+            self._validate_mode_and_tier()
 
-        # Store registry_mirror so _run_terraform_* call sites can
-        # generate the per-run TF_CLI_CONFIG_FILE (Todo 9).
-        self.registry_mirror = registry_mirror
+            # Store registry_mirror so _run_terraform_* call sites can
+            # generate the per-run TF_CLI_CONFIG_FILE (Todo 9).
+            self.registry_mirror = registry_mirror
 
-        # Store preflight-related flags (Todo 10) so the per-pair
-        # preflight helper can read them without having to thread them
-        # through every helper signature. ``include_modules`` doubles
-        # as the discovery-time filter (already used in
-        # :meth:`_resolve_scan_inputs`) and the per-stack-root preflight
-        # opt-out for ``modules/``-style stack roots.
-        self._include_modules = bool(include_modules)
-        self._ignore_lockfile = bool(ignore_lockfile)
+            # Store preflight-related flags (Todo 10) so the per-pair
+            # preflight helper can read them without having to thread them
+            # through every helper signature. ``include_modules`` doubles
+            # as the discovery-time filter (already used in
+            # :meth:`_resolve_scan_inputs`) and the per-stack-root preflight
+            # opt-out for ``modules/``-style stack roots.
+            self._include_modules = bool(include_modules)
+            self._ignore_lockfile = bool(ignore_lockfile)
 
-        output_dir = Path(output_dir).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = Path(output_dir).resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        run_root = self._setup_run_root(output_dir, label)
+            run_root = self._setup_run_root(output_dir, label)
 
-        target_repo, resolved_mapping, resolved_baseline, pairs = (
-            self._resolve_scan_inputs(
-                target_repo=target_repo,
-                project=project,
-                env=env,
-                mapping_path=mapping_path,
-                baseline_path=baseline_path,
-                include_modules=include_modules,
+            target_repo, resolved_mapping, resolved_baseline, pairs = (
+                self._resolve_scan_inputs(
+                    target_repo=target_repo,
+                    project=project,
+                    env=env,
+                    mapping_path=mapping_path,
+                    baseline_path=baseline_path,
+                    include_modules=include_modules,
+                )
             )
-        )
 
-        if not pairs:
-            _log("WARN", "no (project, env) pairs matched --project/--env filters")
-            return 0
+            if not pairs:
+                _log("WARN", "no (project, env) pairs matched --project/--env filters")
+                return 0
 
-        self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs)
+            self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs)
 
-        runner = CheckovRunner(mode=self.mode)
+            runner = CheckovRunner(mode=self.mode)
 
-        # SCAN_RC accumulates per checkov pass (max-of) AND aggregate
-        # findings rc (gate mode only). See module docstring.
-        scan_rc = self._run_scan_loop(runner, pairs, target_repo, run_root, state_account)
+            # SCAN_RC accumulates per checkov pass (max-of) AND aggregate
+            # findings rc (gate mode only). See module docstring.
+            scan_rc = self._run_scan_loop(runner, pairs, target_repo, run_root, state_account)
 
-        # -- aggregate ------------------------------------------------
-        scan_rc = self._run_aggregate_and_report(
-            run_root, resolved_mapping, resolved_baseline, scan_rc
-        )
+            # -- aggregate ------------------------------------------------
+            scan_rc = self._run_aggregate_and_report(
+                run_root, resolved_mapping, resolved_baseline, scan_rc
+            )
 
-        _log("INFO", f"scan complete: {output_dir}")
-        return scan_rc
+            _log("INFO", f"scan complete: {output_dir}")
+            return scan_rc
+        except MutatingOperationRefused:
+            sys.exit(99)
 
     # -- scan() helpers ----------------------------------------------
 
