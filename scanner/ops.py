@@ -106,32 +106,6 @@ class Operation:
 # files without reducing its size.
 
 OPERATION_REGISTRY: Final[dict[str, Operation]] = {
-    # Azure storage firewall whitelist (tier=plan/state only). Kept for
-    # now; todo 5 moves these into a separate, narrower API.
-    "az.network_rule_add": Operation(
-        name="az.network_rule_add", executable="az",
-        argv_schema=("storage", "account", "network-rule", "add",
-                     "--account-name", ANY, "--ip-address", ANY, "--output", "none"),
-        allowed_tiers=("plan", "state"), default_timeout=30,
-        mutation_class="mutate_azure", cleanup_obligation="none",
-        env_allowlist=("AZURE_CONFIG_DIR", "AZURE_CORE_OUTPUT"),
-    ),
-    "az.network_rule_remove": Operation(
-        name="az.network_rule_remove", executable="az",
-        argv_schema=("storage", "account", "network-rule", "remove",
-                     "--account-name", ANY, "--ip-address", ANY, "--output", "none"),
-        allowed_tiers=("plan", "state"), default_timeout=30,
-        mutation_class="mutate_azure", cleanup_obligation="none",
-        env_allowlist=("AZURE_CONFIG_DIR", "AZURE_CORE_OUTPUT"),
-    ),
-    "az.network_rule_list": Operation(
-        name="az.network_rule_list", executable="az",
-        argv_schema=("storage", "account", "network-rule", "list",
-                     "--account-name", ANY, "--query", ANY, "-o", "tsv"),
-        allowed_tiers=("plan", "state"), default_timeout=30,
-        mutation_class="read", cleanup_obligation="none",
-        env_allowlist=("AZURE_CONFIG_DIR", "AZURE_CORE_OUTPUT"),
-    ),
     # Azure storage blob ops (state-only download; plan/state list).
     "az.blob_download": Operation(
         name="az.blob_download", executable="az",

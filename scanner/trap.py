@@ -4,33 +4,33 @@ Trap registration and cleanup helpers for the Pacioli scanner.
 
 Mirrors the bash `trap trap_on_exit EXIT INT TERM` semantics from
 ``scanner/lib/common.sh`` (function ``trap_on_exit`` plus the
-``cleanup_ip_whitelist`` + ``shred_plan_artifacts`` pair it calls).
+``shred_plan_artifacts`` helper it calls).
 
 Why this exists
 ---------------
-The bash scanner wires an EXIT/INT/TERM trap so that even if the run dies
-abruptly (Ctrl+C in a local run, CI job timeout, OOM kill signal
-propagation), the storage firewall IP whitelist is reverted and the
-sensitive plan artifacts (``tfplan.binary``, ``plan.json``) are shredded.
-
 When the scanner is being driven from Python (the future CLI entry point
-and any embedded callers), we still need that guarantee. This module is the
-single Python surface for it.
+and any embedded callers), we still need the PCI 10.7 hygiene guarantee:
+even if the run dies abruptly (Ctrl+C in a local run, CI job timeout,
+OOM kill signal propagation), the sensitive plan artifacts
+(``tfplan.binary``, ``plan.json``) are shredded.
+
+The storage firewall IP whitelist (and its cleanup) was removed: the
+scanner is now strictly read-only against Azure — it never mutates the
+``state_account`` storage firewall. The pair-level plan/state passes
+fail-closed if network access is not already granted (see
+:func:`scanner.orchestrator.Orchestrator._alert_network_required`).
 
 Design choices
 --------------
-* **Idempotent** — ``cleanup_ip_whitelist`` reads ``.whitelist_ip`` from the
-  run directory. If the file is missing (e.g. whitelist was never added or
-  was already reverted by another process), it logs and returns 0.
 * **Re-raises the signal** — bash ``trap`` re-runs the default handler after
   the cleanup, which means the shell exits with ``128+N``. Python's
   ``atexit`` has no equivalent, but a signal handler can simulate it by
   restoring ``SIG_DFL`` and re-raising. The handler must NOT swallow the
   signal — otherwise CI sees a clean exit on a SIGTERM that should have
   been a failure.
-* **Bounded subprocess timeouts** — every ``az`` and ``shred`` invocation
-  inside a handler MUST go through :func:`scanner.ops.run` with an explicit
-  ``timeout=...``. A hung Azure CLI call cannot be allowed to block past the
+* **Bounded subprocess timeouts** — every ``shred`` invocation inside a
+  handler MUST go through :func:`scanner.ops.run` with an explicit
+  ``timeout=...``. A hung shred cannot be allowed to block past the
   CI job's grace window; the trap itself has to finish promptly.
 * **Windows-aware** — ``signal.SIGTERM`` registration is a no-op on
   Windows. ``SIGINT`` + ``atexit`` still fire, which is the right
@@ -52,11 +52,6 @@ from typing import Callable
 from scanner import ops as scanner_ops
 
 LOGGER = logging.getLogger("scanner.trap")
-
-# Default subprocess timeout (seconds) for any `az` call invoked from
-# inside a signal handler. Tuned to be longer than a healthy Azure
-# network-rule mutation but shorter than a typical CI job grace window.
-_DEFAULT_AZ_TIMEOUT = 10
 
 # Default timeout for `shred -u` on POSIX.
 _DEFAULT_SHRED_TIMEOUT = 5
@@ -107,132 +102,6 @@ def register_traps(cleanup_fn: Callable[[], None]) -> None:
     # one that's most likely to be the actual user request handled.
     _register_signal(signal.SIGINT, cleanup_fn)
     _register_signal(signal.SIGTERM, cleanup_fn)
-
-
-def cleanup_ip_whitelist(
-    run_dir: Path,
-    state_account: str,
-    timeout: int = _DEFAULT_AZ_TIMEOUT,
-) -> bool:
-    """
-    Remove the public IP that ``whitelist_my_ip`` added to the
-    ``state_account`` storage firewall.
-
-    Idempotent. Reads the IP from ``{run_dir}/.whitelist_ip``; if the
-    file is missing or empty, logs and returns ``True``. If the IP is
-    not present in the firewall rules (someone else already removed
-    it), also returns ``True``.
-
-    Every ``az`` subprocess is wrapped with ``timeout=timeout`` and
-    ``check=False`` so a hung Azure call cannot block past the CI
-    job's grace window.
-
-    Parameters
-    ----------
-    run_dir:
-        Per-run working directory; expected to contain ``.whitelist_ip``.
-    state_account:
-        Storage account name (the same one ``whitelist_my_ip`` added
-        the rule to).
-    timeout:
-        Per-call subprocess timeout, in seconds. Defaults to 10.
-
-    Returns
-    -------
-    bool
-        ``True`` if no further action is needed (no IP, IP already
-        absent, or removal succeeded). ``False`` if removal was
-        attempted but failed.
-    """
-    ip_file = Path(run_dir) / ".whitelist_ip"
-    if not ip_file.exists():
-        LOGGER.info("no .whitelist_ip file at %s; nothing to clean up", ip_file)
-        return True
-
-    try:
-        ip = ip_file.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        LOGGER.warning("failed to read %s: %s", ip_file, exc)
-        return False
-
-    if not ip:
-        LOGGER.info(".whitelist_ip is empty; nothing to clean up")
-        return True
-
-    LOGGER.info("removing storage firewall IP: %s", ip)
-
-    if shutil.which("az") is None:
-        LOGGER.warning(
-            "az CLI not found; cannot remove IP %s automatically. "
-            "Manual cleanup required.",
-            ip,
-        )
-        return False
-
-    # Idempotency check: confirm the IP is still in the firewall rules
-    # before attempting removal. Mirrors the bash version's `present=`
-    # query.
-    try:
-        result = scanner_ops.run(
-            "az.network_rule_list",
-            # argv after the executable (10 tokens total to match schema):
-            "storage", "account", "network-rule", "list",
-            "--account-name", state_account,
-            "--query", f"ipRules[?ipAddressOrRange=='{ip}'].ipAddressOrRange",
-            "-o", "tsv",
-            tier="state",
-            timeout=timeout,
-        )
-        present = (result.stdout or "").strip()
-    except subprocess.TimeoutExpired:
-        LOGGER.warning(
-            "az network-rule list timed out after %ds; attempting remove anyway",
-            timeout,
-        )
-        present = ip  # best-effort: try to remove, accept it may already be gone
-    except OSError as exc:
-        LOGGER.warning("az network-rule list failed to start: %s", exc)
-        present = ip
-
-    if not present:
-        LOGGER.info("IP %s already removed; skipping", ip)
-        return True
-
-    try:
-        result = scanner_ops.run(
-            "az.network_rule_remove",
-            # argv after the executable (10 tokens total to match schema):
-            "storage", "account", "network-rule", "remove",
-            "--account-name", state_account,
-            "--ip-address", ip,
-            "--output", "none",
-            tier="state",
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        LOGGER.warning(
-            "az network-rule remove for %s timed out after %ds; "
-            "manual cleanup required",
-            ip,
-            timeout,
-        )
-        return False
-    except OSError as exc:
-        LOGGER.warning("az network-rule remove failed to start: %s", exc)
-        return False
-
-    if result.returncode != 0:
-        LOGGER.warning(
-            "failed to remove IP %s (rc=%d, stderr=%r); "
-            "manual cleanup required",
-            ip,
-            result.returncode,
-            (result.stderr or "").strip(),
-        )
-        return False
-
-    LOGGER.info("removed storage firewall IP %s from %s", ip, state_account)
-    return True
 
 
 def shred_plan_artifacts(
@@ -425,13 +294,6 @@ if __name__ == "__main__":
 
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
-
-        # Write a fake .whitelist_ip; cleanup_ip_whitelist should detect
-        # no `az` available and log WARN + return False. (This smoke
-        # test does NOT actually call `az`.)
-        (run_dir / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
-        result = cleanup_ip_whitelist(run_dir, state_account="fakeaccount")
-        LOGGER.info("cleanup_ip_whitelist returned %s", result)
 
         # Create a fake plan artifact and shred it. shred_plan_artifacts
         # should remove it via os.remove (since `shred` is not on

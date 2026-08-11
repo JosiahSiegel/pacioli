@@ -6,9 +6,13 @@ EXIT INT TERM`` from ``scanner/lib/common.sh``:
 * ``register_traps`` registers atexit + SIGINT + (POSIX) SIGTERM
 * signal handlers run the cleanup callback and re-raise so the process exits
   with the conventional ``128 + signum`` status
-* ``cleanup_ip_whitelist`` is idempotent on a missing ``.whitelist_ip`` and
-  honours the ``subprocess.run`` timeout
 * ``shred_plan_artifacts`` removes ``tfplan.binary`` and ``plan.json``
+
+The storage firewall IP whitelist cleanup (``cleanup_ip_whitelist``) was
+removed in Todo 5: the scanner no longer mutates the Azure storage
+firewall, so there is nothing to revert. The tests here assert that
+the function is no longer importable so a future regression that
+re-adds it is caught early.
 
 Signal-handling tests that send signals to the test process itself would
 interfere with pytest, so any test that needs to verify the exit-status
@@ -177,43 +181,27 @@ def test_register_traps_skips_sigterm_on_windows():
 
 
 # ---------------------------------------------------------------------------
-# cleanup_ip_whitelist: idempotency + subprocess-timeout behaviour
+# cleanup_ip_whitelist: removed (Todo 5). The scanner no longer mutates
+# the Azure storage firewall, so there is no firewall-revert step in
+# the trap. These tests assert the function is no longer importable so
+# a future regression that re-adds it is caught early.
 # ---------------------------------------------------------------------------
-def test_cleanup_ip_whitelist_idempotent_when_no_file(tmp_path):
-    """Missing ``.whitelist_ip`` must be a no-op that returns ``True``."""
-    result = trap.cleanup_ip_whitelist(tmp_path, state_account="fakeacct")
-    assert result is True
+def test_cleanup_ip_whitelist_no_longer_importable():
+    """``cleanup_ip_whitelist`` was removed; it must NOT be importable.
 
-
-def test_cleanup_ip_whitelist_empty_file_is_idempotent(tmp_path):
-    """An empty ``.whitelist_ip`` must be treated as nothing to clean up."""
-    (tmp_path / ".whitelist_ip").write_text("", encoding="utf-8")
-    result = trap.cleanup_ip_whitelist(tmp_path, state_account="fakeacct")
-    assert result is True
-
-
-def test_cleanup_ip_whitelist_timeout_returns_false(tmp_path, monkeypatch):
-    """When the subprocess hits its timeout, cleanup must return ``False``.
-
-    We simulate the hang by replacing :func:`scanner.ops.run` with a function
-    that always raises ``TimeoutExpired`` after sleeping past the caller's
-    ``timeout``. The real implementation must catch this and return
-    ``False`` so the caller knows manual cleanup is required.
+    The scanner is now strictly read-only against Azure — it never
+    mutates the ``state_account`` storage firewall, so there is no
+    firewall-revert step to register in the cleanup trap. A regression
+    that re-adds the function is an audit-grade failure and must fail
+    this test loudly.
     """
-    (tmp_path / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
+    import scanner.trap as trap_module
 
-    from scanner import ops as _ops
-
-    def fake_run(*args, **kwargs):
-        # Honour the caller's timeout but always timeout.
-        timeout = kwargs.get("timeout", 10)
-        time.sleep(min(timeout, 0.1))
-        raise subprocess.TimeoutExpired(cmd=args[0] if args else "az", timeout=timeout)
-
-    monkeypatch.setattr(_ops, "run", fake_run)
-
-    result = trap.cleanup_ip_whitelist(tmp_path, state_account="fakeacct", timeout=1)
-    assert result is False
+    assert not hasattr(trap_module, "cleanup_ip_whitelist"), (
+        "cleanup_ip_whitelist was removed; its re-introduction is a "
+        "firewall-mutation regression. The scanner is read-only against "
+        "Azure."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -391,19 +379,19 @@ def test_windows_atexit_path_runs_cleanup_on_normal_exit(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Cleanup side-effect: .whitelist_ip removal after signal
+# Cleanup side-effect: marker removal after signal
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only SIGTERM trap")
-def test_cleanup_removes_whitelist_ip_after_sigterm(tmp_path):
-    """End-to-end: SIGTERM triggers cleanup, cleanup removes .whitelist_ip.
+def test_cleanup_removes_marker_after_sigterm(tmp_path):
+    """End-to-end: SIGTERM triggers cleanup, cleanup removes a marker file.
 
-    We can't actually call ``cleanup_ip_whitelist`` from inside the handler
-    because it shells out to ``az`` (which is unlikely to be available in the
-    test environment). Instead we register a small cleanup callback that
-    deletes the marker file, then send SIGTERM and assert the marker is gone
-    — proving the handler actually ran.
+    We register a small cleanup callback that deletes the marker file,
+    then send SIGTERM and assert the marker is gone — proving the
+    handler actually ran. (The prior firewall-revert test name was
+    removed when ``cleanup_ip_whitelist`` itself was deleted in Todo 5;
+    the underlying trap mechanism is unchanged.)
     """
-    marker = tmp_path / "whitelist_ip_removed.marker"
+    marker = tmp_path / "cleanup_removed.marker"
     marker.touch()
     assert marker.exists()
 

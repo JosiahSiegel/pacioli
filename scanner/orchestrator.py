@@ -8,10 +8,12 @@ What it does
 ------------
 For each ``(project, env)`` pair discovered in ``target_repo``:
 
-1. (Tier ``plan``/``state`` only) Whitelist current IP on the
-   ``state_account`` storage firewall. ``terraform init`` + ``terraform
-   plan -out=tfplan.binary -lock=true`` + ``terraform show -json``. No
-   mutation beyond the firewall rule (auto-reverted by the EXIT trap).
+1. (Tier ``plan``/``state`` only) Emit an alert that network access to
+   the ``state_account`` storage account is required (fail-closed: if
+   access is missing the per-pair plan/state passes are skipped).
+   ``terraform init`` + ``terraform plan -out=tfplan.binary -lock=true``
+   + ``terraform show -json``. The scanner never mutates the storage
+   firewall — the operator is responsible for granting access.
 2. ``checkov`` --framework terraform  + --external-checks-dir (paac).
 3. ``checkov`` --framework terraform  built-in source scan.
 4. (Tier ``plan``/``state`` only) ``checkov`` --framework terraform_plan
@@ -83,7 +85,6 @@ from scanner.paths import (  # noqa: E402
 )
 from scanner.safety import SafetyGuard  # noqa: E402
 from scanner.trap import (  # noqa: E402
-    cleanup_ip_whitelist,
     register_traps,
     shred_plan_artifacts,
 )
@@ -691,13 +692,12 @@ class Orchestrator:
     ) -> bool:
         """Emit a one-line warning that this storage account needs network access.
 
-        Replaces the prior :meth:`_whitelist_my_ip` which fired ``az
-        storage account network-rule add`` to whitelist the runner's IP.
-        That mutation is now deliberately NOT performed: the orchestrator
-        is read-only and the firewall-whitelist step was the only
-        mutation it issued. The caller (``_run_plan_tier``) treats the
-        ``False`` return as a bail-out so the per-pair plan/state
-        passes are skipped.
+        Replaces the prior helper which fired an Azure CLI storage-account
+        network-rule mutation to whitelist the runner's IP. That mutation
+        is now deliberately NOT performed: the orchestrator is read-only
+        and the firewall-whitelist step was the only mutation it issued.
+        The caller (``_run_plan_tier``) treats the ``False`` return as a
+        bail-out so the per-pair plan/state passes are skipped.
 
         The alert format is the single-line, machine-grep-friendly token
         ``STORAGE_ACCOUNT=<x>; RUNNER_IP=<y>; you need network access
@@ -1460,20 +1460,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _register_cleanup_trap(output_dir: Path, state_account: Optional[str]) -> None:
+def _register_cleanup_trap(output_dir: Path) -> None:
     """Wire the EXIT/SIGINT/SIGTERM cleanup trap.
 
-    Mirrors scan.sh's ``trap trap_on_exit EXIT INT TERM``. The
-    cleanup lambda calls :func:`scanner.trap.cleanup_ip_whitelist` and
-    :func:`scanner.trap.shred_plan_artifacts`. Both are best-effort:
-    missing files or missing `az` binary are logged and swallowed.
+    Mirrors scan.sh's ``trap trap_on_exit EXIT INT TERM``. The cleanup
+    lambda calls :func:`scanner.trap.shred_plan_artifacts` to remove
+    sensitive plan artifacts (PCI 10.7 hygiene). Best-effort: missing
+    files or missing ``shred`` binary are logged and swallowed.
+
+    The prior firewall-revert step (the storage-account network-rule
+    cleanup) was removed: the scanner never mutates the Azure storage
+    firewall, so there is nothing to revert. ``output_dir`` is kept on
+    the signature for parity with the prior wiring; ``state_account``
+    is no longer needed.
     """
     captured_run_dir = output_dir
-    captured_account = state_account
 
     def _cleanup() -> None:
-        if captured_account:
-            cleanup_ip_whitelist(captured_run_dir, captured_account)
         shred_plan_artifacts(captured_run_dir)
 
     register_traps(_cleanup)
@@ -1534,10 +1537,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 2
 
     # Register the EXIT/SIGINT/SIGTERM cleanup trap NOW, before any
-    # work that might fail. The cleanup_fn captures output_dir and
-    # state_account via closure so it has access to them on signal
-    # delivery.
-    _register_cleanup_trap(run_dir.path, args.state_account)
+    # work that might fail. The cleanup_fn captures output_dir via
+    # closure so it has access to it on signal delivery. The trap
+    # only shreds plan artifacts now (the firewall-whitelist revert
+    # was removed: the scanner is read-only against Azure).
+    _register_cleanup_trap(run_dir.path)
 
     if args.verbose or os.environ.get("PCI_VERBOSE", "").strip() == "1":
         _log("INFO", "verbose logging enabled")

@@ -12,13 +12,14 @@ Covers the plan's MUST-DO contract for this file:
   * the ``--scan-plan`` back-compat alias maps to ``--tier plan`` and
     emits a :class:`DeprecationWarning` (verified through the CLI
     dispatcher, not just the helper)
-  * ``tier=plan`` invokes ``_discover_public_ip`` via the whitelist
-    helper and produces ``tfplan.binary`` + ``plan.json`` per pair
+  * ``tier=plan`` invokes ``_alert_network_required`` and produces
+    ``tfplan.binary`` + ``plan.json`` per pair
   * ``tier=state`` invokes the state-blob subprocess pipeline under
     the ``safety.refuse_if_mutating`` guard and emits
     ``state.tfstate`` / ``state_as_plan.json`` / ``drift_report.json``
-  * ``_register_cleanup_trap`` wires the EXIT trap on tier=plan/state
-    and the cleanup closure runs the whitelist + shred steps in order
+  * ``_register_cleanup_trap`` wires the EXIT trap on tier=plan/state;
+    the cleanup closure runs ``shred_plan_artifacts`` (the prior
+    ``cleanup_ip_whitelist`` firewall-revert step was removed in Todo 5)
   * ``_discover_public_ip`` short-circuits on a healthy IMDS response
     and falls back to ipify on a failure
 
@@ -668,9 +669,6 @@ def test_tier_plan_invokes_discover_public_ip_and_emits_plan_artifacts(
 
     def fake_alert_network_required(self, state, account):  # noqa: ANN001 — test stub
         calls.append("alert_network_required")
-        # Mimic real behavior: write the .whitelist_ip marker so the
-        # cleanup trap would have something to remove.
-        (state.env_run_dir / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
         return True
 
     def fake_terraform_init(self, state):  # noqa: ANN001 — test stub
@@ -886,7 +884,6 @@ def test_tier_state_emits_state_artifacts_and_calls_safety_guard(
     # tier=plan prep mocks — return True and create the plan artifacts
     # so the state-blob pipeline has the inputs it expects.
     def fake_alert_network_required(self, state, account):  # noqa: ANN001 — test stub
-        (state.env_run_dir / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
         return True
 
     def fake_terraform_init(self, state):  # noqa: ANN001 — test stub
@@ -1044,11 +1041,11 @@ def test_tier_state_emits_state_artifacts_and_calls_safety_guard(
     ], f"unexpected state pipeline order: {state_pipeline_calls}"
 
     # safety.refuse_if_mutating fired at the tier=state subprocess gate.
-    # The plan-prep whitelist MyIP call also fires the guard (storage
-    # account network-rule add is an ALLOWED_EXCEPTION so the guard
-    # returns normally). For the state-blob download the cmd must
-    # contain "az storage blob download" so we verify at least one
-    # refuse_if_mutating call landed with that signature.
+    # For the state-blob download the cmd must contain "az storage blob
+    # download" so we verify at least one refuse_if_mutating call landed
+    # with that signature. (Todo 5 removed the firewall-whitelist step
+    # entirely; the only Azure call that fires the guard now is the
+    # state-blob download.)
     download_calls = [c for c in safety_calls if "storage blob download" in c]
     assert download_calls, (
         f"refuse_if_mutating did not fire on blob-download cmd; got: {safety_calls}"
@@ -1180,26 +1177,29 @@ def test_discover_public_ip_falls_back_to_ipify_on_imds_failure(
 
 
 # ---------------------------------------------------------------------------
-# 10. _register_cleanup_trap ordering
+# 10. _register_cleanup_trap wiring (Todo 5: firewall-revert removed)
 # ---------------------------------------------------------------------------
 
 
-def test_register_cleanup_trap_runs_whitelist_then_shred(
+def test_register_cleanup_trap_runs_shred_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``_register_cleanup_trap`` closure runs the whitelist cleanup before shred.
+    """``_register_cleanup_trap`` closure runs ``shred_plan_artifacts`` only.
 
     Replaces :func:`scanner.trap.register_traps` with a recorder that
     captures the cleanup callable. We then invoke the cleanup callable
     directly and assert:
-      1. ``cleanup_ip_whitelist`` is called first (storage firewall
-         must be reverted before local artifacts are shredded, so a
-         crash mid-shred still leaves the firewall reverted)
-      2. ``shred_plan_artifacts`` is called second
-      3. Both are called with the captured output_dir + state_account
+      1. ``register_traps`` is called by ``_register_cleanup_trap``
+      2. ``shred_plan_artifacts`` is the only step (the firewall-revert
+         ``cleanup_ip_whitelist`` was removed in Todo 5)
+      3. ``shred_plan_artifacts`` receives the captured output_dir
+
+    The previous test fixture asserted that ``cleanup_ip_whitelist`` ran
+    BEFORE ``shred_plan_artifacts`` — that ordering was tied to the
+    prior firewall-whitelist mutation, which the scanner no longer
+    performs. The shred step is now the only cleanup obligation.
     """
-    state_account = "mystorageacct"
     output_dir = tmp_path / "runs"
     output_dir.mkdir()
 
@@ -1213,14 +1213,9 @@ def test_register_cleanup_trap_runs_whitelist_then_shred(
         fake_register_traps,
     )
 
-    # Track the order of the two real cleanup helpers.
+    # Track the cleanup helpers that fire.
     call_order: list[str] = []
     cleanup_calls: list[tuple] = []
-
-    def fake_cleanup_ip_whitelist(run_dir, account, **kw):  # noqa: ANN001
-        call_order.append("cleanup_ip_whitelist")
-        cleanup_calls.append((run_dir, account))
-        return True
 
     def fake_shred_plan_artifacts(run_dir, **kw):  # noqa: ANN001
         call_order.append("shred_plan_artifacts")
@@ -1228,80 +1223,33 @@ def test_register_cleanup_trap_runs_whitelist_then_shred(
         return True
 
     monkeypatch.setattr(
-        "scanner.orchestrator.cleanup_ip_whitelist",
-        fake_cleanup_ip_whitelist,
-    )
-    monkeypatch.setattr(
         "scanner.orchestrator.shred_plan_artifacts",
         fake_shred_plan_artifacts,
     )
 
-    scanner_orchestrator._register_cleanup_trap(output_dir, state_account)
+    # Sanity: cleanup_ip_whitelist must NOT be referenced from
+    # orchestrator anymore (Todo 5 deleted it). If this attribute
+    # ever returns, the patch below would silently no-op and the
+    # firewall-revert regression test elsewhere would catch it.
+    assert not hasattr(scanner_orchestrator, "cleanup_ip_whitelist"), (
+        "cleanup_ip_whitelist must not be importable from "
+        "scanner.orchestrator after Todo 5; its return is a "
+        "firewall-mutation regression."
+    )
+
+    scanner_orchestrator._register_cleanup_trap(output_dir)
 
     # The trap was wired.
     assert len(cleanup_callable_captured) == 1, (
         "register_traps was not called by _register_cleanup_trap"
     )
 
-    # Invoke the captured cleanup callable directly to verify ordering
-    # without firing atexit / signal handlers.
-    cleanup_callable_captured[0]()
-
-    assert call_order == ["cleanup_ip_whitelist", "shred_plan_artifacts"], (
-        f"cleanup ran in wrong order: {call_order}"
-    )
-    # cleanup_ip_whitelist saw the captured state_account.
-    assert cleanup_calls[0] == (output_dir, state_account)
-    # shred_plan_artifacts saw the captured output_dir (single-arg helper).
-    assert cleanup_calls[1] == output_dir
-
-
-def test_register_cleanup_trap_skips_whitelist_when_no_state_account(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """With ``state_account=None``, the cleanup closure skips the firewall revert.
-
-    Mirrors ``_register_cleanup_trap`` lines 1465-1467: the whitelist
-    cleanup is gated on ``captured_account`` being truthy. The shred
-    step still runs (the run dir may have plan artifacts even when no
-    storage account was configured).
-    """
-    output_dir = tmp_path / "runs"
-    output_dir.mkdir()
-
-    cleanup_callable_captured: list = []
-
-    def fake_register_traps(cleanup_fn):  # noqa: ANN001
-        cleanup_callable_captured.append(cleanup_fn)
-
-    monkeypatch.setattr(
-        "scanner.orchestrator.register_traps",
-        fake_register_traps,
-    )
-
-    call_order: list[str] = []
-
-    def fake_cleanup_ip_whitelist(run_dir, account, **kw):  # noqa: ANN001
-        call_order.append("cleanup_ip_whitelist")
-
-    def fake_shred_plan_artifacts(run_dir, **kw):  # noqa: ANN001
-        call_order.append("shred_plan_artifacts")
-
-    monkeypatch.setattr(
-        "scanner.orchestrator.cleanup_ip_whitelist",
-        fake_cleanup_ip_whitelist,
-    )
-    monkeypatch.setattr(
-        "scanner.orchestrator.shred_plan_artifacts",
-        fake_shred_plan_artifacts,
-    )
-
-    scanner_orchestrator._register_cleanup_trap(output_dir, None)
-
-    assert len(cleanup_callable_captured) == 1
+    # Invoke the captured cleanup callable directly to verify the
+    # shred step is the only one (no firewall-revert path).
     cleanup_callable_captured[0]()
 
     assert call_order == ["shred_plan_artifacts"], (
-        f"expected only shred to fire when state_account is None, got: {call_order}"
+        f"expected only shred to fire after Todo 5; got: {call_order}"
     )
+    # shred_plan_artifacts saw the captured output_dir.
+    assert cleanup_calls[0] == output_dir

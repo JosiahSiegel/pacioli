@@ -85,6 +85,9 @@ REFUSE_FIXTURES: list[tuple[str, str]] = [
      "az appservice plan delete -n myplan -g myrg"),
     (r"az\s+role\s+assignment\s+delete\b",
      "az role assignment delete --assignee user@contoso.com"),
+    # Azure CLI: storage firewall mutations (refused since Todo 5).
+    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
+     "az storage account network-rule add --account-name myaccount --ip-address 1.2.3.4"),
     # checkov auto-fix
     (r"checkov.*--fix", "checkov -d . --fix"),
 ]
@@ -175,17 +178,6 @@ def _refuse_compiled_match(pattern: str, command: str) -> bool:
 # ---------------------------------------------------------------------------
 
 ALLOWED_FIXTURES: list[tuple[str, str]] = [
-    # network-rule add
-    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
-     "az storage account network-rule add "
-     "--account-name myaccount --ip-address 1.2.3.4"),
-    # network-rule remove
-    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
-     "az storage account network-rule remove "
-     "--account-name myaccount --ip-address 1.2.3.4"),
-    # network-rule list
-    (r"az\s+storage\s+account\s+network-rule\s+(add|remove|list)\b",
-     "az storage account network-rule list --account-name myaccount"),
     # state blob download (read-only)
     (r"az\s+storage\s+blob\s+download\b",
      "az storage blob download "
@@ -361,3 +353,95 @@ def test_checkov_version_negative_checkov_missing(
     with pytest.raises(AuditPinViolation) as excinfo:
         check_checkov_version()
     assert "checkov" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Network-required alert format (Todo 5). The orchestrator emits a single
+# one-line warning whenever tier=plan/state is requested and network
+# access to the storage account is not pre-granted. The format is the
+# machine-grep-friendly token ``STORAGE_ACCOUNT=<x>; RUNNER_IP=<y>; you
+# need network access to this storage account from this IP`` so operators
+# can audit logs for missing-network-access pairs after the fact.
+# ---------------------------------------------------------------------------
+
+
+def test_alert_network_required_message_includes_storage_account_and_runner_ip(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alert emits ``STORAGE_ACCOUNT=<x>; RUNNER_IP=<y>; ...``.
+
+    The exact format is the contract — operators grep logs for
+    ``STORAGE_ACCOUNT=`` and ``RUNNER_IP=`` to find pairs that were
+    skipped because no firewall access was pre-granted. Any drift from
+    this format is an audit-grade regression because post-run log
+    triage becomes impossible.
+    """
+    from scanner import orchestrator as scanner_orchestrator
+
+    state_account = "mystorageacct"
+    expected_runner_ip = "203.0.113.42"
+
+    # Stub out _discover_public_ip so the test is hermetic — the real
+    # call would hit Azure IMDS / ipify and slow the suite down.
+    monkeypatch.setattr(
+        scanner_orchestrator,
+        "_discover_public_ip",
+        lambda: expected_runner_ip,
+    )
+
+    state = scanner_orchestrator._PairState(
+        project="payments",
+        env="prod",
+        env_run_dir=tmp_path,
+        env_dir=tmp_path,
+    )
+
+    # Capture the formatted warning. ``logging.warning`` uses the root
+    # logger; we attach a capture handler so we can introspect the
+    # exact formatted message.
+    import logging as _logging
+
+    captured: list[str] = []
+
+    class _CaptureHandler(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:  # noqa: D401 — stdlib signature
+            captured.append(record.getMessage())
+
+    handler = _CaptureHandler(level=_logging.WARNING)
+    handler.setFormatter(_logging.Formatter("%(message)s"))
+    root_logger = _logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        result = scanner_orchestrator.Orchestrator._alert_network_required(
+            scanner_orchestrator.Orchestrator(),
+            state,
+            state_account,
+        )
+    finally:
+        root_logger.removeHandler(handler)
+
+    # Fail-closed: the caller MUST treat this as a per-pair skip.
+    assert result is False, (
+        "_alert_network_required must return False so the per-pair "
+        "plan/state passes are skipped (fail-closed)."
+    )
+
+    # The alert must include both the storage account and the runner IP,
+    # in the documented format.
+    assert captured, (
+        "no warning was emitted by _alert_network_required; the alert "
+        "format is the only signal operators have for missing-network "
+        "pairs."
+    )
+    message = captured[0]
+    assert f"STORAGE_ACCOUNT={state_account}" in message, (
+        f"alert must include STORAGE_ACCOUNT={state_account}; got: {message!r}"
+    )
+    assert f"RUNNER_IP={expected_runner_ip}" in message, (
+        f"alert must include RUNNER_IP={expected_runner_ip}; got: {message!r}"
+    )
+    assert "you need network access" in message, (
+        f"alert must include the human-readable directive; got: {message!r}"
+    )
+

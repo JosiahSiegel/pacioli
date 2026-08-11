@@ -36,9 +36,6 @@ from scanner.ops import (
 # ---------------------------------------------------------------------------
 
 REQUIRED_OPS: tuple[str, ...] = (
-    "az.network_rule_add",
-    "az.network_rule_remove",
-    "az.network_rule_list",
     "az.blob_download",
     "az.blob_list",
     "terraform.init_local",
