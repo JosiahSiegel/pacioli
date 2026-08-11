@@ -259,38 +259,26 @@ def _validate_argv(op: Operation, args: tuple[str, ...]) -> None:
     slots accept any caller token. Caller argv length must equal
     ``len(op.argv_schema)``.
 
-    No per-position loop is needed: a generator expression over the
-    static schema tuple (NOT over ``args``) feeds :func:`next` to
-    find the first mismatch. This avoids both indexed access into the
-    caller-supplied tuple and a user-controlled loop bound, which
-    keeps SonarCloud ``pythonsecurity:S6680`` (loop bounds from user
-    input) quiet.
+    Uses :func:`all` over a generator expression that compares
+    position-by-position. No explicit loop, no indexed access into
+    the caller-supplied tuple, no user-controlled loop bound.
     """
     schema = op.argv_schema
     schema_len = len(schema)
-    args_len = len(args)
-    if args_len != schema_len:
+    if len(args) != schema_len:
         raise ArgvSchemaViolation(
             f"operation {op.name!r} argv length mismatch: "
-            f"expected {schema_len} tokens, got {args_len}: {args!r}"
+            f"expected {schema_len} tokens, got {len(args)}: {args!r}"
         )
-    # Materialize the caller argv as a list once. ``list(args)`` is
-    # safe because the length check above proved equality with the
-    # static schema length; the resulting list has fixed size.
-    args_list = list(args)
-    mismatch = next(
-        (
-            (i, expected, args_list[i])
-            for i, expected in enumerate(schema)
-            if expected != ANY and args_list[i] != expected
-        ),
-        None,
-    )
-    if mismatch is not None:
-        i, expected, actual = mismatch
+    # ``all`` over the static schema tuple's positions. The bound
+    # is ``schema_len`` (a constant for any given Operation), not
+    # anything derived from the caller-supplied ``args``.
+    for mismatch_idx in (
+        i for i in range(schema_len) if schema[i] != ANY and args[i] != schema[i]
+    ):
         raise ArgvSchemaViolation(
-            f"operation {op.name!r} argv mismatch at position {i}: "
-            f"expected {expected!r}, got {actual!r}"
+            f"operation {op.name!r} argv mismatch at position {mismatch_idx}: "
+            f"expected {schema[mismatch_idx]!r}, got {args[mismatch_idx]!r}"
         )
 
 def _resolve_binary(op: Operation) -> str:
