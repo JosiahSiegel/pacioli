@@ -5,6 +5,14 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [0.2.0](https://github.com/JosiahSiegel/pacioli/compare/v0.1.1...v0.2.0) (2026-08-11)
+
+
+### Features
+
+* **safety:** typed operation registry, isolated TF env, no firewall mutation ([#11](https://github.com/JosiahSiegel/pacioli/issues/11)) ([43bf9ee](https://github.com/JosiahSiegel/pacioli/commit/43bf9ee6cf78ddfbf6ee952cefed353a760281f6))
+* slim README and auto-open HTML report ([#9](https://github.com/JosiahSiegel/pacioli/issues/9)) ([a5a305a](https://github.com/JosiahSiegel/pacioli/commit/a5a305a84edb038f5ee0e0fd6048e7473cbf674d))
+
 ## [0.1.1](https://github.com/JosiahSiegel/pacioli/compare/v0.1.0...v0.1.1) (2026-08-10)
 
 
