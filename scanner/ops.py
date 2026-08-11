@@ -259,9 +259,13 @@ def _validate_argv(op: Operation, args: tuple[str, ...]) -> None:
     slots accept any caller token. Caller argv length must equal
     ``len(op.argv_schema)``.
 
-    Uses :func:`all` over a generator expression that compares
-    position-by-position. No explicit loop, no indexed access into
-    the caller-supplied tuple, no user-controlled loop bound.
+    Iterates over the schema tuple (NOT over ``args``) using
+    ``enumerate`` and ``zip``. The loop bound is the static schema
+    tuple length; SonarCloud ``pythonsecurity:S6680`` cannot trace
+    ``op.argv_schema`` to a static literal because it flows from
+    ``OPERATION_REGISTRY[name]`` where ``name`` is the caller's op
+    name. The narrow ``sonar-project.properties`` E7 suppression
+    documents this as a documented false positive.
     """
     schema = op.argv_schema
     schema_len = len(schema)
@@ -270,16 +274,14 @@ def _validate_argv(op: Operation, args: tuple[str, ...]) -> None:
             f"operation {op.name!r} argv length mismatch: "
             f"expected {schema_len} tokens, got {len(args)}: {args!r}"
         )
-    # ``all`` over the static schema tuple's positions. The bound
-    # is ``schema_len`` (a constant for any given Operation), not
-    # anything derived from the caller-supplied ``args``.
-    for mismatch_idx in (
-        i for i in range(schema_len) if schema[i] != ANY and args[i] != schema[i]
-    ):
-        raise ArgvSchemaViolation(
-            f"operation {op.name!r} argv mismatch at position {mismatch_idx}: "
-            f"expected {schema[mismatch_idx]!r}, got {args[mismatch_idx]!r}"
-        )
+    for i, (expected, actual) in enumerate(zip(schema, args)):
+        if expected == ANY:
+            continue
+        if actual != expected:
+            raise ArgvSchemaViolation(
+                f"operation {op.name!r} argv mismatch at position {i}: "
+                f"expected {expected!r}, got {actual!r}"
+            )
 
 def _resolve_binary(op: Operation) -> str:
     """Return the absolute path of ``op.executable`` via :func:`shutil.which`."""
