@@ -1253,3 +1253,312 @@ def test_register_cleanup_trap_runs_shred_only(
     )
     # shred_plan_artifacts saw the captured output_dir.
     assert cleanup_calls[0] == output_dir
+
+
+# ---------------------------------------------------------------------------
+# 11. TF env isolation (Todo 9): TF_DATA_DIR + TF_CLI_CONFIG_FILE per scan
+# ---------------------------------------------------------------------------
+
+
+def test_isolate_terraform_env_creates_dir_and_returns_env(tmp_path: Path) -> None:
+    """``_isolate_terraform_env`` creates ``terraform-tmp/`` and returns env dict.
+
+    Verifies:
+      * ``<run_dir>/terraform-tmp/`` directory is created
+      * ``terraformrc`` file exists inside it
+      * Returned dict has ``TF_DATA_DIR`` pointing into ``terraform-tmp/``
+      * Returned dict has ``TF_CLI_CONFIG_FILE`` pointing at the terraformrc
+      * ``TF_PLUGIN_CACHE_DIR`` is NOT in the returned dict
+    """
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    tf_env = orch._isolate_terraform_env(state)
+
+    # Directory was created.
+    tf_tmp = run_dir / "terraform-tmp"
+    assert tf_tmp.is_dir(), f"terraform-tmp dir not created: {tf_tmp}"
+
+    # terraformrc file exists.
+    terraformrc = tf_tmp / "terraformrc"
+    assert terraformrc.is_file(), f"terraformrc not created: {terraformrc}"
+
+    # Env dict has the right keys.
+    assert "TF_DATA_DIR" in tf_env
+    assert "TF_CLI_CONFIG_FILE" in tf_env
+    assert tf_env["TF_DATA_DIR"] == str(tf_tmp)
+    assert tf_env["TF_CLI_CONFIG_FILE"] == str(terraformrc)
+
+    # TF_PLUGIN_CACHE_DIR must NEVER be set by the helper.
+    assert "TF_PLUGIN_CACHE_DIR" not in tf_env
+
+
+def test_isolate_terraform_env_with_registry_mirror(tmp_path: Path) -> None:
+    """When ``registry_mirror`` is set, terraformrc contains a network_mirror block."""
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+    orch.registry_mirror = "https://mirror.example.com"
+
+    tf_env = orch._isolate_terraform_env(state)
+    terraformrc = Path(tf_env["TF_CLI_CONFIG_FILE"])
+    content = terraformrc.read_text(encoding="utf-8")
+
+    assert "network_mirror" in content
+    assert "https://mirror.example.com" in content
+    assert "provider_installation" in content
+
+
+def test_isolate_terraform_env_without_registry_mirror_minimal(tmp_path: Path) -> None:
+    """Without ``registry_mirror``, terraformrc is a minimal config (no network_mirror)."""
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    tf_env = orch._isolate_terraform_env(state)
+    terraformrc = Path(tf_env["TF_CLI_CONFIG_FILE"])
+    content = terraformrc.read_text(encoding="utf-8")
+
+    assert "network_mirror" not in content
+
+
+def test_shred_terraform_tmp_removes_dir(tmp_path: Path) -> None:
+    """``_shred_terraform_tmp`` unlinks the entire ``terraform-tmp/`` tree."""
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    # Create the dir and some files.
+    tf_tmp = run_dir / "terraform-tmp"
+    tf_tmp.mkdir()
+    (tf_tmp / "terraformrc").write_text("config", encoding="utf-8")
+    (tf_tmp / "some_cache").write_text("cache-data", encoding="utf-8")
+
+    assert tf_tmp.exists()
+    orch._shred_terraform_tmp(state)
+    assert not tf_tmp.exists(), "terraform-tmp dir was not removed"
+
+
+def test_shred_terraform_tmp_idempotent_no_dir(tmp_path: Path) -> None:
+    """``_shred_terraform_tmp`` is silent when the dir doesn't exist."""
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    # No dir created — should not raise.
+    orch._shred_terraform_tmp(state)
+
+
+def test_run_terraform_init_passes_isolated_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_run_terraform_init`` passes ``TF_DATA_DIR`` + ``TF_CLI_CONFIG_FILE`` via env=.
+
+    Captures the ``env=`` argument passed to ``scanner.ops.run`` and
+    asserts:
+      * ``TF_DATA_DIR`` is present and points into ``terraform-tmp/``
+      * ``TF_CLI_CONFIG_FILE`` is present and points into ``terraform-tmp/``
+      * ``TF_PLUGIN_CACHE_DIR`` is NOT present
+    """
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    captured_env: list[dict | None] = []
+
+    def fake_ops_run(name, *args, **kwargs):
+        captured_env.append(kwargs.get("env"))
+        # Return a successful CompletedProcess.
+        import subprocess
+        return subprocess.CompletedProcess(
+            args=["fake"], returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr("scanner.ops.run", fake_ops_run)
+
+    result = orch._run_terraform_init(state)
+    assert result is True
+    assert len(captured_env) == 1
+    env = captured_env[0]
+    assert env is not None
+    assert "TF_DATA_DIR" in env
+    assert "TF_CLI_CONFIG_FILE" in env
+    assert "terraform-tmp" in env["TF_DATA_DIR"]
+    assert "terraformrc" in env["TF_CLI_CONFIG_FILE"]
+    # TF_PLUGIN_CACHE_DIR must NOT be set.
+    assert "TF_PLUGIN_CACHE_DIR" not in env
+
+
+def test_run_terraform_plan_passes_isolated_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_run_terraform_plan`` passes ``TF_DATA_DIR`` + ``TF_CLI_CONFIG_FILE`` via env=."""
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    captured_env: list[dict | None] = []
+
+    def fake_ops_run(name, *args, **kwargs):
+        captured_env.append(kwargs.get("env"))
+        import subprocess
+        return subprocess.CompletedProcess(
+            args=["fake"], returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr("scanner.ops.run", fake_ops_run)
+
+    result = orch._run_terraform_plan(state)
+    assert result is True
+    assert len(captured_env) == 1
+    env = captured_env[0]
+    assert env is not None
+    assert "TF_DATA_DIR" in env
+    assert "TF_CLI_CONFIG_FILE" in env
+    assert "TF_PLUGIN_CACHE_DIR" not in env
+
+
+def test_run_terraform_show_passes_isolated_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_run_terraform_show`` passes ``TF_DATA_DIR`` + ``TF_CLI_CONFIG_FILE`` via env=."""
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    state.plan_bin = run_dir / "tfplan.binary"
+    state.plan_bin.write_bytes(b"\x00plan")
+    orch = Orchestrator(mode="report", tier="plan")
+
+    captured_env: list[dict | None] = []
+
+    def fake_ops_run(name, *args, **kwargs):
+        captured_env.append(kwargs.get("env"))
+        import subprocess
+        return subprocess.CompletedProcess(
+            args=["fake"], returncode=0, stdout='{"format_version":"1.0"}', stderr=""
+        )
+
+    monkeypatch.setattr("scanner.ops.run", fake_ops_run)
+
+    orch._run_terraform_show(state)
+    assert len(captured_env) == 1
+    env = captured_env[0]
+    assert env is not None
+    assert "TF_DATA_DIR" in env
+    assert "TF_CLI_CONFIG_FILE" in env
+    assert "TF_PLUGIN_CACHE_DIR" not in env
+
+
+def test_terraform_init_shreds_tmp_after_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After ``_run_terraform_init``, ``terraform-tmp/`` is shredded."""
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    def fake_ops_run(name, *args, **kwargs):
+        import subprocess
+        return subprocess.CompletedProcess(
+            args=["fake"], returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr("scanner.ops.run", fake_ops_run)
+
+    orch._run_terraform_init(state)
+
+    tf_tmp = run_dir / "terraform-tmp"
+    assert not tf_tmp.exists(), (
+        f"terraform-tmp should be shredded after run; still exists: {tf_tmp}"
+    )
+
+
+def test_terraform_env_isolation_no_ambient_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient TF_PLUGIN_CACHE_DIR must NOT appear in the env passed to ops.run.
+
+    Even if the ambient environment has ``TF_PLUGIN_CACHE_DIR`` set,
+    the env dict constructed by ``_isolate_terraform_env`` never
+    includes it, and the registry's blocklist strips it from ambient
+    merge. This test verifies the helper itself does not add it.
+    """
+    from scanner.orchestrator import Orchestrator, _PairState
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    env_dir = tmp_path / "env" / "proj" / "env"
+    env_dir.mkdir(parents=True)
+
+    state = _PairState(project="proj", env="env", env_run_dir=run_dir, env_dir=env_dir)
+    orch = Orchestrator(mode="report", tier="plan")
+
+    # Set ambient env that should NOT leak.
+    monkeypatch.setenv("TF_PLUGIN_CACHE_DIR", "/tmp/should-not-leak")
+
+    tf_env = orch._isolate_terraform_env(state)
+
+    # The helper's output must not contain TF_PLUGIN_CACHE_DIR.
+    assert "TF_PLUGIN_CACHE_DIR" not in tf_env
+    # The values should not contain the ambient path.
+    for v in tf_env.values():
+        assert "should-not-leak" not in v
