@@ -26,7 +26,7 @@ All tests are hermetic: ``tmp_path`` provides the consumer repo;
 :class:`_FakeCheckov` stands in for the real Checkov runner; the
 aggregate step is mocked so the suite has no dependency on PyYAML,
 mapping YAML, or the HTML report renderer. Tier=plan/state tests mock
-the Azure / terraform subprocesses (``_whitelist_my_ip``,
+the Azure / terraform subprocesses (``_alert_network_required``,
 ``_run_terraform_init`` / ``_run_terraform_plan``,
 ``_download_state_blob`` / ``_convert_state_to_plan`` /
 ``_scan_state_as_plan`` / ``_emit_drift_report``) so no terraform
@@ -648,11 +648,11 @@ def test_tier_plan_invokes_discover_public_ip_and_emits_plan_artifacts(
     """``tier=plan`` reaches the plan-prep pipeline and writes tfplan.binary + plan.json.
 
     Patches the four subprocess entry points
-    (``_whitelist_my_ip``, ``_run_terraform_init``, ``_run_terraform_plan``,
-    ``_run_terraform_show``) to be hermetic. ``_whitelist_my_ip`` is the
-    one that ultimately calls ``_discover_public_ip`` (orchestrator.py
-    line 714); we record the call so the test asserts the IP-discovery
-    code path was actually reached.
+    (``_alert_network_required``, ``_run_terraform_init``, ``_run_terraform_plan``,
+    ``_run_terraform_show``) to be hermetic. ``_alert_network_required``
+    replaces the prior firewall-whitelist helper; the fake records the
+    call and returns True so the plan-prep pipeline proceeds (the
+    production helper always returns False and bails out fail-closed).
 
     Per-pair artifacts verified:
       * ``tfplan.binary`` — written by ``_run_terraform_plan``
@@ -666,8 +666,8 @@ def test_tier_plan_invokes_discover_public_ip_and_emits_plan_artifacts(
     # Track which subprocess paths were reached.
     calls: list[str] = []
 
-    def fake_whitelist_my_ip(self, state, account):  # noqa: ANN001 — test stub
-        calls.append("whitelist_my_ip")
+    def fake_alert_network_required(self, state, account):  # noqa: ANN001 — test stub
+        calls.append("alert_network_required")
         # Mimic real behavior: write the .whitelist_ip marker so the
         # cleanup trap would have something to remove.
         (state.env_run_dir / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
@@ -701,8 +701,8 @@ def test_tier_plan_invokes_discover_public_ip_and_emits_plan_artifacts(
 
     monkeypatch.setattr(
         scanner_orchestrator.Orchestrator,
-        "_whitelist_my_ip",
-        fake_whitelist_my_ip,
+        "_alert_network_required",
+        fake_alert_network_required,
     )
     monkeypatch.setattr(
         scanner_orchestrator.Orchestrator,
@@ -747,7 +747,7 @@ def test_tier_plan_invokes_discover_public_ip_and_emits_plan_artifacts(
 
     # All four plan-prep subprocesses fired in the right order.
     assert calls == [
-        "whitelist_my_ip",
+        "alert_network_required",
         "terraform_init",
         "terraform_plan",
         "terraform_show",
@@ -768,12 +768,14 @@ def test_tier_plan_falls_back_when_whitelist_fails(
     fake_checkov_module: type[_FakeCheckov],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the IP whitelist fails, the per-pair plan passes are skipped.
+    """If the network-required alert fires (returns False), the per-pair plan passes are skipped.
 
     Mirrors orchestrator._run_plan_tier() lines 552-558: when
-    ``_whitelist_my_ip`` returns False the pair is skipped (tier_rc=-1),
-    so ``terraform init`` / ``terraform plan`` / ``terraform show``
-    must NOT fire and no plan artifacts may be written.
+    ``_alert_network_required`` returns False the pair is skipped
+    (tier_rc=-1), so ``terraform init`` / ``terraform plan`` /
+    ``terraform show`` must NOT fire and no plan artifacts may be
+    written. (This test is the negative-path counterpart to the
+    ``test_tier_plan_invokes_discover_public_ip`` success path.)
     """
     _make_env_tree(tmp_path, {"payments": {"prod": ["main.tf"]}})
     output_dir = tmp_path / "runs"
@@ -781,8 +783,8 @@ def test_tier_plan_falls_back_when_whitelist_fails(
 
     plan_calls: list[str] = []
 
-    def fake_whitelist_my_ip(self, state, account):  # noqa: ANN001 — test stub
-        return False  # network rule failed; bail out
+    def fake_alert_network_required(self, state, account):  # noqa: ANN001 — test stub
+        return False  # network access not available; bail out
 
     def fake_terraform_init(self, state):  # noqa: ANN001 — test stub
         plan_calls.append("init")
@@ -797,8 +799,8 @@ def test_tier_plan_falls_back_when_whitelist_fails(
 
     monkeypatch.setattr(
         scanner_orchestrator.Orchestrator,
-        "_whitelist_my_ip",
-        fake_whitelist_my_ip,
+        "_alert_network_required",
+        fake_alert_network_required,
     )
     monkeypatch.setattr(
         scanner_orchestrator.Orchestrator,
@@ -883,7 +885,7 @@ def test_tier_state_emits_state_artifacts_and_calls_safety_guard(
 
     # tier=plan prep mocks — return True and create the plan artifacts
     # so the state-blob pipeline has the inputs it expects.
-    def fake_whitelist_my_ip(self, state, account):  # noqa: ANN001 — test stub
+    def fake_alert_network_required(self, state, account):  # noqa: ANN001 — test stub
         (state.env_run_dir / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
         return True
 
@@ -957,8 +959,8 @@ def test_tier_state_emits_state_artifacts_and_calls_safety_guard(
 
     monkeypatch.setattr(
         scanner_orchestrator.Orchestrator,
-        "_whitelist_my_ip",
-        fake_whitelist_my_ip,
+        "_alert_network_required",
+        fake_alert_network_required,
     )
     monkeypatch.setattr(
         scanner_orchestrator.Orchestrator,

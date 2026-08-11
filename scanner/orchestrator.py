@@ -51,13 +51,18 @@ Console scripts
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
+
+# Lazy import: scanner/ops.py at module-load would import subprocess and
+# the safety guard; that's fine, but we keep the symbol local so call
+# sites read as ``ops.run(...)``.
+from scanner import ops as scanner_ops  # noqa: E402
 
 # Bootstrap UTF-8 I/O before any scan work (mirrors lib/common.sh).
 import scanner._utf8  # noqa: F401  -- side-effect import
@@ -115,7 +120,7 @@ VALID_MODES: tuple[str, ...] = ("gate", "report", "audit")
 #  - 3-24 characters
 #  - lowercase letters and digits only
 # Used to validate the `--state-account` CLI flag before it reaches
-# `subprocess.run` (S8705 — subprocess invocation with tainted CLI value).
+# any subprocess (S8705 — subprocess invocation with tainted CLI value).
 AZURE_STORAGE_ACCOUNT_PATTERN: str = r"^[a-z0-9]{3,24}$"
 
 # Azure Instance Metadata Service (IMDS) link-local address. Only
@@ -549,10 +554,11 @@ class Orchestrator:
             )
             return -1
 
-        if not self._whitelist_my_ip(state, state_account):
+        if not self._alert_network_required(state, state_account):
             _log(
                 "ERROR",
-                f"failed to whitelist IP; cannot read remote state; "
+                f"network access to {state_account} storage account is "
+                f"required; cannot read remote state; "
                 f"skipping {state.project}/{state.env}",
             )
             return -1
@@ -616,7 +622,7 @@ class Orchestrator:
 
     @staticmethod
     def _check_storage_account_valid(account: str) -> None:
-        """Validate a storage account name before it reaches ``subprocess``.
+        """Validate a storage account name before it reaches any subprocess.
 
         Azure storage account naming rules:
           * 3-24 characters
@@ -678,100 +684,71 @@ class Orchestrator:
 
     # -- terraform + state-blob --------------------------------------
 
-    def _whitelist_my_ip(
+    def _alert_network_required(
         self,
         state: _PairState,
         state_account: Optional[str],
     ) -> bool:
-        """Add the current public IP to the state storage firewall.
+        """Emit a one-line warning that this storage account needs network access.
 
-        Stores the IP in ``<env_run_dir>/.whitelist_ip`` so the EXIT
-        trap can find it. Idempotent: re-running overwrites the file.
+        Replaces the prior :meth:`_whitelist_my_ip` which fired ``az
+        storage account network-rule add`` to whitelist the runner's IP.
+        That mutation is now deliberately NOT performed: the orchestrator
+        is read-only and the firewall-whitelist step was the only
+        mutation it issued. The caller (``_run_plan_tier``) treats the
+        ``False`` return as a bail-out so the per-pair plan/state
+        passes are skipped.
 
-        Returns True on success (or dry-run). Mirrors scan.sh lines
-        398-410.
+        The alert format is the single-line, machine-grep-friendly token
+        ``STORAGE_ACCOUNT=<x>; RUNNER_IP=<y>; you need network access
+        to this storage account from this IP`` so an operator can
+        audit logs for missing-network-access pairs after the fact.
+
+        Args:
+            state: Per-pair working state. ``state.env_run_dir`` is
+                unused (no artifact is written) but is kept on the
+                signature for parity with the prior helper.
+            state_account: Storage account name. May be ``None`` when
+                the caller failed the early-bail check; in that case
+                ``runner_ip`` is reported as ``"unknown"`` so the log
+                line is still useful.
+
+        Returns:
+            ``False`` — the caller MUST treat this as a per-pair skip
+            (fail-closed: tier=plan/state cannot read remote state
+            without firewall access, and the scanner will not mutate
+            Azure to grant it).
         """
-        assert state_account is not None  # checked by caller
-        _log("INFO", f"  whitelist current IP on {state_account} storage firewall")
+        # Defense-in-depth: still validate the CLI-derived value so a
+        # bogus ``--state-account`` lands in the log with a clear shape
+        # rather than being echoed raw.
+        if state_account is not None:
+            try:
+                self._check_storage_account_valid(state_account)
+            except ValueError as exc:
+                _log("ERROR", f"  invalid state_account for alert: {exc}")
+                state_account = "<invalid>"
 
-        if self.dry_run:
-            # Defense-in-depth: validate the CLI-derived value before any
-            # subprocess invocation (S8705 — taint from CLI flag).
-            self._check_storage_account_valid(state_account)
-            print("[dry-run] whitelist_my_ip")
-            return True
+        # Best-effort discovery: if it fails we still want the alert.
+        runner_ip = _discover_public_ip() or "unknown"
+        storage = state_account if state_account is not None else "<unset>"
 
-        # Defense-in-depth: validate the CLI-derived value before any
-        # subprocess invocation (S8705 — taint from CLI flag). Bind the
-        # validated value to a local so the static analyzer sees the
-        # taint cleared at the point subprocess.run is called.
-        self._check_storage_account_valid(state_account)
-        validated_account = state_account
-
-        # Discover the public IP via the canonical Azure metadata
-        # endpoint. Falls back to ipify if the metadata endpoint is
-        # unreachable (e.g. dev box without Azure metadata service).
-        ip = _discover_public_ip()
-        if not ip:
-            _log("ERROR", "  could not determine current public IP")
-            return False
-
-        # Refuse if the command matches a forbidden mutating pattern.
-        # The whitelist command is in ALLOWED_EXCEPTIONS so the guard
-        # passes — but the defense-in-depth check still fires.
-        cmd = (
-            f"az storage account network-rule add "
-            f"--account-name {validated_account} --ip-address {ip}"
+        logging.warning(
+            "STORAGE_ACCOUNT=%s; RUNNER_IP=%s; you need network access "
+            "to this storage account from this IP",
+            storage,
+            runner_ip,
         )
-        self.safety.refuse_if_mutating(cmd)
-
-        # Defense-in-depth re-validation immediately before the
-        # subprocess call (S8705 — taint from CLI flag). Use an inline
-        # ``re.fullmatch`` guard so the static analyzer sees the
-        # sanitization at the immediate use-site, then bind the
-        # validated value to a local for the subprocess argv.
-        if not re.fullmatch(AZURE_STORAGE_ACCOUNT_PATTERN, validated_account):
-            raise ValueError(f"invalid state_account: {validated_account!r}")
-        sanitized_account: str = validated_account
-
-        result = subprocess.run(
-            [
-                "az",
-                "storage",
-                "account",
-                "network-rule",
-                "add",
-                "--account-name",
-                sanitized_account,
-                "--ip-address",
-                ip,
-                "--output",
-                "none",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode != 0:
-            _log(
-                "ERROR",
-                f"  az network-rule add failed (rc={result.returncode}): "
-                f"{(result.stderr or '').strip()}",
-            )
-            return False
-
-        # Record the IP for the cleanup trap.
-        (state.env_run_dir / ".whitelist_ip").write_text(ip, encoding="utf-8")
-        _log("INFO", f"  whitelisted IP {ip}")
-        return True
+        return False
 
     def _run_terraform_init(self, state: _PairState) -> bool:
         """Run ``terraform init -input=false`` in the env dir.
 
         Mirrors scan.sh line 418. ``-input=false`` disables interactive
         prompts. Providers are downloaded from the registry or
-        filesystem_mirror; no Azure mutations.
+        filesystem_mirror; no Azure mutations. Routed through the
+        :mod:`scanner.ops` registry; argv schema is the 5 tokens
+        ``("-chdir", <env_dir>, "init", "-input=false", "-no-color")``.
         """
         _log("INFO", "  terraform init")
         if self.dry_run:
@@ -779,25 +756,24 @@ class Orchestrator:
             return True
 
         try:
-            result = subprocess.run(
-                [
-                    "terraform",
-                    "-chdir",
-                    str(state.env_dir),
-                    "init",
-                    "-input=false",
-                    "-no-color",
-                ],
-                capture_output=True,
-                text=True,
+            result = scanner_ops.run(
+                "terraform.init_local",
+                "-chdir",
+                str(state.env_dir),
+                "init",
+                "-input=false",
+                "-no-color",
+                tier=self.tier,
                 timeout=300,
-                check=False,
             )
-        except subprocess.TimeoutExpired:
-            _log("ERROR", "  terraform init timed out")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  terraform binary not found on PATH: {exc}")
             return False
-        except FileNotFoundError:
-            _log("ERROR", "  terraform binary not found on PATH")
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  terraform.init_local tier refused: {exc}")
+            return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  terraform.init_local argv rejected: {exc}")
             return False
 
         if result.returncode != 0:
@@ -815,7 +791,9 @@ class Orchestrator:
         Acquires state lock and reads remote state. NO mutation. The
         plan binary is shredded on exit by the trap (or by
         :meth:`_shred_plan_artifacts` per-pair). Mirrors scan.sh
-        lines 425-431.
+        lines 425-431. Routed through the :mod:`scanner.ops` registry;
+        argv schema is the 6 tokens ``("-chdir", <env_dir>, "plan",
+        "-no-color", "-out=<plan_bin>", "-lock=true")``.
         """
         plan_bin = state.env_run_dir / "tfplan.binary"
         state.plan_bin = plan_bin
@@ -826,26 +804,25 @@ class Orchestrator:
             return True
 
         try:
-            result = subprocess.run(
-                [
-                    "terraform",
-                    "-chdir",
-                    str(state.env_dir),
-                    "plan",
-                    "-no-color",
-                    f"-out={plan_bin}",
-                    "-lock=true",
-                ],
-                capture_output=True,
-                text=True,
+            result = scanner_ops.run(
+                "terraform.plan_local",
+                "-chdir",
+                str(state.env_dir),
+                "plan",
+                "-no-color",
+                f"-out={plan_bin}",
+                "-lock=true",
+                tier=self.tier,
                 timeout=600,
-                check=False,
             )
-        except subprocess.TimeoutExpired:
-            _log("ERROR", "  terraform plan timed out")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  terraform binary not found on PATH: {exc}")
             return False
-        except FileNotFoundError:
-            _log("ERROR", "  terraform binary not found on PATH")
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  terraform.plan_local tier refused: {exc}")
+            return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  terraform.plan_local argv rejected: {exc}")
             return False
 
         if result.returncode != 0:
@@ -861,7 +838,11 @@ class Orchestrator:
         """Run ``terraform show -json`` and write plan.json.
 
         Mirrors scan.sh line 435. Idempotent: overwrites plan_json if
-        it already exists.
+        it already exists. Routed through the :mod:`scanner.ops`
+        registry; the registry captures stdout (it cannot redirect),
+        so the caller's flow is: invoke the op, then write
+        ``result.stdout`` to ``plan_json``. argv schema is the 5 tokens
+        ``("-chdir", <env_dir>, "show", "-json", <plan_bin>)``.
         """
         if state.plan_bin is None:
             return
@@ -874,25 +855,41 @@ class Orchestrator:
             return
 
         try:
-            with plan_json.open("w", encoding="utf-8") as fh:
-                subprocess.run(
-                    [
-                        "terraform",
-                        "-chdir",
-                        str(state.env_dir),
-                        "show",
-                        "-json",
-                        str(state.plan_bin),
-                    ],
-                    stdout=fh,
-                    text=True,
-                    timeout=120,
-                    check=True,
-                )
-        except subprocess.TimeoutExpired:
-            _log("ERROR", "  terraform show timed out")
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            _log("ERROR", f"  terraform show failed: {exc}")
+            result = scanner_ops.run(
+                "terraform.show_json",
+                "-chdir",
+                str(state.env_dir),
+                "show",
+                "-json",
+                str(state.plan_bin),
+                tier=self.tier,
+                timeout=120,
+            )
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  terraform binary not found on PATH: {exc}")
+            return
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  terraform.show_json tier refused: {exc}")
+            return
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  terraform.show_json argv rejected: {exc}")
+            return
+
+        if result.returncode != 0:
+            _log(
+                "ERROR",
+                f"  terraform show failed (rc={result.returncode}): "
+                f"{(result.stderr or result.stdout or '').strip()[:500]}",
+            )
+            return
+
+        # The registry captured stdout; write it to plan_json. This
+        # preserves the prior ``stdout=fh`` semantics (overwrite on
+        # each run; idempotent).
+        try:
+            plan_json.write_text(result.stdout or "", encoding="utf-8")
+        except OSError as exc:
+            _log("ERROR", f"  failed to write plan.json: {exc}")
 
     # -- state-blob scan (tier=state) --------------------------------
 
@@ -997,41 +994,47 @@ class Orchestrator:
     ) -> bool:
         """Download the state blob to ``state_local``; True on success.
 
-        Logs and returns False on timeout, missing binary, non-zero rc,
-        or empty result. The downloaded blob is shredded ASAP in the
-        caller (PCI 10.7 hygiene).
+        Logs and returns False on registry refusal, timeout, missing
+        binary, non-zero rc, or empty result. The downloaded blob is
+        shredded ASAP in the caller (PCI 10.7 hygiene). Routed through
+        the :mod:`scanner.ops` registry; argv schema is the 15 tokens
+        ``("storage", "blob", "download", "--account-name", <account>,
+        "--container-name", "iac", "--name", <key>, "--file",
+        <state_local>, "--auth-mode", "login", "--output", "none")``.
         """
         # Defense-in-depth: validate the CLI-derived value here too so
         # the data-flow analyzer sees the check immediately before the
         # subprocess invocation (S8705 — taint from CLI flag).
         self._check_storage_account_valid(state_account)
         try:
-            dl = subprocess.run(
-                [
-                    "az",
-                    "storage",
-                    "blob",
-                    "download",
-                    "--account-name",
-                    state_account,
-                    "--container-name",
-                    "iac",
-                    "--name",
-                    backend_key,
-                    "--file",
-                    str(state_local),
-                    "--auth-mode",
-                    "login",
-                    "--output",
-                    "none",
-                ],
-                capture_output=True,
-                text=True,
+            dl = scanner_ops.run(
+                "az.blob_download",
+                "storage",
+                "blob",
+                "download",
+                "--account-name",
+                state_account,
+                "--container-name",
+                "iac",
+                "--name",
+                backend_key,
+                "--file",
+                str(state_local),
+                "--auth-mode",
+                "login",
+                "--output",
+                "none",
+                tier=self.tier,
                 timeout=60,
-                check=False,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            _log("ERROR", f"  state blob download failed: {exc}")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  az binary not found on PATH: {exc}")
+            return False
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  az.blob_download tier refused: {exc}")
+            return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  az.blob_download argv rejected: {exc}")
             return False
 
         if dl.returncode != 0:
@@ -1061,22 +1064,28 @@ class Orchestrator:
 
         Shreds ``state_local`` on a successful conversion (PCI 10.7).
         Returns False if conversion failed or output is missing.
+        Routed through the :mod:`scanner.ops` registry; argv schema is
+        the 3 ``ANY`` slots ``(<tfstate_to_plan.py>, <state_local>,
+        <state_plan_json>)`` (executable resolves to ``sys.executable``
+        inside the registry).
         """
         try:
-            conv = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve().parent / "tfstate_to_plan.py"),
-                    str(state_local),
-                    str(state_plan_json),
-                ],
-                capture_output=True,
-                text=True,
+            conv = scanner_ops.run(
+                "python.tfstate_to_plan",
+                str(Path(__file__).resolve().parent / "tfstate_to_plan.py"),
+                str(state_local),
+                str(state_plan_json),
+                tier=self.tier,
                 timeout=120,
-                check=False,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            _log("ERROR", f"  tfstate_to_plan failed: {exc}")
+        except scanner_ops.TrustedBinaryMissing as exc:
+            _log("ERROR", f"  python interpreter not found on PATH: {exc}")
+            return False
+        except scanner_ops.TierViolation as exc:
+            _log("ERROR", f"  python.tfstate_to_plan tier refused: {exc}")
+            return False
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("ERROR", f"  python.tfstate_to_plan argv rejected: {exc}")
             return False
 
         # Shred the encrypted state blob ASAP (PCI 10.7 hygiene).
@@ -1121,28 +1130,29 @@ class Orchestrator:
         """Run ``drift_report.py`` to diff ``state.plan_json`` vs state-as-plan.
 
         Best-effort: errors are logged at WARN, never raised. Skipped
-        when ``state.plan_json`` is unavailable.
+        when ``state.plan_json`` is unavailable. Routed through the
+        :mod:`scanner.ops` registry; argv schema is the 4 ``ANY`` slots
+        ``(<drift_report.py>, <plan_json>, <state_plan_json>,
+        <drift_report>)``.
         """
         if not (state.plan_json and state.plan_json.is_file() and state_plan_json.is_file()):
             return
         try:
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve().parent / "drift_report.py"),
-                    str(state.plan_json),
-                    str(state_plan_json),
-                    str(drift_report),
-                ],
-                capture_output=True,
-                text=True,
+            scanner_ops.run(
+                "python.drift_report",
+                str(Path(__file__).resolve().parent / "drift_report.py"),
+                str(state.plan_json),
+                str(state_plan_json),
+                str(drift_report),
+                tier=self.tier,
                 timeout=120,
-                check=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            _log("WARN", f"  drift_report.py timed out: {exc}")
-        except FileNotFoundError as exc:
+        except scanner_ops.TrustedBinaryMissing as exc:
             _log("WARN", f"  drift_report.py unavailable: {exc}")
+        except scanner_ops.TierViolation as exc:
+            _log("WARN", f"  python.drift_report tier refused: {exc}")
+        except scanner_ops.ArgvSchemaViolation as exc:
+            _log("WARN", f"  python.drift_report argv rejected: {exc}")
 
     @staticmethod
     def _shred_state_plan(state_plan_json: Path) -> None:
