@@ -946,3 +946,389 @@ def test_handle_baseline_passes_append_top_dry_run(
     )
     assert "--append" in argv, f"--append missing; argv={argv!r}"
     assert "--dry-run" in argv, f"--dry-run missing; argv={argv!r}"
+
+
+# ---------------------------------------------------------------------------
+# 20. _resolve_latest_remote_run_id routes through ops.run("az.blob_list", ...)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_latest_remote_run_id_uses_ops_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_latest_remote_run_id`` calls ``scanner.ops.run`` with the registered op.
+
+    Confirms the inner subprocess call was migrated to the typed
+    operation registry. The mock returns a tsv-formatted ``result``
+    so we can verify the call argv matches the registry schema for
+    ``az.blob_list`` (13 tokens after the executable). The mock
+    returns a fake ``CompletedProcess`` so the function's stdout
+    parsing exercises a non-empty value.
+    """
+    from scanner import cli, ops
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "run-2026/run-A/main.tf\nrun-2026/run-B/main.tf\n"
+        stderr = ""
+
+    def fake_ops_run(name: str, *args: str, **kwargs: object) -> _FakeCompleted:
+        captured["name"] = name
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeCompleted()
+
+    monkeypatch.setattr(ops, "run", fake_ops_run)
+
+    out = cli._resolve_latest_remote_run_id(
+        storage_account="myacct",
+        container_name="pacioli-reports",
+        dry_run=False,
+    )
+
+    assert out == "run-2026", (
+        f"expected freshest run-id 'run-2026'; got {out!r}"
+    )
+    assert captured["name"] == "az.blob_list", (
+        f"_resolve_latest_remote_run_id must call ops.run('az.blob_list', ...); "
+        f"got {captured['name']!r}"
+    )
+    # The argv passed to ops.run must match the registry schema length
+    # exactly (13 tokens for az.blob_list).
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert len(args) == len(ops.OPERATION_REGISTRY["az.blob_list"].argv_schema), (
+        f"argv length must equal registry schema length; "
+        f"got {len(args)} args, schema has "
+        f"{len(ops.OPERATION_REGISTRY['az.blob_list'].argv_schema)} slots"
+    )
+    # The tier must be 'state' (the registry rejects other tiers).
+    assert captured["kwargs"].get("tier") == "state", (
+        f"_resolve_latest_remote_run_id must pass tier='state'; "
+        f"got {captured['kwargs']!r}"
+    )
+
+
+def test_resolve_latest_remote_run_id_returns_none_on_empty_blob_list(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Empty ``az storage blob list`` stdout → ``None`` + ERROR log.
+
+    Mirrors the original behaviour: when the Azure container has no
+    run folders, the helper returns ``None`` and emits an ERROR log so
+    the caller surfaces the failure to operators.
+    """
+    from scanner import cli, ops
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(ops, "run", lambda *_a, **_kw: _FakeCompleted())
+
+    out = cli._resolve_latest_remote_run_id(
+        storage_account="myacct",
+        container_name="empty-container",
+        dry_run=False,
+    )
+
+    assert out is None, f"expected None for empty stdout; got {out!r}"
+    captured = capsys.readouterr()
+    assert "ERROR" in captured.err, (
+        f"expected ERROR log on empty stdout; got err={captured.err!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 21. _az_blob_download routes through ops.run("az.blob_download", ...)
+# ---------------------------------------------------------------------------
+
+
+def test_az_blob_download_uses_ops_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_az_blob_download`` calls ``scanner.ops.run`` with ``az.blob_download``.
+
+    Confirms the migrated subprocess call invokes the typed registry
+    with the correct schema (15 tokens), correct tier ('state'), and
+    that the real reimplementation surfaces non-zero return codes by
+    logging a WARN and returning ``False``.
+    """
+    from scanner import cli, ops
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompleted:
+        def __init__(self, returncode: int = 0, stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = stderr
+
+    def fake_ops_run(name: str, *args: str, **kwargs: object) -> _FakeCompleted:
+        captured["name"] = name
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeCompleted(returncode=1, stderr="ERROR: blob not found")
+
+    monkeypatch.setattr(ops, "run", fake_ops_run)
+
+    dest = tmp_path / "report.html"
+    ok = cli._az_blob_download(
+        storage_account="myacct",
+        container_name="pacioli-reports",
+        blob_name="run-1/report.html",
+        dest=dest,
+        dry_run=False,
+    )
+
+    assert ok is False, (
+        f"non-zero return code must propagate as False; got {ok!r}"
+    )
+    assert captured["name"] == "az.blob_download", (
+        f"_az_blob_download must call ops.run('az.blob_download', ...); "
+        f"got {captured['name']!r}"
+    )
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert len(args) == len(ops.OPERATION_REGISTRY["az.blob_download"].argv_schema), (
+        f"argv length must equal registry schema length; "
+        f"got {len(args)} args, schema has "
+        f"{len(ops.OPERATION_REGISTRY['az.blob_download'].argv_schema)} slots"
+    )
+    assert captured["kwargs"].get("tier") == "state", (
+        f"_az_blob_download must pass tier='state'; got {captured['kwargs']!r}"
+    )
+
+
+def test_az_blob_download_returns_true_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_az_blob_download`` returns ``True`` when ``ops.run`` returns rc=0."""
+    from scanner import cli, ops
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(ops, "run", lambda *_a, **_kw: _FakeCompleted())
+
+    dest = tmp_path / "report.html"
+    ok = cli._az_blob_download(
+        storage_account="myacct",
+        container_name="pacioli-reports",
+        blob_name="run-1/report.html",
+        dest=dest,
+        dry_run=False,
+    )
+
+    assert ok is True, f"rc=0 must return True; got {ok!r}"
+
+
+def test_az_blob_download_dry_run_returns_true_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--dry-run`` path short-circuits and never invokes ``ops.run``.
+
+    Mirrors the original print-prefix behaviour: the dry-run branch
+    prints ``[dry-run] az storage blob download ...`` and returns
+    ``True`` without touching ``ops.run``.
+    """
+    from scanner import cli, ops
+
+    def fail_ops_run(*_a: object, **_kw: object) -> None:
+        raise AssertionError("ops.run must NOT be called in --dry-run mode")
+
+    monkeypatch.setattr(ops, "run", fail_ops_run)
+
+    dest = tmp_path / "report.html"
+    ok = cli._az_blob_download(
+        storage_account="myacct",
+        container_name="pacioli-reports",
+        blob_name="run-1/report.html",
+        dest=dest,
+        dry_run=True,
+    )
+
+    assert ok is True, f"dry-run must return True; got {ok!r}"
+    captured = capsys.readouterr()
+    assert "[dry-run]" in captured.out, (
+        f"dry-run must print [dry-run] marker; got out={captured.out!r}"
+    )
+    assert "az storage blob download" in captured.out, (
+        f"dry-run print must mention the op; got out={captured.out!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 22. _handle_audit_remote registers a cleanup trap in non-dry-run mode
+# ---------------------------------------------------------------------------
+
+
+def test_handle_audit_remote_registers_signal_trap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_audit_remote`` calls ``register_traps`` with a cleanup fn.
+
+    Non-dry-run mode MUST register a cleanup trap so partial downloads
+    are removed on SIGINT/SIGTERM. The handler passes a closure that
+    captures ``dest_dir``; we satisfy that by pre-creating one of the
+    expected artefacts and letting the cleanup callable run.
+    """
+    from scanner import cli, trap
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PACIOLI_STATE_STORAGE_ACCOUNT", "fakeacct")
+
+    # Pre-create the directory + a fake partial download so the
+    # cleanup closure actually has something to remove.
+    run_id = "run-signal-trap"
+    dest_dir = tmp_path / ".pacioli" / "runs" / run_id / "aggregate"
+    dest_dir.mkdir(parents=True)
+    (dest_dir / "coverage_matrix.csv").write_bytes(b"partial-blob-bytes")
+    (dest_dir / ".audit_pulled_at").write_text("stale marker\n")
+
+    registered: list[object] = []
+
+    def fake_register_traps(cleanup_fn: object) -> None:
+        registered.append(cleanup_fn)
+
+    monkeypatch.setattr(trap, "register_traps", fake_register_traps)
+
+    # Stub the inner helpers so the download loop completes without
+    # touching Azure.
+    monkeypatch.setattr(
+        cli,
+        "_resolve_latest_remote_run_id",
+        lambda **_kw: run_id,
+    )
+
+    def fake_download(
+        *,
+        storage_account: str,
+        container_name: str,
+        blob_name: str,
+        dest: Path,
+        dry_run: bool,
+    ) -> bool:
+        # No-op: the cleanup fixture already created the file.
+        return True
+
+    monkeypatch.setattr(cli, "_az_blob_download", fake_download)
+
+    args = argparse.Namespace(
+        latest=True,
+        run_id=None,
+        out=None,
+        state_account=None,
+        dry_run=False,
+    )
+
+    rc = cli._handle_audit_remote(args)
+    assert rc == 0, f"_handle_audit_remote returned {rc}; expected 0"
+
+    assert len(registered) == 1, (
+        f"register_traps must be called exactly once in non-dry-run mode; "
+        f"got {len(registered)} registrations"
+    )
+    cleanup_fn = registered[0]
+    assert callable(cleanup_fn), "register_traps must receive a callable"
+
+    # Invoke the cleanup: it must remove the partial download + the
+    # stale marker. After it runs, the .audit_pulled_at marker is
+    # gone (the handler writes a fresh one at the end, so we expect
+    # one to exist with new contents).
+    cleanup_fn()
+    # Coverage matrix was a partial download → cleaned up.
+    assert not (dest_dir / "coverage_matrix.csv").exists(), (
+        "cleanup_fn must remove partial downloads"
+    )
+
+
+def test_handle_audit_remote_dry_run_does_not_register_trap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``--dry-run`` mode does NOT register a signal trap.
+
+    Dry-run never writes anything to disk, so there's nothing to
+    clean up; registering a trap would just add noise to the
+    test suite.
+    """
+    from scanner import cli, trap
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PACIOLI_STATE_STORAGE_ACCOUNT", "fakeacct")
+
+    registered: list[object] = []
+
+    def fake_register_traps(cleanup_fn: object) -> None:
+        registered.append(cleanup_fn)
+
+    monkeypatch.setattr(trap, "register_traps", fake_register_traps)
+
+    monkeypatch.setattr(
+        cli,
+        "_resolve_latest_remote_run_id",
+        lambda **_kw: "DRYRUN-LATEST",
+    )
+
+    def fake_download(
+        *,
+        storage_account: str,
+        container_name: str,
+        blob_name: str,
+        dest: Path,
+        dry_run: bool,
+    ) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_az_blob_download", fake_download)
+
+    args = argparse.Namespace(
+        latest=True,
+        run_id=None,
+        out=None,
+        state_account=None,
+        dry_run=True,
+    )
+
+    rc = cli._handle_audit_remote(args)
+    assert rc == 0, f"dry-run returned {rc}; expected 0"
+    assert registered == [], (
+        f"register_traps must NOT be called in --dry-run mode; "
+        f"got {len(registered)} registrations"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 23. No raw subprocess calls remain in scanner/cli.py
+# ---------------------------------------------------------------------------
+
+
+def test_cli_module_has_no_raw_subprocess_calls() -> None:
+    """``scanner.cli`` must not contain ``subprocess.run/Popen/call`` or ``os.system``.
+
+    Guards against regressions: if a future change reintroduces a raw
+    subprocess call, the ops-registry migration is incomplete. The
+    grep walks the source file text directly so it doesn't depend on
+    importing cli (which triggers the UTF-8 bootstrap).
+    """
+    src = (Path(__file__).resolve().parents[1] / "cli.py").read_text(
+        encoding="utf-8"
+    )
+    forbidden = ("subprocess.run", "subprocess.Popen", "subprocess.call", "os.system")
+    hits = [tok for tok in forbidden if tok in src]
+    assert not hits, (
+        f"scanner/cli.py must not contain raw subprocess calls; "
+        f"found: {hits!r}"
+    )

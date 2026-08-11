@@ -555,6 +555,44 @@ def _handle_audit_remote(args: argparse.Namespace) -> int:
     dest_dir = (Path.home() / GLOBAL_CONFIG_DIR / "runs" / run_id / "aggregate").resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+    # Register a cleanup trap so a SIGINT/SIGTERM in the middle of the
+    # download loop (Ctrl+C, CI job timeout) leaves the run-dir in a
+    # consistent state: partial downloads are removed instead of
+    # silently lingering. The cleanup is best-effort — atexit + signal
+    # handlers in scanner.trap swallow exceptions and re-raise the
+    # signal so the process exits with the conventional 128+N status.
+    if not bool(args.dry_run):
+        from scanner.trap import register_traps
+
+        _audit_blobs = ("coverage_matrix.csv", "combined.sarif", "junit.xml", REPORT_FILENAME)
+
+        def _cleanup_partial_downloads() -> None:
+            """Remove any partial downloads + the audit marker on signal.
+
+            Only the artifacts that were earmarked for THIS audit run
+            are touched; the directory itself is preserved so the
+            surrounding runs/<run_id>/ tree (used by other tooling)
+            stays intact.
+            """
+            for fname in _audit_blobs:
+                target = dest_dir / fname
+                if target.exists():
+                    try:
+                        target.unlink()
+                    except OSError:
+                        # Best-effort: a leftover partial download is
+                        # worse than a partial download that survives
+                        # a cleanup attempt — log + continue.
+                        _log("WARN", f"cleanup: failed to remove {target}")
+            marker = dest_dir / ".audit_pulled_at"
+            if marker.exists():
+                try:
+                    marker.unlink()
+                except OSError:
+                    _log("WARN", f"cleanup: failed to remove {marker}")
+
+        register_traps(_cleanup_partial_downloads)
+
     for fname in ("coverage_matrix.csv", "combined.sarif", "junit.xml", REPORT_FILENAME):
         _log("INFO", f"downloading {fname}")
         _az_blob_download(
@@ -591,32 +629,28 @@ def _resolve_latest_remote_run_id(
     no run folders. In ``--dry-run`` mode, returns ``"DRYRUN-LATEST"``
     so the rest of the pipeline can exercise without contacting Azure.
     """
-    import subprocess
+    from scanner import ops as _ops
 
     if dry_run:
         return "DRYRUN-LATEST"
 
     _log("INFO", f"fetching latest run_id from {container_name}")
-    result = subprocess.run(
-        [
-            "az",
-            "storage",
-            "blob",
-            "list",
-            "--account-name",
-            storage_account,
-            "--container-name",
-            container_name,
-            "--auth-mode",
-            "login",
-            "--query",
-            "[?contains(name, '/')].[name]",
-            "-o",
-            "tsv",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    result = _ops.run(
+        "az.blob_list",
+        "storage",
+        "blob",
+        "list",
+        "--account-name",
+        storage_account,
+        "--container-name",
+        container_name,
+        "--auth-mode",
+        "login",
+        "--query",
+        "[?contains(name, '/')].[name]",
+        "-o",
+        "tsv",
+        tier="state",
     )
     ids = sorted({
         line.split("/", 1)[0]
@@ -646,7 +680,7 @@ def _az_blob_download(
     ``True`` on success (including ``--dry-run``). Module-level
     function so the remote audit handler stays under CC ≤ 15.
     """
-    import subprocess
+    from scanner import ops as _ops
 
     if dry_run:
         print(
@@ -656,28 +690,24 @@ def _az_blob_download(
             f"--name {blob_name} --file {dest}"
         )
         return True
-    result = subprocess.run(
-        [
-            "az",
-            "storage",
-            "blob",
-            "download",
-            "--account-name",
-            storage_account,
-            "--container-name",
-            container_name,
-            "--name",
-            blob_name,
-            "--file",
-            str(dest),
-            "--auth-mode",
-            "login",
-            "--output",
-            "none",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    result = _ops.run(
+        "az.blob_download",
+        "storage",
+        "blob",
+        "download",
+        "--account-name",
+        storage_account,
+        "--container-name",
+        container_name,
+        "--name",
+        blob_name,
+        "--file",
+        str(dest),
+        "--auth-mode",
+        "login",
+        "--output",
+        "none",
+        tier="state",
     )
     if result.returncode != 0:
         _log(
