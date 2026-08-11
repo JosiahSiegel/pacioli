@@ -279,6 +279,7 @@ def test_init_local_composes_to_exact_argv(
             args=argv, returncode=0, stdout="", stderr="",
         )
 
+    monkeypatch.setattr(ops.shutil, "which", lambda _name: "/fake/terraform")
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
 
     ops.run(
@@ -326,6 +327,7 @@ def test_plan_local_composes_to_exact_argv(
             args=argv, returncode=0, stdout="", stderr="",
         )
 
+    monkeypatch.setattr(ops.shutil, "which", lambda _name: "/fake/terraform")
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
 
     ops.run(
