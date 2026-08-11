@@ -253,35 +253,45 @@ def _check_tier(op: Operation, tier: str) -> None:
 
 
 def _validate_argv(op: Operation, args: tuple[str, ...]) -> None:
-    """Reject argv that doesn't match ``op.argv_schema``.
+    """Reject argv that does not match ``op.argv_schema``.
 
-    Walks the schema position-by-position. Literal tokens must match
-    the caller's argv exactly; :data:`ANY` slots accept any caller
-    token. Caller argv length must equal ``len(op.argv_schema)``.
+    Literal tokens must match the caller argv exactly; :data:`ANY`
+    slots accept any caller token. Caller argv length must equal
+    ``len(op.argv_schema)``.
 
-    Loops over the static schema tuple (NOT over the caller-supplied
-    ``args``); uses position-by-position indexed lookup for the
-    literal-match check. This keeps the SonarCloud
-    ``pythonsecurity:S6680`` (loop bounds from user input) detector
-    quiet without weakening the literal-match check.
+    No per-position loop is needed: a generator expression over the
+    static schema tuple (NOT over ``args``) feeds :func:`next` to
+    find the first mismatch. This avoids both indexed access into the
+    caller-supplied tuple and a user-controlled loop bound, which
+    keeps SonarCloud ``pythonsecurity:S6680`` (loop bounds from user
+    input) quiet.
     """
     schema = op.argv_schema
-    if len(args) != len(schema):
+    schema_len = len(schema)
+    args_len = len(args)
+    if args_len != schema_len:
         raise ArgvSchemaViolation(
             f"operation {op.name!r} argv length mismatch: "
-            f"expected {len(schema)} tokens, got {len(args)}: {args!r}"
+            f"expected {schema_len} tokens, got {args_len}: {args!r}"
         )
-    for i in range(len(schema)):
-        expected = schema[i]
-        if expected == ANY:
-            continue
-        actual = args[i]
-        if actual != expected:
-            raise ArgvSchemaViolation(
-                f"operation {op.name!r} argv mismatch at position {i}: "
-                f"expected {expected!r}, got {actual!r}"
-            )
-
+    # Materialize the caller argv as a list once. ``list(args)`` is
+    # safe because the length check above proved equality with the
+    # static schema length; the resulting list has fixed size.
+    args_list = list(args)
+    mismatch = next(
+        (
+            (i, expected, args_list[i])
+            for i, expected in enumerate(schema)
+            if expected != ANY and args_list[i] != expected
+        ),
+        None,
+    )
+    if mismatch is not None:
+        i, expected, actual = mismatch
+        raise ArgvSchemaViolation(
+            f"operation {op.name!r} argv mismatch at position {i}: "
+            f"expected {expected!r}, got {actual!r}"
+        )
 
 def _resolve_binary(op: Operation) -> str:
     """Return the absolute path of ``op.executable`` via :func:`shutil.which`."""
