@@ -10,21 +10,20 @@ scanning your Terraform code with Pacioli.
 
 ## Quick start
 
-From any Terraform repository, run the installed CLI against the repository:
-
 ```bash
-pacioli scan .
+# Install (Python 3.13+)
+pip install https://github.com/JosiahSiegel/pacioli/releases/download/vX.Y.Z/pacioli-X.Y.Z-py3-none-any.whl
+
+# Scan a Terraform repo — report opens in your default browser
+pacioli scan /path/to/tf-repo
+
+# Save the report inside the scanned repo
+pacioli scan /path/to/tf-repo --output-dir /path/to/tf-repo
+# Report lands at /path/to/tf-repo/aggregate/report.html
+
+# Suppress the auto-open (CI, scripts, headless)
+pacioli scan /path/to/tf-repo --no-open
 ```
-
-To scan a specific project and environment:
-
-```bash
-pacioli scan . --project myapp --env prod
-```
-
-The command writes the report to `~/.pacioli/runs/<run-id>/aggregate/report.html`.
-Open that file in a browser when the scan completes. See [CLI Reference](CLI_REFERENCE.md)
-for all scan modes and options.
 
 ## What you need
 

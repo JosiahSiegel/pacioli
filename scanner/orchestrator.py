@@ -60,6 +60,7 @@ import re
 import shutil
 import stat
 import sys
+import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -223,6 +224,9 @@ class Orchestrator:
             Matches scan.sh's ``--dry-run``.
         no_aggregate: When True, skip the post-loop aggregate step
             (matches scan.sh's ``--no-aggregate``).
+        no_open: When True, skip the post-aggregate ``webbrowser.open``
+            call that surfaces the generated ``report.html``. Mirrors
+            scan.sh's ``--no-open`` (added in the slim-readme plan).
         verbose: When True, emit INFO logs (matches PCI_VERBOSE=1).
         safety: Pre-wired :class:`SafetyGuard` instance (defense-in-
             depth refusal matrix). Pass an instance to inject a stub
@@ -233,6 +237,7 @@ class Orchestrator:
     tier: str = "source"
     dry_run: bool = False
     no_aggregate: bool = False
+    no_open: bool = False
     verbose: bool = False
     safety: SafetyGuard = field(default_factory=SafetyGuard)
     # Optional Terraform registry mirror URL (--registry-mirror). When
@@ -574,7 +579,41 @@ class Orchestrator:
             # Always print the report path on stdout so consumers
             # following the consumption guide can `open` it directly.
             print(f"report: {report_html}")
+            self._open_report(report_html, no_open=self.no_open)
         return scan_rc
+
+    @staticmethod
+    def _open_report(path: Path, *, no_open: bool) -> None:
+        """Best-effort auto-open of ``report.html`` in the default browser.
+
+        Suppressed (returns silently) when ``no_open`` is True OR when
+        ``CI=1``. Never raises: any failure mode logs a WARN and
+        swallows so the scan/audit exit code is preserved.
+
+        Failure modes handled (matches the plan's webbrowser gotcha list):
+          * ``OSError`` — Windows ``webbrowser.open`` can fail on paths
+            with spaces; ``path.as_uri()`` percent-encodes so this is
+            mostly mitigated, but log a WARN if it still triggers.
+          * ``AttributeError`` / ``ValueError`` — registered browser
+            binary missing or registry entry malformed.
+          * ``webbrowser.open`` returns ``False`` — no browser registered
+            on the host (headless container, CI runner, server SKU).
+        """
+        if no_open or os.environ.get("CI", "").strip() == "1":
+            return
+        try:
+            opened = webbrowser.open(path.resolve().as_uri())
+        except (OSError, AttributeError, ValueError) as exc:
+            _log(
+                "WARN",
+                f"could not auto-open report ({type(exc).__name__}): {path}",
+            )
+            return
+        if not opened:
+            _log(
+                "WARN",
+                f"no browser registered; report not auto-opened: {path}",
+            )
 
     # -- pair scan ----------------------------------------------------
 
@@ -2031,6 +2070,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "an explicit per-entry backend_key."
         ),
     )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not auto-open the generated report.html in the default browser after the scan.",
+    )
     return parser
 
 
@@ -2080,6 +2124,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     # CI=1 gate promotion: must happen FIRST, before any other handling.
     _ci_auto_promote(args)
 
+    # CI=1 also suppresses the post-scan browser open (no display in CI).
+    if not getattr(args, "no_open", False) and os.environ.get("CI", "").strip() == "1":
+        args.no_open = True
+        _log("INFO", "CI environment detected; --no-open")
+
     # Validate the state-account CLI flag at the boundary so an
     # invalid value never reaches subprocess (S8705). When the caller
     # is on a non-plan/state tier the flag is unused, but validating
@@ -2125,6 +2174,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         tier=args.tier,
         dry_run=args.dry_run,
         no_aggregate=args.no_aggregate,
+        no_open=getattr(args, "no_open", False),
         verbose=args.verbose,
     )
 
