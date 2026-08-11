@@ -2097,3 +2097,125 @@ def test_handle_scan_passes_new_flags_to_orchestrator_main(
     ):
         assert flag in argv, f"{flag} missing from orchestrator argv={argv!r}"
 
+
+
+# ---------------------------------------------------------------------------
+# F3: live demonstration that `terraform apply -auto-approve` -> exit 99
+# ---------------------------------------------------------------------------
+#
+# The pre-existing exit-99 test above (
+# ``test_main_exits_99_when_subprocess_operation_is_refused``) proves the
+# *wiring* only: it raises a hand-constructed MutatingOperationRefused from
+# a patched handler. It never demonstrates that the specific command
+# ``terraform apply -auto-approve`` is what triggers the refusal.
+#
+# The three tests below close that gap end-to-end:
+#   1. the real refusal matrix fires on the real command string;
+#   2. the real ops registry refuses the real composed argv *before*
+#      subprocess.run is reached (proved with a sentinel);
+#   3. a real ``python -m scanner.cli`` child process terminates with
+#      exit status 99 when that refusal propagates out of a handler.
+
+
+def test_refusal_matrix_fires_on_terraform_apply_auto_approve() -> None:
+    """The real SafetyGuard refuses ``terraform apply -auto-approve``."""
+    from scanner.safety import MutatingOperationRefused, SafetyGuard
+
+    with pytest.raises(MutatingOperationRefused):
+        SafetyGuard().refuse_if_mutating("terraform apply -auto-approve")
+
+
+def test_ops_run_refuses_apply_before_executing_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``ops.run`` refuses an apply argv *before* reaching subprocess.run.
+
+    Registers a deliberately mutating operation, stages a fake
+    ``terraform`` on PATH so binary resolution succeeds (the refusal must
+    be what stops us, not a missing binary), and installs a sentinel over
+    ``subprocess.run`` that fails the test if it is ever reached.
+    """
+    from scanner import ops
+    from scanner.safety import MutatingOperationRefused
+
+    # Stage a fake `terraform` so _resolve_binary() succeeds and the
+    # refusal check is provably the thing that stops execution.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    is_windows = sys.platform.startswith("win")
+    shim = bin_dir / ("terraform.bat" if is_windows else "terraform")
+    shim.write_text("@echo off\n" if is_windows else "#!/bin/sh\nexit 0\n",
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+
+    def _never_called(*_args, **_kwargs):  # pragma: no cover - must not run
+        raise AssertionError(
+            "subprocess.run was reached for `terraform apply -auto-approve`; "
+            "the refusal matrix failed to stop the mutating operation"
+        )
+
+    monkeypatch.setattr(ops.subprocess, "run", _never_called)
+
+    saved = dict(ops.OPERATION_REGISTRY)
+    ops.OPERATION_REGISTRY["test.f3_apply"] = ops.Operation(
+        name="test.f3_apply",
+        executable="terraform",
+        argv_schema=("apply", "-auto-approve"),
+        allowed_tiers=("plan", "state"),
+        default_timeout=60,
+        mutation_class="mutate_azure",
+        cleanup_obligation="none",
+        env_allowlist=("*",),
+    )
+    try:
+        with pytest.raises(MutatingOperationRefused):
+            ops.run("test.f3_apply", "apply", "-auto-approve", tier="plan")
+    finally:
+        ops.OPERATION_REGISTRY.clear()
+        ops.OPERATION_REGISTRY.update(saved)
+
+
+def test_cli_subprocess_exits_99_on_terraform_apply_refusal(
+    tmp_path: Path,
+) -> None:
+    """A real ``python -m scanner.cli`` child exits 99 on an apply refusal.
+
+    This is the user-facing proof: a genuine child process, whose scan
+    handler attempts ``terraform apply -auto-approve`` through the real
+    ops registry, terminates with exit status 99. The attempt is injected
+    via a sitecustomize-style bootstrap so no production source is edited
+    and no real Terraform is ever executed (the refusal fires first).
+    """
+    bootstrap = tmp_path / "f3_apply_probe.py"
+    bootstrap.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+        "from scanner import cli\n"
+        "from scanner.safety import SafetyGuard\n"
+        "\n"
+        "def _apply(_args):\n"
+        "    # The real refusal matrix, on the real command string.\n"
+        "    SafetyGuard().refuse_if_mutating('terraform apply -auto-approve')\n"
+        "    raise AssertionError('refusal did not fire')\n"
+        "\n"
+        "cli._handle_scan = _apply\n"
+        "sys.exit(cli.main(['scan', '--non-interactive']))\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, str(bootstrap)],
+        cwd=str(REPO_ROOT),
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert proc.returncode == 99, (
+        "expected exit 99 from `terraform apply -auto-approve` refusal; "
+        f"got {proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )

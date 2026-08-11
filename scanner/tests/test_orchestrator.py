@@ -1683,12 +1683,6 @@ def test_preflight_rejects_parent_traversal_segments(tmp_path: Path) -> None:
     base.mkdir()
     real_stack = base / "proj" / "env"
     _build_valid_stack(real_stack)
-    # Build a path string with a literal '..' segment. Path.resolve()
-    # will collapse it; we simulate "traversal survived" by patching
-    # _has_parent_traversal to assert on the helper, then separately
-    # verify the orchestrator wires it through.
-    state = _make_pair_state(real_stack, tmp_path)
-    orch = Orchestrator(mode="report", tier="plan")
 
     # Direct unit test of the helper: the parts-list check is the
     # production logic.

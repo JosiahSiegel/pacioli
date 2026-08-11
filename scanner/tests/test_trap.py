@@ -26,7 +26,6 @@ import signal
 import subprocess
 import sys
 import textwrap
-import time
 from pathlib import Path
 
 import pytest
@@ -413,7 +412,6 @@ def test_safe_unlink_log_emits_json_safe_action_on_success(
     monkeypatch.setattr(trap.scanner_ops, "run", fake_ops_run)
 
     captured: list[str] = []
-    real_emit = trap.LOGGER.info
 
     def capturing_emit(msg, *args, **kwargs):  # noqa: ANN001
         captured.append(msg % args if args else str(msg))

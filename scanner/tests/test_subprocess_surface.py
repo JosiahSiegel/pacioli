@@ -509,11 +509,15 @@ def _scan_file(path: Path) -> list[_Finding]:
 
 def _format_findings(findings: Iterable[_Finding]) -> str:
     """Human-readable summary of every finding for the failure message."""
-    rows = sorted(findings, key=lambda f: (str(f.file), f.line))
-    lines = [f"  {f.file.name}:{f.line}  {f.call_name}(...)  in {f.enclosing_function}()"]
-    for f in rows:
-        if f.raw_source:
-            lines[-1] += f"\n      | {f.raw_source}"
+    rows = sorted(findings, key=lambda finding: (str(finding.file), finding.line))
+    lines: list[str] = []
+    for finding in rows:
+        lines.append(
+            f"  {finding.file.name}:{finding.line}  {finding.call_name}(...)  "
+            f"in {finding.enclosing_function}()"
+        )
+        if finding.raw_source:
+            lines[-1] += f"\n      | {finding.raw_source}"
     return "\n".join(lines) if rows else "  (no findings)"
 
 

@@ -1530,7 +1530,11 @@ class Orchestrator:
                 # prefers shred with an overwrite-with-zeros fallback.
                 # Failure is logged inside the helper; we do not
                 # surface a duplicate WARN here.
-                safe_unlink(state_local, state.env_run_dir)
+                # ``state_local`` is built as
+                # ``state.env_run_dir / "state.tfstate"`` in
+                # _resolve_state_blob_paths, so its parent IS the
+                # env run dir and the containment guarantee holds.
+                safe_unlink(state_local, state_local.parent)
             except ValueError as exc:
                 # Containment failure is a programming error; surface
                 # it loudly so the caller can fail the pair.

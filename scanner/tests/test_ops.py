@@ -27,7 +27,6 @@ from scanner.ops import (
     TierViolation,
     TrustedBinaryMissing,
     UnknownOperation,
-    run,
 )
 
 

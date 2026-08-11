@@ -21,7 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
-from scanner.safety import MutatingOperationRefused, SafetyGuard
+# ``MutatingOperationRefused`` is intentionally re-exported from this
+# module: ``_self_test`` below resolves it as
+# ``_self.MutatingOperationRefused`` off the module namespace, which only
+# exists because of this import. Removing it breaks the self-test.
+from scanner.safety import MutatingOperationRefused, SafetyGuard  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +353,10 @@ def _self_test() -> bool:
     ArgvSchemaViolation = _self.ArgvSchemaViolation
     TierViolation = _self.TierViolation
     TrustedBinaryMissing = _self.TrustedBinaryMissing
-    MutatingOperationRefused = _self.MutatingOperationRefused
+    # Deliberate rebinding of the module-level import: defeats the
+    # __main__-vs-scanner.ops class-identity split. Consumed by the
+    # ``except (MutatingOperationRefused, TrustedBinaryMissing)`` below.
+    MutatingOperationRefused = _self.MutatingOperationRefused  # noqa: F811
 
     ok = True
     # Full valid argv for terraform.init_local. Schema:
