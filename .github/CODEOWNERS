@@ -20,6 +20,12 @@
 # CI: anyone can review.
 /.github/
 
-# Safety model: extra-careful review. Two approvals required for changes
-# to lib/safety.sh (enforced by branch protection in repo settings).
-/scanner/safety.py   @JosiahSiegel
+# Safety model: extra-careful review. Changes to every safety-critical
+# scanner module require two independent maintainer approvals (enforced
+# by branch protection in repo settings).
+/scanner/safety.py        @JosiahSiegel @JosiahSiegel
+/scanner/ops.py           @JosiahSiegel @JosiahSiegel
+/scanner/orchestrator.py @JosiahSiegel @JosiahSiegel
+/scanner/trap.py         @JosiahSiegel @JosiahSiegel
+/scanner/cli.py          @JosiahSiegel @JosiahSiegel
+/scanner/discovery.py    @JosiahSiegel @JosiahSiegel
