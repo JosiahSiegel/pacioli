@@ -497,7 +497,7 @@ def _self_test() -> bool:
     try:
         try:
             _self.run(OP_TEST_DANGEROUS_APPLY, "apply", "-auto-approve", tier="plan")
-        except (MutatingOperationRefused, TrustedBinaryMissing):
+        except (_exc("MutatingOperationRefused"), _exc("TrustedBinaryMissing")):
             pass  # both acceptable: refusal OR no terraform binary
         else:
             print("FAIL: defense-in-depth refusal did not fire", file=sys.stderr)
