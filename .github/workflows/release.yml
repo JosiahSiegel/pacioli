@@ -2,6 +2,15 @@ name: release
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build/attach (e.g. v0.2.0). Default: derive from trigger context.'
+        required: false
+        default: ''
+        type: string
 permissions:
   contents: write
   attestations: write
@@ -9,10 +18,13 @@ permissions:
 jobs:
   build-and-attach:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
       - name: Setup Python 3.13
         uses: actions/setup-python@v5
@@ -36,6 +48,7 @@ jobs:
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             dist/*.whl
             dist/*.tar.gz
