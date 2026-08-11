@@ -18,6 +18,8 @@ permissions:
 jobs:
   build-and-attach:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name || inputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,6 +47,7 @@ jobs:
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             dist/*.whl
             dist/*.tar.gz
