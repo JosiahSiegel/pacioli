@@ -74,11 +74,15 @@ but fixes the things that make Checkov hard to use in production:
 - **Produces a first-class HTML report** — SPA with sidebar nav,
   cross-filtering, severity donut, PCI coverage heatmap, env health
   bars, top-N lists, in-line remediation HCL.
-- **Read-only by design** — refuses `terraform apply`, `destroy`,
-  `--fix`, and any Azure mutation. The only mutation is the
-  storage firewall IP whitelist (auto-revert via EXIT trap).
+- **Read-only by design** — refuses Terraform mutations, Checkov `--fix`,
+  and Azure mutations through the typed operation registry. If a tier needs
+  access that is unavailable, Pacioli emits an `ACCESS REQUIRED` alert and
+  skips the dependent layer. It does not change Azure firewall rules.
 
-## Three scan tiers
+Pacioli reports findings for the files and inputs it can discover and verify.
+It makes no universal safety or coverage claim. See
+[Safety Model](docs/SAFETY_MODEL.md) for the operation registry, alert-only
+access behavior, constrained Terraform plan, and residual risks.
 
 | Tier | Command | What it does | When |
 |---|---|---|---|

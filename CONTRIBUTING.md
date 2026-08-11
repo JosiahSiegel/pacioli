@@ -311,7 +311,7 @@ All three must pass before a PR is mergeable.
   `PYTHONUTF8=1`, `sys.stdout.reconfigure`) is mandatory in every
   module that opens files or prints.
 - **Process-spawn convention**: every external command MUST go
-  through the process-spawn helpers in `scanner/orchestrator.py`
+  through the typed operation registry in `scanner/ops.py`
   so the `SafetyGuard.refuse_if_mutating` invariant is enforced.
   Do not invoke `subprocess.run` (or `os.system`, or
   `subprocess.Popen`) directly from driver code — you will bypass

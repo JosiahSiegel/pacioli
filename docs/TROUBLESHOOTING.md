@@ -106,40 +106,41 @@ cp examples/baseline.yaml.example ./pci_baseline.yaml
 Edit them for your projects. See
 [Consuming Pacioli → Step 3](CONSUMING_GUIDE.md#step-3-create-the-scope-file).
 
-### `failed to whitelist IP; cannot read remote state`
+### `ACCESS REQUIRED: ...`
 
-The runner could not add its public IP to the storage firewall.
-This usually means:
+A tier that needs remote state or another protected input could not reach
+its resource. This is an alert-only condition. Pacioli does not change Azure
+firewall rules or grant access.
 
-1. The `az` CLI is not logged in. Run `az login`.
-2. The runner does not have the `Storage Account Contributor` role
-   on `$PACIOLI_STATE_STORAGE_ACCOUNT`.
-3. Network connectivity to `api.ipify.org` (the IP-detection
-   service) is blocked. The storage firewall whitelist logic in
-   `scanner/orchestrator.py` uses `https://api.ipify.org` to detect
-   the public IP. If your environment blocks this, the whitelist
-   fails. There is no alternative IP-detection path today; open an
-   issue if you need one.
+The alert uses this format:
+
+```text
+ACCESS REQUIRED: <operation> cannot reach <resource>.
+  Required access: <access requirement>.
+  Action: grant access outside Pacioli, then rerun the scan.
+  No Azure firewall changes were made by Pacioli.
+```
+
+Grant the required access through your normal network and identity controls,
+then rerun the affected tier. A skipped layer is not evidence that the layer
+passed.
 
 ### `terraform init failed for <project>/<env>; skipping plan layer`
 
-`terraform init` errored. Re-run with `--verbose` for the
-Checkov / Terraform output:
+`terraform init -backend=false` errored. Plan-tier initialization still
+resolves providers and modules, so it is not offline. Common causes include:
+
+- Network restriction: resolution from `registry.terraform.io` is blocked.
+  Use the scanner's `--registry-mirror` option with an isolated
+  `TF_CLI_CONFIG_FILE` that points at an approved mirror.
+- Backend configuration or module resolution errors in the environment.
+- Provider authentication or local dependency problems.
+
+Re-run with `--verbose` for the Checkov and Terraform output:
 
 ```bash
 pacioli scan --tier plan --project <p> --env <e> --verbose
 ```
-
-Common causes:
-
-- Network restriction: provider download from
-  `registry.terraform.io` is blocked. Use a `filesystem_mirror` in
-  your `~/.terraformrc`.
-- Backend misconfigured: the env's `terraform.aztfexport.tf`
-  points at a storage account the runner cannot read.
-- Provider auth: the env uses an authenticated provider (e.g.
-  `azurerm` with a service principal) and the runner is not
-  logged in to Azure.
 
 ### `terraform plan failed for <project>/<env>; skipping plan layer`
 
@@ -156,16 +157,11 @@ The plan failed. Common causes:
 
 ### `az storage blob download ... 403`
 
-The runner is not in the storage-account firewall allow list. The
-scanner adds the runner IP automatically when you pass
-`--tier state`, but the add is asynchronous (Azure propagation
-takes 30-60 seconds). If the runner IP rotated mid-scan, the
-download fails.
-
-Run with `--verbose` to see the add/verify retry loop in the
-log. If the problem persists, set
-`PACIOLI_STATE_STORAGE_ACCOUNT` to a storage account that allows
-your CI runner's outbound IP permanently.
+The state-dependent layer cannot access the configured storage account.
+Pacioli does not add an IP to an allow list. Look for the `ACCESS REQUIRED`
+alert, grant the required access outside Pacioli, and rerun the scan. If the
+access policy is intentionally restrictive, accept that the state layer is
+unavailable and treat its results as incomplete.
 
 ### `ERROR  Mapping pack does not exist` on `pacioli scan`
 

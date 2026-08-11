@@ -18,7 +18,7 @@ do scan outputs live?](OPERATOR_GUIDE.md#where-do-scan-outputs-live).
 ```
 ~/.pacioli/runs/<run-id>/
 ├── .scope_pairs.tsv                    # (project TAB env) pairs scanned
-├── .whitelist_ip                       # IP added to the firewall (tier 2/3 only)
+├── <project>/<env>/                    # Per-scope outputs
 ├── <project>/<env>/
 │   ├── results_terraform_source.sarif  # Tier 1 source scan
 │   ├── results_paac.sarif              # Custom PaaC checks (CKV_AZURE_PCI_*)

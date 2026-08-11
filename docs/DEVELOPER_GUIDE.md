@@ -168,20 +168,24 @@ selftest explicitly via `make selftest`.
   sequences), and Checkov's `.tf` parser does not override the
   encoding.
 
-### Python (process-spawn conventions)
+### Python subprocess conventions
 
-- Every external command MUST go through the process-spawn helpers
-  in `scanner/orchestrator.py`. Both call
-  `SafetyGuard.refuse_if_mutating(cmd)` first; a refusal raises
-  `scanner.safety.MutatingOperationRefused` and the scanner exits
-  with code 99.
-- Do not invoke `subprocess.run` (or `os.system`, or
-  `subprocess.Popen`) directly from driver code — you will bypass
-  the safety guard.
-- For dry-run support, route the call through the guarded-runner
-  helper and pass `dry_run=True` (or set `DRY_RUN=1` in the
-  environment); the helper prints the command instead of executing
-  it.
+Every external command MUST be represented by a typed operation in
+`scanner/ops.py`, the canonical subprocess entry point. The registry owns
+command construction and invokes `SafetyGuard.refuse_if_mutating()` before
+execution. Do not call `subprocess.run`, `os.system`, or `subprocess.Popen`
+directly from driver code.
+
+Plan operations must preserve the privileged composition
+`terraform init -backend=false` and
+`terraform plan -lock=false -refresh=false`. Remember that plan is not
+offline. Provider and module resolution can contact `registry.terraform.io`;
+use the `--registry-mirror` flag with an isolated `TF_CLI_CONFIG_FILE` when
+resolution must be constrained.
+
+When an operation needs protected access, report the `ACCESS REQUIRED` alert
+and leave access changes to the operator. Do not add Azure firewall mutation
+operations.
 
 ### Commit messages
 

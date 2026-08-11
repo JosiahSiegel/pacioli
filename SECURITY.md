@@ -61,23 +61,35 @@ Out-of-scope:
 
 ## Security Considerations
 
-The scanner is **read-only** against your cloud. The only Azure
-mutation is the storage firewall IP whitelist (added/removed via
-the signal/atexit cleanup in `scanner/trap.py`), and even that is
-opt-in (only runs when `--tier plan` or `--tier state` is set).
-See [docs/SAFETY_MODEL.md](docs/SAFETY_MODEL.md) for the full
-list of refused commands.
+The scanner's primary safety control is the typed operation registry in
+`scanner/ops.py`. It is the canonical subprocess boundary, and
+`scanner/safety.py` rejects known mutating operations before execution.
+Pacioli does not change Azure storage firewall rules. When required access is
+unavailable, it emits an `ACCESS REQUIRED` alert and skips the dependent
+layer. Access must be granted outside Pacioli.
 
-You can verify the read-only invariant at any time:
+Plan-tier execution uses `terraform init -backend=false` and
+`terraform plan -lock=false -refresh=false`. This plan is not offline:
+`init` can contact `registry.terraform.io` for provider and module resolution.
+The `--registry-mirror` flag and an isolated `TF_CLI_CONFIG_FILE` constrain
+that resolution. Operators must validate the mirror and network boundary.
+
+Temporary material is removed with verified cleanup through `safe_unlink()`.
+This is best-effort data minimization, not a cryptographic erase guarantee.
+There is no universal safety guarantee. SSD behavior, copy-on-write,
+journaling, VM snapshots, Windows filesystem semantics, and external
+processes are outside the scanner's verification boundary.
+
+You can verify the refusal rules with:
 
 ```bash
 make selftest
 # safety_selftest: PASS
 ```
 
-If you discover a way to bypass the safety guard and apply a
-mutation through the scanner, that's a critical vulnerability —
-please report immediately.
+A way to make the scanner execute a cloud mutation through an unregistered or
+improperly classified operation is a critical vulnerability. Report it
+privately.
 
 ## Reporting a Path-Traversal or RCE
 
@@ -90,11 +102,8 @@ Specific things to look for and report:
   the report.
 - A `tfstate_to_plan.py` or `drift_report.py` codepath that
   allows the state blob to inject paths outside the run dir.
-- A way to make the storage firewall IP whitelist (in
-  `scanner/orchestrator.py`) remove an IP that was not
-  whitelisted by the current run (the function has a
-  pre-removal verification check, but if you find a way to bypass
-  it, that's critical).
+- A way to make an unregistered or improperly classified operation bypass
+  `scanner/ops.py` or `scanner/safety.py` and perform an Azure mutation.
 
 ## Cryptography
 
