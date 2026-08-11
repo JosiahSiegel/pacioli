@@ -50,6 +50,12 @@ REFUSE_PATTERN: Final[tuple[str, ...]] = (
     # Terraform: locking bypass
     r"terraform\s+apply.*-lock=false",
     r"terraform\s+destroy.*-lock=false",
+    # `init` must keep state locking — a concurrent init on a different
+    # runner that wins the race would overwrite the locked state. The
+    # privileged init argv (``-backend=false``) never uses ``-lock=false``,
+    # so this refusal is a hard invariant on the init subcommand even
+    # though plan no longer carries the same restriction.
+    r"terraform\s+init.*-lock=false",
     # Terraform: auto-approve bypass
     r"-auto-approve",
     # Azure CLI: stateful / destructive operations
@@ -79,6 +85,9 @@ REFUSE_REASON: Final[dict[str, str]] = {
     r"terraform\s+import\b": "Import mutates state. Use aztfexport for legitimate imports.",
     r"terraform\s+apply.*-lock=false": "Lock bypass on apply. Forbidden.",
     r"terraform\s+destroy.*-lock=false": "Lock bypass on destroy. Forbidden.",
+    r"terraform\s+init.*-lock=false": (
+        "Init lock bypass would corrupt state on concurrent init. Forbidden."
+    ),
     r"-auto-approve": "Auto-approve bypasses confirmation. Forbidden.",
     r"az\s+storage\s+account\s+delete\b": "Storage account deletion. Forbidden.",
     r"az\s+resource\s+(delete|update|create)\b": "Azure resource mutation. Forbidden.",

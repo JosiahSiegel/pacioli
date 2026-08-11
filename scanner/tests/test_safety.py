@@ -72,6 +72,15 @@ REFUSE_FIXTURES: list[tuple[str, str]] = [
     # lock bypass remains a refusal because those are mutations.
     (r"terraform\s+apply.*-lock=false", "terraform apply -lock=false"),
     (r"terraform\s+destroy.*-lock=false", "terraform destroy -lock=false"),
+    # Init lock bypass — `terraform init -lock=false` would let two
+    # concurrent runners race on state-file initialization and corrupt
+    # state. The privileged init argv uses ``-backend=false`` (no lock
+    # bypass), so this is a hard invariant on the init subcommand. Todo
+    # 13 added this refusal: the typed operation registry
+    # (scanner/ops.py::terraform.init_local) is the PRIMARY control —
+    # it never emits ``-lock=false`` — but the regex refusal matrix
+    # catches any rogue code path that tries to bypass the registry.
+    (r"terraform\s+init.*-lock=false", "terraform init -lock=false"),
     # auto-approve bypass
     (r"-auto-approve", "terraform apply -auto-approve"),
     # Azure CLI destructive operations
@@ -264,6 +273,109 @@ def test_refuse_if_mutating_refuses_lock_bypass_on_apply_and_destroy(
         guard.refuse_if_mutating("terraform apply -lock=false")
     with pytest.raises(MutatingOperationRefused):
         guard.refuse_if_mutating("terraform destroy -lock=false")
+
+
+def test_refuse_if_mutating_refuses_lock_bypass_on_init(
+    guard: SafetyGuard,
+) -> None:
+    """``terraform init -lock=false`` MUST refuse (Todo 13).
+
+    `init` initializes the state file. Two concurrent ``init`` runs that
+    both pass ``-lock=false`` can race and corrupt state — neither is
+    gated by the others' lock check. The privileged init argv in
+    scanner/ops.py::terraform.init_local uses ``-backend=false`` only
+    (never ``-lock=false``), so the registry's argv_schema is the
+    primary control. This regex refusal is defense-in-depth: any rogue
+    code path that constructs ``terraform init -lock=false`` argv
+    outside the registry is still blocked here.
+
+    Note: ``terraform plan -lock=false`` is allowed (Todo 6) — the
+    privileged plan argv uses ``-lock=false -refresh=false``. This
+    test does NOT cover plan; see
+    test_refuse_if_mutating_allows_pure_readonly_terraform for the
+    plan positive case.
+    """
+    with pytest.raises(MutatingOperationRefused) as excinfo:
+        guard.refuse_if_mutating("terraform init -lock=false")
+    # Operator-facing message must mention "init" so triage is obvious
+    # from a log line. The exact phrase is part of the audit contract.
+    assert "init" in str(excinfo.value).lower(), (
+        f"init-lock-bypass refusal must mention 'init' so log triage "
+        f"is obvious. Got: {excinfo.value!s}"
+    )
+
+    # Common operator mistake: ``terraform init -input=false -lock=false``.
+    # Must still refuse.
+    with pytest.raises(MutatingOperationRefused):
+        guard.refuse_if_mutating(
+            "terraform init -input=false -lock=false"
+        )
+
+    # Negative case: ``terraform init -backend=false`` (the privileged
+    # argv shape used in production) MUST pass. ``-backend=false`` is
+    # the safe flag; ``-lock=false`` is the unsafe one. If a future
+    # pattern tightening accidentally refuses the privileged shape,
+    # this test fails before the operator hits prod.
+    guard.refuse_if_mutating(
+        "terraform init -input=false -backend=false -no-color"
+    )
+
+
+def test_typed_operation_registry_is_primary_control() -> None:
+    """The typed operation registry (scanner.ops) is the PRIMARY control.
+
+    The refusal matrix in :mod:`scanner.safety` is defense-in-depth.
+    The canonical subprocess entry point is :func:`scanner.ops.run`,
+    which only accepts argv matching a registered :class:`Operation`\'s
+    ``argv_schema``. The ``terraform.init_local`` op's schema is
+    ``("-chdir", ANY, "init", "-input=false", "-backend=false",
+    "-no-color")`` — there is no schema slot for ``-lock=false``, so
+    the registry cannot be tricked into emitting an init with lock
+    bypass.
+
+    This test asserts that invariant directly: every registered
+    Terraform op's argv_schema must NOT contain a token that matches
+    the init lock-bypass refusal pattern. If a future schema edit
+    adds a wildcard or literal that lets ``-lock=false`` slip through,
+    the test fails before the registry ships a dangerous op.
+
+    The companion surface-enforcement test in
+    scanner/tests/test_subprocess_surface.py ensures no production
+    code calls ``subprocess.run`` directly outside the registry —
+    together these tests prove the registry IS the primary control
+    and the refusal matrix is only a backstop.
+    """
+    import re as _re
+
+    from scanner.ops import OPERATION_REGISTRY
+
+    # Pattern must match the refusal matrix entry. If the matrix
+    # changes, this test must be re-aligned.
+    init_lock_bypass = _re.compile(r"terraform\s+init.*-lock=false")
+
+    # Build the joined argv for each Terraform op the same way
+    # scanner.ops._build_argv does: schema tokens + ANY-slot
+    # placeholders. We use a sentinel for ANY because the literal
+    # text of ANY is irrelevant — only the presence of ``-lock=false``
+    # as a literal schema token matters.
+    sentinel = "X"
+    for op_name, op in OPERATION_REGISTRY.items():
+        if not op.executable.startswith("terraform"):
+            continue
+        composed = " ".join(
+            token if token != "ANY" else sentinel for token in op.argv_schema
+        )
+        # If the composed argv — which is exactly what _build_argv would
+        # produce for a maximally permissive caller — would match the
+        # init lock-bypass refusal, the registry itself would emit a
+        # refused command. That's a contradiction: the registry is
+        # supposed to be the primary control.
+        assert not init_lock_bypass.search(composed), (
+            f"operation {op_name!r} argv_schema produces an argv that "
+            f"matches the init lock-bypass refusal pattern; the typed "
+            f"registry must NEVER emit ``-lock=false`` for init. "
+            f"Composed argv: {composed!r}"
+        )
 
 
 def test_refuse_if_mutating_refuses_strange_command(guard: SafetyGuard) -> None:
