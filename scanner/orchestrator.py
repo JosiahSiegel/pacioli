@@ -151,6 +151,21 @@ class OrchestratorError(RuntimeError):
     """Raised on unrecoverable orchestrator misconfiguration."""
 
 
+class PreflightError(OrchestratorError):
+    """Raised when a stack root fails the pre-terraform preflight checks.
+
+    Todo 10: defense-in-depth against symlinked roots, ``..`` traversal,
+    module-library directories (``modules/``, ``modules-<x>/``,
+    ``.terraform/``) being scanned as Terraform roots, and missing
+    ``.terraform.lock.hcl``. The orchestrator catches this in
+    :meth:`Orchestrator._scan_one_pair` and fails the pair (per-pair
+    scan_rc stays 0 in report mode; gate mode propagates it).
+
+    Inherits from :class:`OrchestratorError` so existing callers that
+    catch ``OrchestratorError`` still fire.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Logging helper (mirrors pci_log INFO/WARN/ERROR semantics)
 # ---------------------------------------------------------------------------
@@ -279,6 +294,15 @@ class Orchestrator:
         # Store registry_mirror so _run_terraform_* call sites can
         # generate the per-run TF_CLI_CONFIG_FILE (Todo 9).
         self.registry_mirror = registry_mirror
+
+        # Store preflight-related flags (Todo 10) so the per-pair
+        # preflight helper can read them without having to thread them
+        # through every helper signature. ``include_modules`` doubles
+        # as the discovery-time filter (already used in
+        # :meth:`_resolve_scan_inputs`) and the per-stack-root preflight
+        # opt-out for ``modules/``-style stack roots.
+        self._include_modules = bool(include_modules)
+        self._ignore_lockfile = bool(ignore_lockfile)
 
         output_dir = Path(output_dir).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -606,6 +630,14 @@ class Orchestrator:
         Returns 0 on success, -1 when an early bail-out was logged (caller
         should skip the pair's checkov passes). Logs the reason for
         skipping.
+
+        Preflight (Todo 10): the per-pair ``terraform`` invocations
+        call :meth:`_preflight_stack_root` first; a :class:`PreflightError`
+        is caught HERE (not swallowed) and converted into a logged
+        bail-out so the per-pair checkov passes still run on the
+        stack-root's source files. The exception is re-raised to the
+        caller only if the message is malformed — by policy we always
+        log + bail.
         """
         if not self.dry_run and not state_account:
             _log(
@@ -624,23 +656,32 @@ class Orchestrator:
             )
             return -1
 
-        if not self._run_terraform_init(state):
+        try:
+            if not self._run_terraform_init(state):
+                _log(
+                    "ERROR",
+                    f"terraform init failed for {state.project}/{state.env}; "
+                    "skipping plan layer",
+                )
+                return -1
+
+            if not self._run_terraform_plan(state):
+                _log(
+                    "ERROR",
+                    f"terraform plan failed for {state.project}/{state.env}; "
+                    "skipping plan layer",
+                )
+                return -1
+
+            self._run_terraform_show(state)
+        except PreflightError as exc:
             _log(
                 "ERROR",
-                f"terraform init failed for {state.project}/{state.env}; "
-                "skipping plan layer",
+                f"preflight refused {state.project}/{state.env}: {exc}; "
+                "skipping plan/state layer",
             )
             return -1
 
-        if not self._run_terraform_plan(state):
-            _log(
-                "ERROR",
-                f"terraform plan failed for {state.project}/{state.env}; "
-                "skipping plan layer",
-            )
-            return -1
-
-        self._run_terraform_show(state)
         return 0
 
     def _emit_paac(self, runner: CheckovRunner, state: _PairState) -> int:
@@ -904,6 +945,158 @@ class Orchestrator:
         )
         return False
 
+    # -- preflight (Todo 10) ------------------------------------------
+
+    @staticmethod
+    def _is_symlinked(path: Path) -> bool:
+        """Return True if ``path`` is itself a symlink.
+
+        Thin wrapper around :meth:`Path.is_symlink` so the preflight
+        test list reads as a flat checklist and the symlink-detection
+        policy lives in one place.
+        """
+        return path.is_symlink()
+
+    @staticmethod
+    def _has_parent_traversal(resolved_path: Path) -> bool:
+        """Return True if ``resolved_path`` still contains ``..`` segments.
+
+        Defends against a path that survives :meth:`Path.resolve` but
+        was assembled from segments like ``a/../../etc`` that resolve
+        to an unexpected location. ``resolve()`` collapses ``..`` on
+        POSIX by walking up; on Windows it does the same. We re-check
+        the segments anyway so the policy is portable and the
+        preflight never depends on OS-specific resolve behavior.
+        """
+        return ".." in resolved_path.parts
+
+    @staticmethod
+    def _find_disallowed_subdir(stack_root: Path) -> Optional[str]:
+        """Return the first disallowed module-library subdir, or ``None``.
+
+        Scans the immediate children of ``stack_root`` for entries
+        whose name matches ``modules``, ``modules-<x>``, or
+        ``.terraform``. These are Terraform's well-known module-library
+        directories and are NEVER valid scan targets: scanning them
+        would re-enter the consumer's ``modules/`` library as if it were
+        a stack, generating massive false-positive SARIFs. The check
+        is a one-level listing (``iterdir``) so a nested
+        ``modules/foo/modules`` does NOT trigger it; only direct
+        children of ``stack_root`` count, matching the scan_paths:
+        exclusion semantics in :mod:`scanner.discovery`.
+
+        Returns the offending directory name (basename) so the error
+        message can name it specifically.
+        """
+        if not stack_root.is_dir():
+            return None
+        for child in stack_root.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name
+            if name == "modules":
+                return name
+            if name.startswith("modules-"):
+                return name
+            if name == ".terraform":
+                return name
+        return None
+
+    def _preflight_stack_root(self, state: _PairState) -> None:
+        """Validate ``state.env_dir`` before any ``terraform`` subprocess fires.
+
+        Todo 10: the last line of defense between the orchestrator and
+        a real ``terraform init`` / ``terraform plan`` /
+        ``terraform show`` invocation. Each check exists for a reason:
+
+        * **Symlink check**: a symlinked stack root could escape the
+          declared target repo (e.g. ``env/payments/prod`` → a sibling
+          checkout, an attacker's writable directory, or ``/tmp``).
+          ``Path.is_symlink`` returns True for the link itself, not
+          its target; we reject before resolve() so a chained symlink
+          doesn't accidentally pass.
+        * **Path-traversal check**: any remaining ``..`` segment in
+          the resolved path means the resolved path crossed outside
+          the declared root. We refuse rather than follow.
+        * **Module-library subdir check**: scanning ``modules/``,
+          ``modules-<x>/``, or ``.terraform/`` would emit thousands of
+          duplicate findings (one per consumer module that re-uses the
+          library). The ``--include-modules`` flag (Todo 8) is the
+          documented opt-out; preflight honors it.
+        * **Lockfile presence check**: ``.terraform.lock.hcl`` is the
+          canonical Terraform dependency-lock file. When missing, the
+          consumer's provider set is ambiguous, and ``terraform
+          init`` will silently download whatever is on the registry —
+          which is exactly the "pull from registry.terraform.io" path
+          Todo 9's ``network_mirror`` exists to redirect. The
+          ``--ignore-lockfile`` flag (Todo 8) is the documented opt-out;
+          preflight honors it.
+
+        ``include_modules`` and ``ignore_lockfile`` are read off
+        ``self`` (set by :meth:`scan`) so the helper signature stays
+        single-arg. Passes the per-pair ``_PairState`` so the error
+        message names the offending path.
+
+        Raises:
+            PreflightError: when any of the four checks fails. The
+                caller (:meth:`_scan_one_pair`) catches this and fails
+                the pair.
+        """
+        include_modules = bool(getattr(self, "_include_modules", False))
+        ignore_lockfile = bool(getattr(self, "_ignore_lockfile", False))
+
+        env_dir = Path(state.env_dir)
+
+        # 1. Symlink check. Reject the link itself (not the target) so a
+        #    consumer cannot smuggle a stack root through a symlink that
+        #    resolves to a directory outside the declared scope.
+        if self._is_symlinked(env_dir):
+            raise PreflightError(
+                f"preflight: stack root is a symlink: {env_dir} "
+                f"(refusing to follow symlinks; move the stack to its "
+                f"real location or update scan_paths:)"
+            )
+
+        # 2. Path-traversal check. ``..`` segments in the resolved
+        #    path mean the resolver walked up outside the intended
+        #    root. Reject — never follow.
+        try:
+            resolved = env_dir.resolve()
+        except OSError as exc:
+            raise PreflightError(
+                f"preflight: cannot resolve stack root {env_dir}: {exc}"
+            ) from exc
+        if self._has_parent_traversal(resolved):
+            raise PreflightError(
+                f"preflight: stack root resolves to a path containing "
+                f"'..' segments: {resolved} (refusing parent traversal; "
+                f"fix scan_paths: or env dir layout)"
+            )
+
+        # 3. Module-library subdir check. Direct children only; nested
+        #    module libraries are intentionally not flagged (matching
+        #    scanner.discovery's exclusion semantics).
+        if not include_modules:
+            disallowed = self._find_disallowed_subdir(env_dir)
+            if disallowed is not None:
+                raise PreflightError(
+                    f"preflight: stack root contains excluded module "
+                    f"library '{disallowed}/' (refusing to scan module "
+                    f"libraries as stacks; pass --include-modules to "
+                    f"override)"
+                )
+
+        # 4. Lockfile presence check. Skip when --ignore-lockfile.
+        if not ignore_lockfile:
+            lockfile = env_dir / ".terraform.lock.hcl"
+            if not lockfile.is_file():
+                raise PreflightError(
+                    f"preflight: missing {env_dir / '.terraform.lock.hcl'} "
+                    f"(refusing to run 'terraform init' without a "
+                    f"declared provider lock; pass --ignore-lockfile to "
+                    f"override)"
+                )
+
     def _run_terraform_init(self, state: _PairState) -> bool:
         """Run ``terraform init -input=false`` in the env dir.
 
@@ -920,7 +1113,14 @@ class Orchestrator:
         ``TF_PLUGIN_CACHE_DIR`` is never set (the registry blocklist
         strips it from ambient env). After the run, the directory is
         shredded.
+
+        Preflight (Todo 10): :meth:`_preflight_stack_root` is invoked
+        first thing so a malformed stack root never reaches the real
+        ``terraform`` binary. The check is cheap (4 stat-style
+        inspections) and re-runs at the top of ``_run_terraform_plan``
+        and ``_run_terraform_show`` for defense-in-depth.
         """
+        self._preflight_stack_root(state)
         _log("INFO", "  terraform init")
         if self.dry_run:
             print("[dry-run] terraform init")
@@ -974,7 +1174,10 @@ class Orchestrator:
         "-refresh=false")``.
 
         TF env isolation (Todo 9): same as :meth:`_run_terraform_init`.
+
+        Preflight (Todo 10): same as :meth:`_run_terraform_init`.
         """
+        self._preflight_stack_root(state)
         plan_bin = state.env_run_dir / "tfplan.binary"
         state.plan_bin = plan_bin
 
@@ -1030,9 +1233,12 @@ class Orchestrator:
         ``("-chdir", <env_dir>, "show", "-json", <plan_bin>)``.
 
         TF env isolation (Todo 9): same as :meth:`_run_terraform_init`.
+
+        Preflight (Todo 10): same as :meth:`_run_terraform_init`.
         """
         if state.plan_bin is None:
             return
+        self._preflight_stack_root(state)
         plan_json = state.env_run_dir / "plan.json"
         state.plan_json = plan_json
 
