@@ -426,15 +426,13 @@ def test_safe_unlink_log_emits_json_safe_action_on_success(
     # fine — but each MUST be parseable as JSON.
     assert captured, "no log lines captured"
     for line in captured:
-        # Skip lines the helper emits via plain text (none in the
-        # current implementation, but future helpers may add WARN
-        # lines that are also JSON — accept either).
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            # Free-form lines are not allowed for safe_unlink
-            # emissions — every line must be JSON.
-            pytest.fail(f"non-JSON log line emitted: {line!r}")
+        # Let ``json.loads`` raise ``JSONDecodeError`` naturally on a
+        # non-JSON line — pytest surfaces the failure with the line
+        # content. SonarCloud S5774 prefers no try/except + manual
+        # ``pytest.fail`` when the exception already provides the
+        # failure signal. Every safe_unlink emission MUST be JSON
+        # (free-form lines are not allowed).
+        obj = json.loads(line)
         assert "basename" in obj, f"log line missing basename: {obj!r}"
         assert "action" in obj, f"log line missing action: {obj!r}"
         assert "event" in obj, f"log line missing event: {obj!r}"

@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
@@ -55,6 +56,18 @@ class TierViolation(OpsError):
 # Sentinel for ``Operation.argv_schema`` positions that accept arbitrary
 # caller-supplied tokens.
 ANY: Final[str] = "ANY"
+
+# Operation names referenced more than once in this module. Centralising
+# them keeps the registry table and self-test assertions in lockstep —
+# a typo would surface immediately rather than as a confusing
+# ``UnknownOperation`` from a mismatched string.
+OP_INIT_LOCAL: Final[str] = "terraform.init_local"
+OP_TEST_DANGEROUS_APPLY: Final[str] = "test.dangerous_apply"
+
+# Common ``terraform init`` flags reused by the schema + self-test
+# argv tuple + the length-mismatch assertion. Literal for literal.
+ARG_NO_INPUT: Final[str] = "-input=false"
+ARG_NO_BACKEND: Final[str] = "-backend=false"
 
 Tier = Literal["source", "plan", "state"]
 CwdPolicy = Literal["caller", "run_dir", "stack_root"]
@@ -131,11 +144,11 @@ OPERATION_REGISTRY: Final[dict[str, Operation]] = {
         env_allowlist=("AZURE_CONFIG_DIR", "AZURE_CORE_OUTPUT"),
     ),
     # Terraform (tier=plan/state only). Argv mirrors scanner/orchestrator.py.
-    "terraform.init_local": Operation(
-        name="terraform.init_local", executable="terraform",
+    OP_INIT_LOCAL: Operation(
+        name=OP_INIT_LOCAL, executable="terraform",
         argv_schema=(
             "-chdir", ANY, "init",
-            "-input=false", "-backend=false", "-no-color",
+            ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color",
         ),
         allowed_tiers=("plan", "state"), default_timeout=300,
         mutation_class="network", cleanup_obligation="none",
@@ -211,7 +224,7 @@ def run(
     _check_tier(op, tier)
     _validate_argv(op, args)
     executable = _resolve_binary(op)
-    final_argv = _build_argv(op, executable, args)
+    final_argv = _build_argv(executable, args)
 
     # Defense-in-depth: existing refusal matrix still fires on the
     # composed argv so a future schema change can't widen a mutating
@@ -220,7 +233,7 @@ def run(
 
     return subprocess.run(
         final_argv,
-        cwd=_resolve_cwd(op, cwd),
+        cwd=_resolve_cwd(cwd),
         env=_build_env(op, env),
         timeout=timeout if timeout is not None else op.default_timeout,
         capture_output=True,
@@ -294,7 +307,7 @@ def _resolve_binary(op: Operation) -> str:
     return resolved
 
 
-def _build_argv(op: Operation, executable: str, args: tuple[str, ...]) -> list[str]:
+def _build_argv(executable: str, args: tuple[str, ...]) -> list[str]:
     """Compose the final argv list passed to :func:`subprocess.run`.
 
     Every schema slot consumes one caller token; :data:`ANY` is a
@@ -322,7 +335,7 @@ def _build_env(op: Operation, caller_env: dict[str, str] | None) -> dict[str, st
     return {k: v for k, v in ambient.items() if k in allowed}
 
 
-def _resolve_cwd(op: Operation, caller_cwd: Path | None) -> Path | None:
+def _resolve_cwd(caller_cwd: Path | None) -> Path | None:
     """TODO 5 wires ``"run_dir"`` and ``"stack_root"``; today every policy
     falls back to the caller-supplied cwd."""
     return caller_cwd
@@ -331,11 +344,34 @@ def _resolve_cwd(op: Operation, caller_cwd: Path | None) -> Path | None:
 # Self-test (no third-party deps; pure stdlib)
 
 
-def _expect_raises(label: str, exc_type: type[BaseException], fn, *args, **kwargs) -> bool:
-    """Run ``fn(*args, **kwargs)`` and assert it raises ``exc_type``."""
+def _expect_raises(
+    label: str,
+    exc_type: type[BaseException],
+    fn,
+    *args,
+    ops_module: object,
+    **kwargs,
+) -> bool:
+    """Run ``fn(*args, **kwargs)`` and assert it raises ``exc_type``.
+
+    Catches :class:`OpsError` (the common base for every typed error
+    :func:`run` may raise) rather than ``BaseException`` so a stray
+    ``KeyboardInterrupt`` or ``SystemExit`` still propagates. SonarCloud
+    S2738 demands a specific catch; ``OpsError`` is the right
+    granularity because every expected exception in this self-test
+    inherits from it.
+
+    ``ops_module`` is the runtime-resolved :mod:`scanner.ops` reference
+    (passed in by :func:`_self_test` to defeat the
+    ``__main__``-vs-``scanner.ops`` class-identity split). The
+    except clause uses ``ops_module.OpsError`` rather than the local
+    module's ``OpsError`` for the same reason — the exception that
+    ``_self.run`` raises is built from ``ops_module``'s globals.
+    """
+    module_ops_error = getattr(ops_module, "OpsError")
     try:
         fn(*args, **kwargs)
-    except BaseException as exc:  # noqa: BLE001 — catch-all to introspect
+    except module_ops_error as exc:  # type: ignore[misc]
         if isinstance(exc, exc_type):
             return True
         print(
@@ -355,29 +391,33 @@ def _self_test() -> bool:
     Verifies: registry shape, UnknownOperation, ArgvSchemaViolation
     (literal mismatch + length), TierViolation, TrustedBinaryMissing,
     defense-in-depth refusal, and TF_PLUGIN_CACHE_DIR blocklist.
+
+    Exception classes are pulled via :func:`getattr` off the ``_self``
+    module reference so we defeat the ``__main__``-vs-``scanner.ops``
+    class-identity split (which would otherwise make ``isinstance``
+    return ``False`` for same-named classes imported under both names).
+    ``getattr`` also avoids local CamelCase variable names that would
+    violate SonarCloud naming conventions (S117 / python:S117).
     """
     import scanner.ops as _self  # late import: avoid module-load cycle
-    # Resolve exception classes via _self to defeat the
-    # ``__main__``-vs-``scanner.ops`` class-identity split that
-    # otherwise makes isinstance() return False for same-named
-    # classes imported under both names.
-    UnknownOperation = _self.UnknownOperation
-    ArgvSchemaViolation = _self.ArgvSchemaViolation
-    TierViolation = _self.TierViolation
-    TrustedBinaryMissing = _self.TrustedBinaryMissing
-    # Deliberate rebinding of the module-level import: defeats the
-    # __main__-vs-scanner.ops class-identity split. Consumed by the
-    # ``except (MutatingOperationRefused, TrustedBinaryMissing)`` below.
-    MutatingOperationRefused = _self.MutatingOperationRefused  # noqa: F811
+
+    def _exc(name: str) -> type[BaseException]:
+        """Return the exception class from ``_self`` by name.
+
+        Lookup at runtime defeats the ``__main__``-vs-``scanner.ops``
+        class-identity split; using :func:`getattr` keeps the variable
+        name lowercase so SonarCloud's naming rule is satisfied.
+        """
+        return getattr(_self, name)
 
     ok = True
     # Full valid argv for terraform.init_local. Schema:
     #   ("-chdir", ANY, "init",
-    #    "-input=false", "-backend=false", "-no-color") — 6 slots.
+    #    ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color") — 6 slots.
     # Caller supplies ALL 6 tokens (literals must match exactly).
     init_args = (
         "-chdir", "/some/path", "init",
-        "-input=false", "-backend=false", "-no-color",
+        ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color",
     )
 
     # 1. Registry shape.
@@ -387,24 +427,42 @@ def _self_test() -> bool:
             ok = False
 
     # 2. UnknownOperation.
-    ok &= _expect_raises("UnknownOperation", UnknownOperation, _self.run, "nope", "x")
+    ok &= _expect_raises(
+        "UnknownOperation", _exc("UnknownOperation"), _self.run,
+        "nope", "x", ops_module=_self,
+    )
 
     # 3. ArgvSchemaViolation (literal mismatch at position 0: "-chdir"
     # replaced with "-WRONG"). Pass a valid tier so the tier check
     # doesn't fire first.
-    ok &= _expect_raises("ArgvSchemaViolation-literal", ArgvSchemaViolation, _self.run,
-                         "terraform.init_local",
-                         "-WRONG", "/some/path", "init",
-                         "-input=false", "-backend=false", "-no-color",
-                         tier="plan")
+    ok &= _expect_raises(
+        "ArgvSchemaViolation-literal",
+        _exc("ArgvSchemaViolation"),
+        _self.run,
+        OP_INIT_LOCAL,
+        "-WRONG", "/some/path", "init",
+        ARG_NO_INPUT, ARG_NO_BACKEND, "-no-color",
+        tier="plan",
+        ops_module=_self,
+    )
 
     # 4. ArgvSchemaViolation (length mismatch — zero args).
-    ok &= _expect_raises("ArgvSchemaViolation-length", ArgvSchemaViolation, _self.run,
-                         "terraform.init_local", tier="plan")
+    ok &= _expect_raises(
+        "ArgvSchemaViolation-length",
+        _exc("ArgvSchemaViolation"),
+        _self.run,
+        OP_INIT_LOCAL, tier="plan",
+        ops_module=_self,
+    )
 
     # 5. TierViolation: terraform.init_local does not allow tier=source.
-    ok &= _expect_raises("TierViolation", TierViolation, _self.run,
-                         "terraform.init_local", *init_args, tier="source")
+    ok &= _expect_raises(
+        "TierViolation",
+        _exc("TierViolation"),
+        _self.run,
+        OP_INIT_LOCAL, *init_args, tier="source",
+        ops_module=_self,
+    )
 
     # 6. TrustedBinaryMissing: monkeypatch _self.shutil.which so
     # _self.run's lookup of ``shutil.which`` resolves to None. We
@@ -414,8 +472,13 @@ def _self_test() -> bool:
     original_which = _self.shutil.which
     _self.shutil.which = lambda _name: None  # type: ignore[assignment]
     try:
-        ok &= _expect_raises("TrustedBinaryMissing", TrustedBinaryMissing, _self.run,
-                             "terraform.init_local", *init_args, tier="plan")
+        ok &= _expect_raises(
+            "TrustedBinaryMissing",
+            _exc("TrustedBinaryMissing"),
+            _self.run,
+            OP_INIT_LOCAL, *init_args, tier="plan",
+            ops_module=_self,
+        )
     finally:
         _self.shutil.which = original_which  # type: ignore[assignment]
 
@@ -424,8 +487,8 @@ def _self_test() -> bool:
     # consults), not the local OPERATION_REGISTRY. Schema is fully
     # literal ("apply", "-auto-approve") so caller must pass both.
     saved = dict(_self.OPERATION_REGISTRY)
-    _self.OPERATION_REGISTRY["test.dangerous_apply"] = Operation(
-        name="test.dangerous_apply", executable="terraform",
+    _self.OPERATION_REGISTRY[OP_TEST_DANGEROUS_APPLY] = Operation(
+        name=OP_TEST_DANGEROUS_APPLY, executable="terraform",
         argv_schema=("apply", "-auto-approve"),
         allowed_tiers=("plan", "state"), default_timeout=60,
         mutation_class="mutate_azure", cleanup_obligation="none",
@@ -433,7 +496,7 @@ def _self_test() -> bool:
     )
     try:
         try:
-            _self.run("test.dangerous_apply", "apply", "-auto-approve", tier="plan")
+            _self.run(OP_TEST_DANGEROUS_APPLY, "apply", "-auto-approve", tier="plan")
         except (MutatingOperationRefused, TrustedBinaryMissing):
             pass  # both acceptable: refusal OR no terraform binary
         else:
@@ -443,17 +506,24 @@ def _self_test() -> bool:
         _self.OPERATION_REGISTRY.clear()
         _self.OPERATION_REGISTRY.update(saved)
 
-    # 8. Env blocklist strips TF_PLUGIN_CACHE_DIR.
+    # 8. Env blocklist strips TF_PLUGIN_CACHE_DIR. Use a private
+    # per-run temp dir (NOT ``/tmp``) so the test path is itself
+    # safe; SonarCloud flags the public ``/tmp`` path as a publicly
+    # writable directory.
     saved_environ = os.environ.copy()
+    private_tmp = tempfile.mkdtemp(prefix="pacioli-selftest-")
     try:
-        os.environ["TF_PLUGIN_CACHE_DIR"] = "/tmp/plugin-cache-should-not-leak"
-        cleaned = _self._build_env(OPERATION_REGISTRY["terraform.init_local"], caller_env=None)
+        os.environ["TF_PLUGIN_CACHE_DIR"] = os.path.join(
+            private_tmp, "plugin-cache-should-not-leak"
+        )
+        cleaned = _self._build_env(OPERATION_REGISTRY[OP_INIT_LOCAL], caller_env=None)
         if "TF_PLUGIN_CACHE_DIR" in cleaned:
             print("FAIL: TF_PLUGIN_CACHE_DIR not stripped from env", file=sys.stderr)
             ok = False
     finally:
         os.environ.clear()
         os.environ.update(saved_environ)
+        shutil.rmtree(private_tmp, ignore_errors=True)
 
     return ok
 

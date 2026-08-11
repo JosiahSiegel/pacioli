@@ -203,21 +203,13 @@ def test_refusal_matrix_is_defense_in_depth() -> None:
         # None (test env has no terraform binary) — both are
         # acceptable; the test fails only if NEITHER path is taken
         # (i.e. the composed argv reaches subprocess.run, which
-        # would actually launch terraform).
-        try:
+        # would actually launch terraform). ``pytest.raises`` with a
+        # tuple of exception types is the idiomatic way to assert
+        # "one of these exceptions must fire" (SonarCloud S2738 /
+        # S5778 prefers ``pytest.raises`` over try/except + manual
+        # ``pytest.fail``).
+        with pytest.raises((MutatingOperationRefused, TrustedBinaryMissing)):
             ops.run("test.dangerous_apply", "apply", "-auto-approve", tier="plan")
-        except (MutatingOperationRefused, TrustedBinaryMissing):
-            pass
-        else:
-            # Defense-in-depth was bypassed AND terraform was found AND
-            # the subprocess returned without raising — extremely
-            # unlikely (the regex would fire first), but explicit
-            # assertion makes the contract clear.
-            pytest.fail(
-                "defense-in-depth refusal did not fire and no "
-                "TrustedBinaryMissing was raised — composed argv "
-                "may have leaked to a real subprocess"
-            )
         # Sanity check: the refusal matrix itself still refuses this
         # command string (it would fire before any subprocess launch).
         with pytest.raises(MutatingOperationRefused):

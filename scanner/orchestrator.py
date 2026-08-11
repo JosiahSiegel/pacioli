@@ -260,11 +260,8 @@ class Orchestrator:
         baseline_path: Optional[Path],
         state_account: Optional[str],
         include_modules: bool = False,
-        scan_path_entries: Optional[list[str]] = None,
-        state_file: Optional[str] = None,
         ignore_lockfile: bool = False,
         registry_mirror: Optional[str] = None,
-        default_backend_key: Optional[str] = None,
     ) -> int:
         """Run the full scan and return the SCAN_RC.
 
@@ -2189,11 +2186,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             baseline_path=baseline.path,
             state_account=args.state_account,
             include_modules=bool(getattr(args, "include_modules", False)),
-            scan_path_entries=list(getattr(args, "scan_path_entry", None) or []),
-            state_file=getattr(args, "state_file", None),
             ignore_lockfile=bool(getattr(args, "ignore_lockfile", False)),
             registry_mirror=getattr(args, "registry_mirror", None),
-            default_backend_key=getattr(args, "backend_key", None),
         )
     except OrchestratorError as exc:
         _log("ERROR", str(exc))

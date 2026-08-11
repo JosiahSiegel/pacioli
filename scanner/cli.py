@@ -101,7 +101,7 @@ import sys
 import warnings
 import webbrowser
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Final, Optional, Sequence
 
 # Make sibling scanner modules importable when invoked as
 # `python -m scanner.cli` from the repo root (the package layout puts
@@ -858,56 +858,72 @@ def _build_orchestrator_argv(
         return []  # sentinel: caller checks empty argv + logged error
 
     argv: list[str] = list(base_argv) if base_argv else []
+    # --tier is always present; --target-repo only when explicitly set.
+    argv += ["--tier", args.tier]
     if getattr(args, "target_repo", None):
         argv += ["--target-repo", str(args.target_repo)]
-    argv += ["--tier", args.tier]
-    if getattr(args, "mode", None):
-        argv += ["--mode", args.mode]
-    if getattr(args, "mapping", None):
-        argv += ["--mapping", args.mapping]
-    if getattr(args, "baseline", None):
-        argv += ["--baseline", args.baseline]
-    if getattr(args, "output_dir", None):
-        argv += ["--output-dir", args.output_dir]
-    if getattr(args, "project", None):
-        argv += ["--project", args.project]
-    if getattr(args, "env", None):
-        argv += ["--env", args.env]
-    if getattr(args, "label", None):
-        argv += ["--label", args.label]
-    if getattr(args, "state_account", None):
-        argv += ["--state-account", args.state_account]
-    if getattr(args, "dry_run", False):
-        argv += ["--dry-run"]
-    if getattr(args, "verbose", False):
-        argv += ["--verbose"]
+    _append_value_pair(argv, args, "mode", "--mode")
+    _append_value_pair(argv, args, "mapping", "--mapping")
+    _append_value_pair(argv, args, "baseline", "--baseline")
+    _append_value_pair(argv, args, "output_dir", "--output-dir")
+    _append_value_pair(argv, args, "project", "--project")
+    _append_value_pair(argv, args, "env", "--env")
+    _append_value_pair(argv, args, "label", "--label")
+    _append_value_pair(argv, args, "state_account", "--state-account")
+    _append_bool_flag(argv, args, "dry_run", "--dry-run")
+    _append_bool_flag(argv, args, "verbose", "--verbose")
     # ``--no-open`` (PR #9) suppresses the default browser auto-open
     # of the generated HTML report. Forwarded here so the orchestrator
     # honours it when it dispatches ``Orchestrator._open_report``.
-    if getattr(args, "no_open", False):
-        argv += ["--no-open"]
-
+    _append_bool_flag(argv, args, "no_open", "--no-open")
     # New multi-stack flags. ``--include-modules`` is a boolean so it
     # appears as a bare token when set; the other flags are repeatable
     # / single-value and emit ``--flag value`` pairs.
-    if getattr(args, "include_modules", False):
-        argv += ["--include-modules"]
-    if getattr(args, "ignore_lockfile", False):
-        argv += ["--ignore-lockfile"]
-    if getattr(args, "state_file", None):
-        argv += ["--state-file", args.state_file]
-    if getattr(args, "registry_mirror", None):
-        argv += ["--registry-mirror", args.registry_mirror]
-    if getattr(args, "backend_key", None):
-        argv += ["--backend-key", args.backend_key]
+    _append_bool_flag(argv, args, "include_modules", "--include-modules")
+    _append_bool_flag(argv, args, "ignore_lockfile", "--ignore-lockfile")
+    _append_value_pair(argv, args, "state_file", "--state-file")
+    _append_value_pair(argv, args, "registry_mirror", "--registry-mirror")
+    _append_value_pair(argv, args, "backend_key", "--backend-key")
+    _append_scan_path_entries(argv, entries)
+    return argv
 
-    # Emit one ``--scan-path-entry`` per resolved entry. JSON-encoded
-    # so the orchestrator's parser can ``json.loads`` each token
-    # without ambiguity (the entry dict has at most 6 known keys).
+
+def _append_value_pair(
+    argv: list[str], args: argparse.Namespace, attr: str, flag: str
+) -> None:
+    """Append ``flag value`` to ``argv`` when ``args.attr`` is truthy.
+
+    Extracted from :func:`_build_orchestrator_argv` to keep the parent
+    function's cognitive complexity under the SonarCloud limit (S3776).
+    """
+    value = getattr(args, attr, None)
+    if value:
+        argv += [flag, str(value)]
+
+
+def _append_bool_flag(
+    argv: list[str], args: argparse.Namespace, attr: str, flag: str
+) -> None:
+    """Append bare ``flag`` to ``argv`` when ``args.attr`` is truthy.
+
+    Extracted from :func:`_build_orchestrator_argv` to keep the parent
+    function's cognitive complexity under the SonarCloud limit (S3776).
+    """
+    if getattr(args, attr, False):
+        argv += [flag]
+
+
+def _append_scan_path_entries(argv: list[str], entries: list[dict[str, Any]]) -> None:
+    """Emit one ``--scan-path-entry <json>`` token per resolved entry.
+
+    JSON-encoded so the orchestrator's parser can ``json.loads`` each
+    token without ambiguity (the entry dict has at most 6 known keys).
+
+    Extracted from :func:`_build_orchestrator_argv` to keep the parent
+    function's cognitive complexity under the SonarCloud limit (S3776).
+    """
     for entry in entries:
         argv += ["--scan-path-entry", json.dumps(entry, sort_keys=True)]
-
-    return argv
 
 
 # ---------------------------------------------------------------------------
@@ -1119,13 +1135,50 @@ def _handle_audit_remote(args: argparse.Namespace) -> int:
     Mirrors scan_audit.sh's ``--source remote`` branch (lines 73-126).
     Requires ``PACIOLI_STATE_STORAGE_ACCOUNT`` (or ``--state-account``)
     to be set; refuses otherwise (defense in depth, scan_audit.sh 74-81).
+
+    The function is split into three helpers
+    (:func:`_resolve_remote_run_id`, :func:`_register_audit_cleanup`,
+    :func:`_download_audit_blobs_and_finalize`) to keep its cognitive
+    complexity under the SonarCloud limit (S3776).
     """
-    from datetime import datetime, timezone
-
-    latest = bool(getattr(args, "latest", False))
-    run_id = getattr(args, "run_id", None)
     out_path = getattr(args, "out", None)
+    storage_account, container_name = _resolve_remote_storage_targets(args)
+    # Storage account validation must short-circuit BEFORE any further
+    # work (defense in depth — never contact Azure with an unset
+    # account). ``_resolve_remote_storage_targets`` returns empty
+    # strings on validation failure and has already logged ERROR.
+    if not storage_account:
+        return 2
+    run_id = _resolve_remote_run_id(args, storage_account, container_name)
+    if run_id is None:
+        return 2
+    _log("INFO", f"audit (remote): {storage_account}/{container_name}/{run_id}")
+    return _download_audit_blobs_and_finalize(
+        args=args,
+        storage_account=storage_account,
+        container_name=container_name,
+        run_id=run_id,
+        out_path=out_path,
+    )
 
+
+_AUDIT_REMOTE_BLOBS: Final[tuple[str, ...]] = (
+    "coverage_matrix.csv",
+    "combined.sarif",
+    "junit.xml",
+    REPORT_FILENAME,
+)
+
+
+def _resolve_remote_storage_targets(args: argparse.Namespace) -> tuple[str, str]:
+    """Return ``(storage_account, container_name)`` for remote audit.
+
+    Validates that the storage account is set (CLI flag or env var) and
+    falls back to the default container name when no override is set.
+
+    Returns ``("", "")`` when the storage account is missing — the
+    caller surfaces the ERROR log + non-zero rc.
+    """
     storage_account = (
         getattr(args, "state_account", None)
         or os.environ.get("PACIOLI_STATE_STORAGE_ACCOUNT", "").strip()
@@ -1140,77 +1193,104 @@ def _handle_audit_remote(args: argparse.Namespace) -> int:
             "PACIOLI_STATE_STORAGE_ACCOUNT is not set. Export it before "
             "running `pacioli audit --source remote`.",
         )
-        return 2
+        return "", ""
+    return storage_account, container_name
 
+
+def _resolve_remote_run_id(
+    args: argparse.Namespace, storage_account: str, container_name: str
+) -> Optional[str]:
+    """Return the run-id to fetch (explicit or resolved via ``--latest``).
+
+    Returns ``None`` when validation fails or ``--latest`` discovery
+    could not find a candidate (caller logs the specific ERROR + rc).
+    """
+    latest = bool(getattr(args, "latest", False))
+    run_id = getattr(args, "run_id", None)
     if not run_id and not latest:
         _log("ERROR", "pacioli audit --source remote requires --latest or --run-id")
-        return 2
+        return None
+    if run_id:
+        return run_id
+    return _resolve_latest_remote_run_id(
+        storage_account=storage_account,
+        container_name=container_name,
+        dry_run=bool(args.dry_run),
+    )
 
-    if not run_id:
-        run_id = _resolve_latest_remote_run_id(
-            storage_account=storage_account,
-            container_name=container_name,
-            dry_run=bool(args.dry_run),
-        )
-        if run_id is None:
-            return 2
 
-    _log("INFO", f"audit (remote): {storage_account}/{container_name}/{run_id}")
+def _register_audit_cleanup(dest_dir: Path, dry_run: bool) -> None:
+    """Register a SIGINT/SIGTERM trap that removes partial audit blobs.
 
-    dest_dir = (Path.home() / GLOBAL_CONFIG_DIR / "runs" / run_id / "aggregate").resolve()
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    The cleanup is best-effort — atexit + signal handlers in
+    :mod:`scanner.trap` swallow exceptions and re-raise the signal so
+    the process exits with the conventional 128+N status. Only the
+    artifacts earmarked for THIS audit run are touched; the surrounding
+    ``runs/<run_id>/`` tree stays intact.
+    """
+    if dry_run:
+        return
+    from scanner.trap import register_traps
 
-    # Register a cleanup trap so a SIGINT/SIGTERM in the middle of the
-    # download loop (Ctrl+C, CI job timeout) leaves the run-dir in a
-    # consistent state: partial downloads are removed instead of
-    # silently lingering. The cleanup is best-effort — atexit + signal
-    # handlers in scanner.trap swallow exceptions and re-raise the
-    # signal so the process exits with the conventional 128+N status.
-    if not bool(args.dry_run):
-        from scanner.trap import register_traps
-
-        _audit_blobs = ("coverage_matrix.csv", "combined.sarif", "junit.xml", REPORT_FILENAME)
-
-        def _cleanup_partial_downloads() -> None:
-            """Remove any partial downloads + the audit marker on signal.
-
-            Only the artifacts that were earmarked for THIS audit run
-            are touched; the directory itself is preserved so the
-            surrounding runs/<run_id>/ tree (used by other tooling)
-            stays intact.
-            """
-            for fname in _audit_blobs:
-                target = dest_dir / fname
-                if target.exists():
-                    try:
-                        target.unlink()
-                    except OSError:
-                        # Best-effort: a leftover partial download is
-                        # worse than a partial download that survives
-                        # a cleanup attempt — log + continue.
-                        _log("WARN", f"cleanup: failed to remove {target}")
-            marker = dest_dir / ".audit_pulled_at"
-            if marker.exists():
+    def _cleanup_partial_downloads() -> None:
+        """Remove any partial downloads + the audit marker on signal."""
+        for fname in _AUDIT_REMOTE_BLOBS:
+            target = dest_dir / fname
+            if target.exists():
                 try:
-                    marker.unlink()
+                    target.unlink()
                 except OSError:
-                    _log("WARN", f"cleanup: failed to remove {marker}")
+                    # Best-effort: a leftover partial download is
+                    # worse than a partial download that survives
+                    # a cleanup attempt — log + continue.
+                    _log("WARN", f"cleanup: failed to remove {target}")
+        marker = dest_dir / ".audit_pulled_at"
+        if marker.exists():
+            try:
+                marker.unlink()
+            except OSError:
+                _log("WARN", f"cleanup: failed to remove {marker}")
 
-        register_traps(_cleanup_partial_downloads)
+    register_traps(_cleanup_partial_downloads)
 
-    for fname in ("coverage_matrix.csv", "combined.sarif", "junit.xml", REPORT_FILENAME):
+
+def _download_audit_blobs_and_finalize(
+    *,
+    args: argparse.Namespace,
+    storage_account: str,
+    container_name: str,
+    run_id: str,
+    out_path: Optional[str],
+) -> int:
+    """Download the four audit blobs, finalize the marker, optionally open.
+
+    Pulled out of :func:`_handle_audit_remote` to keep the parent
+    function's cognitive complexity under the SonarCloud limit (S3776).
+    """
+    from datetime import datetime, timezone
+
+    dest_dir = (
+        Path.home() / GLOBAL_CONFIG_DIR / "runs" / run_id / "aggregate"
+    ).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dry_run = bool(args.dry_run)
+    _register_audit_cleanup(dest_dir, dry_run)
+
+    for fname in _AUDIT_REMOTE_BLOBS:
         _log("INFO", f"downloading {fname}")
         _az_blob_download(
             storage_account=storage_account,
             container_name=container_name,
             blob_name=f"{run_id}/{fname}",
             dest=dest_dir / fname,
-            dry_run=bool(args.dry_run),
+            dry_run=dry_run,
         )
 
     if out_path:
         _resolve_report_html(dest_dir, out_path)
-        _maybe_open_report(Path(out_path), no_open=bool(getattr(args, "no_open", False)))
+        _maybe_open_report(
+            Path(out_path), no_open=bool(getattr(args, "no_open", False))
+        )
 
     # Mark audit freshness so downstream tooling can distinguish an
     # audit-pull from a fresh scan.

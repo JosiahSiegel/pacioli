@@ -63,6 +63,14 @@ _DEFAULT_SHRED_TIMEOUT = 5
 # be readable by the same owner that wrote it for downstream consumers).
 _DEFAULT_FILE_MODE = 0o600
 
+# JSON ``event:`` keys for ``safe_unlink`` audit log lines. Centralised
+# so a rename updates every emission site (success, noop, shred,
+# overwrite+unlink, fallback, …) in lockstep. SonarCloud flags
+# duplicated string literals as a code smell (python:S119); the
+# constants are the canonical reference.
+LOG_EVENT_COMPLETE: str = "safe_unlink.complete"
+LOG_EVENT_SHRED_UNAVAILABLE: str = "safe_unlink.shred_unavailable"
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -294,7 +302,7 @@ def safe_unlink(
         ) from exc
 
     # 2. Secure deletion with shred-or-zero fallback.
-    return _secure_remove(path, timeout=timeout, run_dir=resolved_run_dir)
+    return _secure_remove(path, timeout=timeout)
 
 
 def create_secure_file(
@@ -456,7 +464,7 @@ def _signal_name(signum: int) -> str:
         return f"signal {signum}"
 
 
-def _secure_remove(path: Path, timeout: int, run_dir: Path | None = None) -> bool:
+def _secure_remove(path: Path, timeout: int) -> bool:
     """Internal worker for :func:`safe_unlink`.
 
     Tries ``shred -u`` on POSIX (routed through :func:`scanner.ops.run`
@@ -464,10 +472,10 @@ def _secure_remove(path: Path, timeout: int, run_dir: Path | None = None) -> boo
     overwrite-with-zeros + :meth:`Path.unlink` pair when shred is
     unavailable. Returns ``True`` if the file is gone after the call.
 
-    The ``run_dir`` argument is currently unused by the worker itself
-    — it is kept on the signature so future logging/audit changes can
-    attach run-dir context without breaking call sites. The caller
-    (:func:`safe_unlink`) passes it explicitly.
+    The body is split into small helpers
+    (:func:`_try_shred`, :func:`_overwrite_with_zeros`,
+    :func:`_unlink_path`) so the parent function's cognitive
+    complexity stays under the SonarCloud limit (S3776).
     """
     # JSON-safe log line emitter. Only the basename (never the path
     # tail) and the action taken are surfaced — never the file's
@@ -480,100 +488,99 @@ def _secure_remove(path: Path, timeout: int, run_dir: Path | None = None) -> boo
         payload.update(extra)
         LOGGER.info(json.dumps(payload))
 
+    # Idempotent: a missing file is treated as success. The caller is
+    # the orchestrator's per-pair cleanup hook, which routinely calls
+    # safe_unlink on paths that may have been removed by a previous
+    # step (e.g. by a signal handler that fired mid-run). Returning
+    # True here matches the ``shred_plan_artifacts`` contract —
+    # missing files are silently treated as success.
+    if not path.exists():
+        _emit(LOG_EVENT_COMPLETE, "noop", note="missing_file")
+        return True
+
     # POSIX path: try shred first, fall back to overwrite + unlink.
     # Windows path: skip shred (not available on Windows) and use
     # the overwrite + unlink fallback directly.
-    if not path.exists():
-        # Idempotent: a missing file is treated as success. The
-        # caller is the orchestrator's per-pair cleanup hook, which
-        # routinely calls safe_unlink on paths that may have been
-        # removed by a previous step (e.g. by a signal handler that
-        # fired mid-run). Returning True here matches the
-        # ``shred_plan_artifacts`` contract — missing files are
-        # silently treated as success.
-        _emit("safe_unlink.complete", "noop", note="missing_file")
+    if sys.platform != "win32" and _try_shred(path, timeout, _emit):
         return True
-
-    if sys.platform != "win32":
-        try:
-            result = scanner_ops.run(
-                "shred",
-                "-u", str(path),
-                tier="plan",
-                timeout=timeout,
-            )
-            if result.returncode == 0 and not path.exists():
-                _emit("safe_unlink.complete", "shred")
-                return True
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "safe_unlink.shred_nonzero",
-                        "basename": path.name,
-                        "returncode": result.returncode,
-                    }
-                )
-            )
-        except scanner_ops.TrustedBinaryMissing:
-            # The registry refused because shred isn't on PATH.
-            # Fall through to the overwrite + unlink fallback.
-            _emit("safe_unlink.shred_unavailable", "fallback", reason="binary_missing")
-        except scanner_ops.ArgvSchemaViolation as exc:
-            # Should not happen — the helper is the only caller and
-            # always passes ``("-u", str(path))``. Log and fall back
-            # so a future argv-shape change does not silently leak
-            # the artifact.
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "safe_unlink.shred_argv_rejected",
-                        "basename": path.name,
-                        "error": str(exc),
-                    }
-                )
-            )
-            _emit("safe_unlink.shred_unavailable", "fallback", reason="argv_rejected")
-        except scanner_ops.TierViolation as exc:
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "safe_unlink.shred_tier_refused",
-                        "basename": path.name,
-                        "error": str(exc),
-                    }
-                )
-            )
-            _emit("safe_unlink.shred_unavailable", "fallback", reason="tier_refused")
-        except subprocess.TimeoutExpired:
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "safe_unlink.shred_timeout",
-                        "basename": path.name,
-                        "timeout": timeout,
-                    }
-                )
-            )
-        except OSError as exc:
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "safe_unlink.shred_start_failed",
-                        "basename": path.name,
-                        "error": str(exc),
-                    }
-                )
-            )
 
     # Fallback: overwrite with zeros, then unlink. Best-effort — see
     # the "best-effort data minimization" docstring on safe_unlink
     # for the list of conditions this does NOT cover (SSDs, CoW,
     # journaling, VM snapshots, Windows ACLs).
+    _overwrite_with_zeros(path, _emit)
+    return _unlink_path(path)
+
+
+def _try_shred(
+    path: Path, timeout: int, emit: Callable[[str, str], None]
+) -> bool:
+    """Try to remove ``path`` via the ``shred`` operation.
+
+    Returns ``True`` when shred successfully removed the file. On any
+    failure (binary missing, argv rejected, tier refused, timeout,
+    non-zero rc, OSError) emits the appropriate WARN line and returns
+    ``False`` so the caller can fall through to the overwrite + unlink
+    fallback.
+
+    Extracted from :func:`_secure_remove` to keep the parent function's
+    cognitive complexity under the SonarCloud limit (S3776).
+    """
+
+    def _warn(event: str, **extra: object) -> None:
+        LOGGER.warning(
+            json.dumps({"event": event, "basename": path.name, **extra})
+        )
+
+    try:
+        result = scanner_ops.run(
+            "shred",
+            "-u", str(path),
+            tier="plan",
+            timeout=timeout,
+        )
+    except scanner_ops.TrustedBinaryMissing:
+        # The registry refused because shred isn't on PATH.
+        emit(LOG_EVENT_SHRED_UNAVAILABLE, "fallback", reason="binary_missing")
+        return False
+    except scanner_ops.ArgvSchemaViolation as exc:
+        # Should not happen — the helper is the only caller and always
+        # passes ``("-u", str(path))``. Log and fall back so a future
+        # argv-shape change does not silently leak the artifact.
+        _warn("safe_unlink.shred_argv_rejected", error=str(exc))
+        emit(LOG_EVENT_SHRED_UNAVAILABLE, "fallback", reason="argv_rejected")
+        return False
+    except scanner_ops.TierViolation as exc:
+        _warn("safe_unlink.shred_tier_refused", error=str(exc))
+        emit(LOG_EVENT_SHRED_UNAVAILABLE, "fallback", reason="tier_refused")
+        return False
+    except subprocess.TimeoutExpired:
+        _warn("safe_unlink.shred_timeout", timeout=timeout)
+        return False
+    except OSError as exc:
+        _warn("safe_unlink.shred_start_failed", error=str(exc))
+        return False
+
+    if result.returncode == 0 and not path.exists():
+        emit(LOG_EVENT_COMPLETE, "shred")
+        return True
+    _warn("safe_unlink.shred_nonzero", returncode=result.returncode)
+    return False
+
+
+def _overwrite_with_zeros(path: Path, emit: Callable[[str, str], None]) -> None:
+    """Overwrite ``path`` with zero bytes in place.
+
+    Best-effort — emits the overwrite+unlink completion log on
+    success and a WARN line on :class:`OSError`. Extracted from
+    :func:`_secure_remove` to keep the parent function's cognitive
+    complexity under the SonarCloud limit (S3776).
+    """
     try:
         size = path.stat().st_size
         with open(path, "wb") as fh:
             fh.write(b"\x00" * size)
-        _emit("safe_unlink.complete", "overwrite+unlink")
+        emit(LOG_EVENT_COMPLETE, "overwrite+unlink")
     except OSError as exc:
         LOGGER.warning(
             json.dumps(
@@ -585,6 +592,15 @@ def _secure_remove(path: Path, timeout: int, run_dir: Path | None = None) -> boo
             )
         )
 
+
+def _unlink_path(path: Path) -> bool:
+    """Remove ``path`` from the filesystem.
+
+    Returns ``True`` on success and ``False`` on :class:`OSError`
+    (the WARN line is emitted inside the helper). Extracted from
+    :func:`_secure_remove` to keep the parent function's cognitive
+    complexity under the SonarCloud limit (S3776).
+    """
     try:
         Path(path).unlink()
         return True

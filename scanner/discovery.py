@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Final, Optional
 
 # Local YAML loader — stdlib only, no PyYAML dependency.
 # Used because the bash scanner already requires PyYAML only via
@@ -76,6 +76,15 @@ class NoTerraformFoundError(FileNotFoundError):
     stdlib exception still work, but also has a distinct type so
     callers can catch this specifically.
     """
+
+
+# Filename of the optional in-scope YAML manifest at the repo root.
+# Centralised so a future rename updates every branch (legacy
+# ``projects:`` loader, ``scan_paths:`` parser, top-level precedence
+# check) in lockstep. SonarCloud flags a duplicated string literal
+# as a code smell (python:S119); the constant is the canonical
+# reference.
+SCOPE_FILENAME: Final[str] = "pci_scope.yaml"
 
 
 class ScanPathsCollisionError(ValueError):
@@ -308,7 +317,7 @@ def _discover_from_yaml(
     raises after consulting both branches, so the "scan_paths:
     only" YAML does not produce a false negative.
     """
-    pairs = _load_pci_scope(target_repo / "pci_scope.yaml")
+    pairs = _load_pci_scope(target_repo / SCOPE_FILENAME)
     return _apply_filters(pairs, project_filter, env_filter)
 
 
@@ -604,7 +613,7 @@ def _discover_from_scan_paths(
     signal belongs to the legacy branches. The scan_paths branch
     coexists with them.
     """
-    scope_file = target_repo / "pci_scope.yaml"
+    scope_file = target_repo / SCOPE_FILENAME
     if not scope_file.is_file():
         return []
     entries = _load_scan_paths(scope_file, target_repo)
@@ -647,7 +656,7 @@ def discover_pairs(
     target_repo = Path(target_repo)
     legacy: list[tuple[str, str]] = []
 
-    if (target_repo / "pci_scope.yaml").is_file():
+    if (target_repo / SCOPE_FILENAME).is_file():
         legacy = _discover_from_yaml(target_repo, project_filter, env_filter)
     elif (target_repo / "env").is_dir():
         legacy = _discover_from_env_tree(target_repo, project_filter, env_filter)
@@ -658,7 +667,7 @@ def discover_pairs(
     # exists (it's a YAML key). In env/-tree and flat-root modes we
     # don't widen the discovery surface.
     scan_path_pairs: list[DiscoveredPair] = []
-    if (target_repo / "pci_scope.yaml").is_file():
+    if (target_repo / SCOPE_FILENAME).is_file():
         scan_path_pairs = _discover_from_scan_paths(target_repo, include_modules)
 
     # Union: convert legacy tuples to DiscoveredPair (no stack_root).
