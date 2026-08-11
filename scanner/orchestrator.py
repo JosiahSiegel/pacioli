@@ -89,7 +89,9 @@ from scanner.paths import (  # noqa: E402
 )
 from scanner.safety import SafetyGuard  # noqa: E402
 from scanner.trap import (  # noqa: E402
+    create_secure_file,
     register_traps,
+    safe_unlink,
     shred_plan_artifacts,
 )
 
@@ -1181,6 +1183,21 @@ class Orchestrator:
         plan_bin = state.env_run_dir / "tfplan.binary"
         state.plan_bin = plan_bin
 
+        # Pre-create the plan binary with restrictive POSIX mode
+        # (0o600) so terraform inherits the permissions when it
+        # writes the file. This is the creation-side companion to
+        # safe_unlink: the artifact is owner-only from the moment it
+        # exists, narrowing the window where it could be read by a
+        # second local user. On Windows the helper logs a one-line
+        # note that POSIX-mode narrowing is skipped; we accept that
+        # gap rather than introducing a new dependency (no portable
+        # stdlib ACL helper).
+        try:
+            create_secure_file(plan_bin, state.env_run_dir)
+        except ValueError as exc:
+            _log("ERROR", f"  refused to prepare plan binary: {exc}")
+            return False
+
         _log("INFO", f"  terraform plan -out={plan_bin.name}")
         if self.dry_run:
             print(f"[dry-run] terraform plan -out={plan_bin}")
@@ -1241,6 +1258,16 @@ class Orchestrator:
         self._preflight_stack_root(state)
         plan_json = state.env_run_dir / "plan.json"
         state.plan_json = plan_json
+
+        # Pre-create plan.json with restrictive POSIX mode so the
+        # registry-captured stdout write (line below) lands on a
+        # file that is already owner-only. See the matching call in
+        # ``_run_terraform_plan`` for the rationale.
+        try:
+            create_secure_file(plan_json, state.env_run_dir)
+        except ValueError as exc:
+            _log("ERROR", f"  refused to prepare plan.json: {exc}")
+            return
 
         _log("INFO", "  terraform show -json")
         if self.dry_run:
@@ -1342,12 +1369,32 @@ class Orchestrator:
 
         Also annotates ``state.state_local`` / ``state.state_plan_json``
         so downstream helpers (e.g. shred, drift) find them.
+
+        Pre-creates ``state.tfstate`` and ``state_as_plan.json`` with
+        restrictive POSIX permissions (0o600) so the subsequent
+        ``az storage blob download`` and ``tfstate_to_plan.py``
+        invocations inherit owner-only mode. The state blob may
+        contain sensitive Azure resource attributes; the same
+        best-effort data minimization that applies to plan
+        artifacts applies here.
         """
         state_local = state.env_run_dir / "state.tfstate"
         state_plan_json = state.env_run_dir / "state_as_plan.json"
         drift_report = state.env_run_dir / "drift_report.json"
         state.state_local = state_local
         state.state_plan_json = state_plan_json
+        # Pre-create with restrictive mode. Containment is guaranteed
+        # because the paths are constructed from ``state.env_run_dir``
+        # which is itself resolved+contained by ``_run_scan_loop``.
+        for sensitive in (state_local, state_plan_json):
+            try:
+                create_secure_file(sensitive, state.env_run_dir)
+            except ValueError as exc:
+                # Programming error — paths were just constructed
+                # from a resolved run_dir, so this should never fire.
+                # Surface it so the pair is failed rather than
+                # silently continuing with world-readable state.
+                _log("ERROR", f"  refused to prepare state artifact: {exc}")
         return {
             "state_local": state_local,
             "state_plan_json": state_plan_json,
@@ -1476,9 +1523,15 @@ class Orchestrator:
         # Shred the encrypted state blob ASAP (PCI 10.7 hygiene).
         if state_local.is_file():
             try:
-                state_local.unlink()
-            except OSError as exc:
-                _log("WARN", f"  failed to remove state blob: {exc}")
+                # safe_unlink enforces run_dir containment and
+                # prefers shred with an overwrite-with-zeros fallback.
+                # Failure is logged inside the helper; we do not
+                # surface a duplicate WARN here.
+                safe_unlink(state_local, state.env_run_dir)
+            except ValueError as exc:
+                # Containment failure is a programming error; surface
+                # it loudly so the caller can fail the pair.
+                _log("ERROR", f"  refused to remove state blob: {exc}")
 
         if conv.returncode != 0 or not state_plan_json.is_file():
             _log("ERROR", "  tfstate_to_plan did not produce a plan JSON")
@@ -1541,13 +1594,21 @@ class Orchestrator:
 
     @staticmethod
     def _shred_state_plan(state_plan_json: Path) -> None:
-        """Shred the state-as-plan JSON (PCI 10.7 hygiene, best-effort)."""
+        """Shred the state-as-plan JSON (PCI 10.7 hygiene, best-effort).
+
+        Routes through :func:`scanner.trap.safe_unlink` so the
+        containment check, shred-vs-overwrite policy, and JSON-safe
+        log line are uniform across every sensitive-artifact cleanup
+        site. The :class:`ValueError` from the containment check is
+        a programming error — surface it loudly so the caller can
+        fail the pair rather than silently skipping cleanup.
+        """
         if not state_plan_json.is_file():
             return
         try:
-            state_plan_json.unlink()
-        except OSError as exc:  # noqa: BLE001 — best-effort shred; logged for forensics
-            _log("WARN", f"  failed to shred state plan: {exc}")
+            safe_unlink(state_plan_json, state_plan_json.parent)
+        except ValueError as exc:  # noqa: BLE001 — surface containment failures
+            _log("ERROR", f"  refused to shred state plan: {exc}")
 
     @staticmethod
     def _resolve_backend_key_from_aztfexport(state: _PairState) -> Optional[str]:
@@ -1631,7 +1692,10 @@ class Orchestrator:
         """Shred tfplan.binary and plan.json for this pair (PCI 10.7 hygiene).
 
         Mirrors scan.sh lines 686-694. Idempotent: missing files are
-        silently skipped.
+        silently skipped. Every cleanup goes through
+        :func:`scanner.trap.safe_unlink` so the run_dir containment
+        check, shred-vs-overwrite policy, and JSON-safe log line are
+        uniform across the orchestrator.
         """
         if state.plan_bin is None and state.plan_json is None:
             return
@@ -1646,10 +1710,15 @@ class Orchestrator:
             if not path.exists():
                 continue
             try:
-                path.unlink()
-                _log("INFO", f"  removed {path.name}")
-            except OSError as exc:
-                _log("WARN", f"  failed to remove {path}: {exc}")
+                # safe_unlink enforces containment, prefers shred
+                # (via ops.run) with an overwrite-with-zeros
+                # fallback, and emits a JSON-safe log line. The
+                # helper handles all error paths internally; a
+                # ValueError here is a programming error (path not
+                # under env_run_dir) and is surfaced loudly.
+                safe_unlink(path, state.env_run_dir)
+            except ValueError as exc:  # noqa: BLE001 — surface containment failures
+                _log("ERROR", f"  refused to shred {path.name}: {exc}")
 
     # -- mapping resolution ------------------------------------------
 

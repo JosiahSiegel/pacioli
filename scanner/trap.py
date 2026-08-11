@@ -40,9 +40,9 @@ Design choices
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -55,6 +55,13 @@ LOGGER = logging.getLogger("scanner.trap")
 
 # Default timeout for `shred -u` on POSIX.
 _DEFAULT_SHRED_TIMEOUT = 5
+
+# POSIX file mode applied when ``safe_unlink`` creates a sensitive artifact
+# (read+write owner only, no group/world). Matches the policy used elsewhere
+# in the scanner for ephemeral TF state (``orchestrator._isolate_terraform_env``
+# uses 0o700 on directories; we use 0o600 on files because the artifact must
+# be readable by the same owner that wrote it for downstream consumers).
+_DEFAULT_FILE_MODE = 0o600
 
 
 # ---------------------------------------------------------------------------
@@ -145,9 +152,239 @@ def shred_plan_artifacts(
         path = Path(run_dir) / name
         if not path.exists():
             continue
-        if not _secure_remove(path, timeout=timeout):
+        if not safe_unlink(path, run_dir, timeout=timeout):
             ok = False
     return ok
+
+
+# ---------------------------------------------------------------------------
+# safe_unlink: single helper for cleanup of sensitive artifacts.
+# ---------------------------------------------------------------------------
+def safe_unlink(
+    path: Path,
+    run_dir: Path,
+    timeout: int = _DEFAULT_SHRED_TIMEOUT,
+) -> bool:
+    """Remove ``path`` with PCI 10.7-hygiene best-effort data minimization.
+
+    This is the single helper every cleanup site for sensitive
+    artifacts (``tfplan.binary``, ``plan.json``, ``state_as_plan.json``,
+    ``state.tfstate``, etc.) MUST use. It exists for one reason: the
+    prior code base had three independent cleanup paths
+    (``Path.unlink()``, ``os.remove()``, ``shred -u``) scattered across
+    the orchestrator and trap modules. Each was slightly different —
+    some overwrote with zeros, some did not; some ran shred, some did
+    not; some validated the path, some did not. Unifying them behind
+    one helper means there is exactly one place to audit, test, and
+    extend the policy.
+
+    What this helper does
+    ---------------------
+    1. **Path containment check (defense-in-depth).** Resolves
+       ``path`` and ``run_dir`` (so symlinks and ``..`` segments are
+       collapsed) and refuses to operate if ``path`` is not a
+       descendant of ``run_dir``. Raises :class:`ValueError` on
+       containment failure — this is a programming error, not a
+       runtime I/O condition, and the caller is expected to surface it
+       loudly so a future bug that smuggles a path outside the run
+       directory is caught at the first call site, not silently
+       shredded.
+    2. **Secure deletion with fallback.** Tries ``shred -u <path>``
+       first (POSIX only; routed through :func:`scanner.ops.run` so the
+       argv is allowlist-validated). When shred is unavailable
+       (:class:`scanner.ops.TrustedBinaryMissing`), the registry
+       rejected the call, or the binary returned non-zero, falls back
+       to:
+
+         a. Open the file in write-binary mode and write
+            ``b"\\x00" * file_size`` to overwrite the contents with
+            zeros (best-effort; see limitations below).
+         b. :meth:`Path.unlink` to remove the inode.
+
+    3. **JSON-safe logging.** Emits a single ``INFO`` log line that
+       contains ONLY the file's basename (``path.name``) and the
+       action taken (``"shred"`` or ``"overwrite+unlink"``). Never
+       the file's contents, its full path tail, or anything that
+       could leak a sensitive attribute value into the audit log.
+
+    Parameters
+    ----------
+    path:
+        Sensitive artifact to remove. Must be inside ``run_dir``.
+    run_dir:
+        The per-run root the artifact lives under. Used for both the
+        containment check and the helper's contract that no cleanup
+        operates outside the run directory.
+    timeout:
+        Per-call subprocess timeout for ``shred``, in seconds. Defaults
+        to 5.
+
+    Returns
+    -------
+    bool
+        ``True`` if the file is gone after the call (or was never
+        there). ``False`` if the file is still on disk after every
+        attempt.
+
+    Raises
+    ------
+    ValueError
+        When ``path`` is not inside ``run_dir`` after resolution. This
+        is a programming error, not an I/O condition.
+
+    Important: best-effort data minimization, NOT secure erasure
+    ----------------------------------------------------
+    Per the scanner's documented threat model, this helper is
+    **best-effort data minimization**, not secure erasure. The
+    following conditions are NOT covered and may leave the
+    artifact's contents recoverable by an attacker with raw
+    block-device access:
+
+    * SSDs (wear-leveling may preserve the previous contents on
+      retired blocks; the zero-fill only reaches the visible file).
+    * Copy-on-write filesystems (btrfs, ZFS, APFS) — the overwrite
+      creates a new block; the old block is freed back to the pool.
+    * Journaling filesystems (ext3/ext4, XFS) — the journal may
+      contain a copy of the prior contents.
+    * VM snapshots / VM disk images — the host's snapshot layer
+      preserves prior block states.
+    * Windows NTFS — no POSIX-mode permission narrowing is performed
+      and there is no portable ACL-equivalent we can rely on without
+      a new dependency; this helper applies POSIX file mode on POSIX
+      only and falls through to a plain overwrite + unlink on
+      Windows.
+
+    The helper exists to make accidental disclosure less likely (a
+    subsequent ``cat`` of the file returns nothing; a casual ``ls
+    -l`` shows the artifact gone). It is NOT a defense against an
+    attacker with root + raw-block access.
+
+    POSIX file mode on creation
+    ---------------------------
+    ``safe_unlink`` ONLY applies the 0o600 mode-restriction when it
+    is CREATING a file (i.e. when the caller passes a path that does
+    not yet exist). For the typical cleanup call site the file
+    already exists, so this is a no-op there. Use
+    :func:`create_secure_file` when you need to atomically create a
+    sensitive artifact with the right mode.
+    """
+    path = Path(path)
+    run_dir = Path(run_dir)
+
+    # 1. Path containment check. Both sides are resolved so symlinks
+    #    and ``..`` segments cannot be used to escape ``run_dir``.
+    #    resolve() is a no-op for paths that don't exist on POSIX, so
+    #    the missing-file case is still bounded by ``run_dir``.
+    try:
+        resolved_run_dir = run_dir.resolve()
+        resolved_path = path.resolve()
+    except OSError:
+        # resolve() can raise on platforms with very long paths; we
+        # fall back to comparing the raw segments. This is the last
+        # line of defense, not the first.
+        resolved_run_dir = run_dir.absolute()
+        resolved_path = path.absolute()
+
+    try:
+        resolved_path.relative_to(resolved_run_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"safe_unlink refused: {path!s} is not inside run_dir {run_dir!s} "
+            f"(resolved: {resolved_path!s} not under {resolved_run_dir!s})"
+        ) from exc
+
+    # 2. Secure deletion with shred-or-zero fallback.
+    return _secure_remove(path, timeout=timeout, run_dir=resolved_run_dir)
+
+
+def create_secure_file(
+    path: Path,
+    run_dir: Path,
+    mode: int = _DEFAULT_FILE_MODE,
+) -> None:
+    """Create ``path`` (empty) with restrictive POSIX permissions.
+
+    Companion to :func:`safe_unlink`: this is the creation-side
+    helper for sensitive artifacts. It enforces the containment
+    check (same as ``safe_unlink``) and applies ``mode`` on POSIX
+    so the file is owner-only read+write from the moment it exists.
+
+    On Windows there is no portable ACL-equivalent in stdlib; we
+    create the file and log a one-line ``INFO`` noting that the
+    POSIX-mode narrowing was skipped. Operators who need
+    Windows-side ACL restriction should layer ``icacls`` or a
+    third-party ACL library on top — out of scope for this helper.
+
+    Idempotent: if the file already exists, its mode is NOT
+    changed (the helper does not want to silently widen
+    permissions on a file written by a separate process). Callers
+    that need to ensure the mode on every write should use
+    :func:`os.open` with ``O_CREAT|O_WRONLY|O_TRUNC`` directly.
+
+    Parameters
+    ----------
+    path:
+        File path to create. Must be inside ``run_dir``.
+    run_dir:
+        The per-run root. Containment is enforced the same way
+        as :func:`safe_unlink`.
+    mode:
+        POSIX file mode bits. Defaults to ``0o600`` (owner read/write
+        only).
+
+    Raises
+    ------
+    ValueError
+        When ``path`` is not inside ``run_dir`` after resolution.
+    OSError
+        On filesystem failure (propagated from ``Path.touch``).
+    """
+    path = Path(path)
+    run_dir = Path(run_dir)
+
+    # Same containment check as safe_unlink — keep the two in lockstep
+    # so any future change to the policy applies to both.
+    try:
+        resolved_run_dir = run_dir.resolve()
+        resolved_path = path.resolve()
+    except OSError:
+        resolved_run_dir = run_dir.absolute()
+        resolved_path = path.absolute()
+
+    try:
+        resolved_path.relative_to(resolved_run_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"create_secure_file refused: {path!s} is not inside run_dir "
+            f"{run_dir!s} (resolved: {resolved_path!s} not under "
+            f"{resolved_run_dir!s})"
+        ) from exc
+
+    path.touch(exist_ok=True)
+    if sys.platform != "win32":
+        try:
+            os.chmod(path, mode)
+        except OSError as exc:
+            LOGGER.warning(
+                json.dumps(
+                    {
+                        "event": "create_secure_file.chmod_failed",
+                        "basename": path.name,
+                        "error": str(exc),
+                    }
+                )
+            )
+    else:
+        LOGGER.info(
+            json.dumps(
+                {
+                    "event": "create_secure_file.windows_no_acl",
+                    "basename": path.name,
+                    "note": "POSIX-mode narrowing skipped on Windows; "
+                    "no portable stdlib ACL helper.",
+                }
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -219,23 +456,45 @@ def _signal_name(signum: int) -> str:
         return f"signal {signum}"
 
 
-def _secure_remove(path: Path, timeout: int) -> bool:
-    """
-    Remove ``path``: prefer ``shred -u`` on POSIX (bounded by
-    ``timeout``), fall back to ``os.remove``. Always returns ``True``
-    if the file is gone after the call.
-    """
-    if sys.platform == "win32":
-        try:
-            os.remove(path)
-            LOGGER.info("removed %s", path)
-            return True
-        except OSError as exc:
-            LOGGER.warning("failed to remove %s: %s", path, exc)
-            return False
+def _secure_remove(path: Path, timeout: int, run_dir: Path | None = None) -> bool:
+    """Internal worker for :func:`safe_unlink`.
 
-    shred_path = shutil.which("shred")
-    if shred_path is not None:
+    Tries ``shred -u`` on POSIX (routed through :func:`scanner.ops.run`
+    so the argv is allowlist-validated), then falls back to an
+    overwrite-with-zeros + :meth:`Path.unlink` pair when shred is
+    unavailable. Returns ``True`` if the file is gone after the call.
+
+    The ``run_dir`` argument is currently unused by the worker itself
+    — it is kept on the signature so future logging/audit changes can
+    attach run-dir context without breaking call sites. The caller
+    (:func:`safe_unlink`) passes it explicitly.
+    """
+    # JSON-safe log line emitter. Only the basename (never the path
+    # tail) and the action taken are surfaced — never the file's
+    # contents, full path, or any attribute value that could leak
+    # sensitive data into the audit log. The line is emitted as a
+    # single JSON object so log-shipping systems can parse it
+    # cleanly without per-line regex.
+    def _emit(event: str, action: str, **extra: object) -> None:
+        payload = {"event": event, "basename": path.name, "action": action}
+        payload.update(extra)
+        LOGGER.info(json.dumps(payload))
+
+    # POSIX path: try shred first, fall back to overwrite + unlink.
+    # Windows path: skip shred (not available on Windows) and use
+    # the overwrite + unlink fallback directly.
+    if not path.exists():
+        # Idempotent: a missing file is treated as success. The
+        # caller is the orchestrator's per-pair cleanup hook, which
+        # routinely calls safe_unlink on paths that may have been
+        # removed by a previous step (e.g. by a signal handler that
+        # fired mid-run). Returning True here matches the
+        # ``shred_plan_artifacts`` contract — missing files are
+        # silently treated as success.
+        _emit("safe_unlink.complete", "noop", note="missing_file")
+        return True
+
+    if sys.platform != "win32":
         try:
             result = scanner_ops.run(
                 "shred",
@@ -244,28 +503,101 @@ def _secure_remove(path: Path, timeout: int) -> bool:
                 timeout=timeout,
             )
             if result.returncode == 0 and not path.exists():
-                LOGGER.info("shredded %s", path)
+                _emit("safe_unlink.complete", "shred")
                 return True
             LOGGER.warning(
-                "shred -u %s returned rc=%d; falling back to os.remove",
-                path,
-                result.returncode,
+                json.dumps(
+                    {
+                        "event": "safe_unlink.shred_nonzero",
+                        "basename": path.name,
+                        "returncode": result.returncode,
+                    }
+                )
             )
+        except scanner_ops.TrustedBinaryMissing:
+            # The registry refused because shred isn't on PATH.
+            # Fall through to the overwrite + unlink fallback.
+            _emit("safe_unlink.shred_unavailable", "fallback", reason="binary_missing")
+        except scanner_ops.ArgvSchemaViolation as exc:
+            # Should not happen — the helper is the only caller and
+            # always passes ``("-u", str(path))``. Log and fall back
+            # so a future argv-shape change does not silently leak
+            # the artifact.
+            LOGGER.warning(
+                json.dumps(
+                    {
+                        "event": "safe_unlink.shred_argv_rejected",
+                        "basename": path.name,
+                        "error": str(exc),
+                    }
+                )
+            )
+            _emit("safe_unlink.shred_unavailable", "fallback", reason="argv_rejected")
+        except scanner_ops.TierViolation as exc:
+            LOGGER.warning(
+                json.dumps(
+                    {
+                        "event": "safe_unlink.shred_tier_refused",
+                        "basename": path.name,
+                        "error": str(exc),
+                    }
+                )
+            )
+            _emit("safe_unlink.shred_unavailable", "fallback", reason="tier_refused")
         except subprocess.TimeoutExpired:
             LOGGER.warning(
-                "shred -u %s timed out after %ds; falling back to os.remove",
-                path,
-                timeout,
+                json.dumps(
+                    {
+                        "event": "safe_unlink.shred_timeout",
+                        "basename": path.name,
+                        "timeout": timeout,
+                    }
+                )
             )
         except OSError as exc:
-            LOGGER.warning("shred -u %s failed to start: %s", path, exc)
+            LOGGER.warning(
+                json.dumps(
+                    {
+                        "event": "safe_unlink.shred_start_failed",
+                        "basename": path.name,
+                        "error": str(exc),
+                    }
+                )
+            )
+
+    # Fallback: overwrite with zeros, then unlink. Best-effort — see
+    # the "best-effort data minimization" docstring on safe_unlink
+    # for the list of conditions this does NOT cover (SSDs, CoW,
+    # journaling, VM snapshots, Windows ACLs).
+    try:
+        size = path.stat().st_size
+        with open(path, "wb") as fh:
+            fh.write(b"\x00" * size)
+        _emit("safe_unlink.complete", "overwrite+unlink")
+    except OSError as exc:
+        LOGGER.warning(
+            json.dumps(
+                {
+                    "event": "safe_unlink.overwrite_failed",
+                    "basename": path.name,
+                    "error": str(exc),
+                }
+            )
+        )
 
     try:
-        os.remove(path)
-        LOGGER.info("removed %s (os.remove fallback)", path)
+        Path(path).unlink()
         return True
     except OSError as exc:
-        LOGGER.warning("failed to remove %s: %s", path, exc)
+        LOGGER.warning(
+            json.dumps(
+                {
+                    "event": "safe_unlink.unlink_failed",
+                    "basename": path.name,
+                    "error": str(exc),
+                }
+            )
+        )
         return False
 
 

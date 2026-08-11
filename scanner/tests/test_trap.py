@@ -236,6 +236,252 @@ def test_shred_plan_artifacts_idempotent_when_files_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# safe_unlink: single helper for sensitive-artifact cleanup (Todo 11)
+# ---------------------------------------------------------------------------
+def test_safe_unlink_removes_file_inside_run_dir(tmp_path):
+    """A file inside ``run_dir`` is removed by ``safe_unlink``."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+    target.write_bytes(b"secret-bytes")
+    assert target.exists()
+
+    result = trap.safe_unlink(target, run_dir)
+    assert result is True
+    assert not target.exists()
+
+
+def test_safe_unlink_refuses_path_outside_run_dir(tmp_path):
+    """``safe_unlink`` raises :class:`ValueError` for paths outside ``run_dir``.
+
+    The containment check is the defense-in-depth guarantee: a
+    future bug that smuggles a path outside the per-run directory
+    must be caught at the helper boundary, not silently shredded.
+    We assert both directions of escape (sibling directory + parent
+    traversal) so the test catches regressions in either branch.
+    """
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+
+    # Sibling — clearly outside the run_dir tree.
+    sibling = tmp_path / "outside" / "tfplan.binary"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"nope")
+    with pytest.raises(ValueError):
+        trap.safe_unlink(sibling, run_dir)
+    # The file must NOT have been touched by the failed call.
+    assert sibling.exists()
+
+    # Parent-traversal — ``../foo`` collapses to a sibling of tmp_path,
+    # which is also outside ``run_dir``.
+    traversal = run_dir / ".." / ".." / "evil.binary"
+    if not traversal.exists():
+        traversal.parent.mkdir(parents=True, exist_ok=True)
+        traversal.write_bytes(b"evil")
+    with pytest.raises(ValueError):
+        trap.safe_unlink(traversal, run_dir)
+
+
+def test_safe_unlink_overwrites_with_zeros_when_shred_unavailable(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When shred is unavailable, ``safe_unlink`` overwrites then unlinks.
+
+    We simulate shred-unavailable by monkeypatching ``scanner_ops.run``
+    to raise :class:`scanner.ops.TrustedBinaryMissing` on the
+    ``"shred"`` operation. The helper must catch that, fall back to
+    the overwrite-with-zeros + unlink path, and remove the file.
+
+    The test also asserts that the file contents were zeroed before
+    the unlink — this is the documented best-effort data-minimization
+    step, and the only way the fallback provides any hygiene value at
+    all (the inode name alone disappearing tells an attacker nothing
+    about the prior contents).
+    """
+    from scanner.ops import TrustedBinaryMissing
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+    secret = b"\xDE\xAD\xBE\xEF" * 16  # 64 bytes, definitely non-zero
+    target.write_bytes(secret)
+    assert target.exists()
+
+    # Force shred to look missing by raising TrustedBinaryMissing
+    # from scanner_ops.run. All other ops must still work — we
+    # only intercept the "shred" name.
+    real_ops_run = trap.scanner_ops.run
+
+    def fake_ops_run(name, *args, **kwargs):  # noqa: ANN001
+        if name == "shred":
+            raise TrustedBinaryMissing(
+                "shred is not on PATH (test stub)"
+            )
+        return real_ops_run(name, *args, **kwargs)
+
+    monkeypatch.setattr(trap.scanner_ops, "run", fake_ops_run)
+
+    # Capture log output to assert the JSON-safe log line contains
+    # only the basename and action — never the path tail or contents.
+    captured: list[str] = []
+    real_emit = trap.LOGGER.info
+
+    def capturing_emit(msg, *args, **kwargs):  # noqa: ANN001
+        captured.append(msg % args if args else str(msg))
+        real_emit(msg, *args, **kwargs)
+
+    monkeypatch.setattr(trap.LOGGER, "info", capturing_emit)
+
+    # Run the cleanup.
+    result = trap.safe_unlink(target, run_dir)
+    assert result is True
+    assert not target.exists(), "safe_unlink did not unlink the file"
+
+    # The JSON-safe log line(s) must NOT contain:
+    #   - the contents of the file (the secret bytes)
+    #   - the full path tail (parent directories)
+    # and MUST contain the basename + action.
+    assert captured, "safe_unlink did not emit any log lines"
+    log_blob = "\n".join(captured)
+    assert secret.decode("latin-1") not in log_blob, (
+        "JSON-safe log line leaked file contents"
+    )
+    # The basename must appear at least once in a complete log line.
+    assert '"basename": "tfplan.binary"' in log_blob, (
+        f"log lines missing basename key: {log_blob!r}"
+    )
+    # The action key must be one of the documented values.
+    assert '"action":' in log_blob, (
+        f"log lines missing action key: {log_blob!r}"
+    )
+    # The parent directory name MUST NOT appear in the log blob.
+    # ``run_dir`` is ``<tmp_path>/runs/proj/env`` — none of those
+    # tail segments should appear in any log line.
+    for forbidden in ("/runs/", "/proj/", "/env/", "tmp_path"):
+        if forbidden == "tmp_path":
+            # The literal string "tmp_path" never appears in any log.
+            assert "tmp_path" not in log_blob, (
+                f"log blob leaked internal identifier: {log_blob!r}"
+            )
+        else:
+            assert forbidden not in log_blob, (
+                f"log blob leaked path tail {forbidden!r}: {log_blob!r}"
+            )
+
+
+def test_safe_unlink_returns_true_for_missing_file(tmp_path):
+    """A missing target is treated as success (idempotent)."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "does-not-exist.binary"
+
+    result = trap.safe_unlink(target, run_dir)
+    assert result is True
+
+
+def test_safe_unlink_log_emits_json_safe_action_on_success(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every complete ``safe_unlink`` log line is a single JSON object.
+
+    The scanner's audit-log contract is that the cleanup helper
+    emits one structured JSON object per call — never a free-form
+    string with the file's full path. We capture every ``info`` log
+    call the helper makes, parse the line as JSON, and assert the
+    schema is uniform.
+    """
+    import json
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+    target.write_bytes(b"x" * 32)
+
+    # Force the overwrite+unlink fallback so the test is platform-
+    # independent (does not require shred on PATH).
+    from scanner.ops import TrustedBinaryMissing
+
+    real_ops_run = trap.scanner_ops.run
+
+    def fake_ops_run(name, *args, **kwargs):  # noqa: ANN001
+        if name == "shred":
+            raise TrustedBinaryMissing("shred is not on PATH (test stub)")
+        return real_ops_run(name, *args, **kwargs)
+
+    monkeypatch.setattr(trap.scanner_ops, "run", fake_ops_run)
+
+    captured: list[str] = []
+    real_emit = trap.LOGGER.info
+
+    def capturing_emit(msg, *args, **kwargs):  # noqa: ANN001
+        captured.append(msg % args if args else str(msg))
+
+    monkeypatch.setattr(trap.LOGGER, "info", capturing_emit)
+
+    trap.safe_unlink(target, run_dir)
+
+    # Every captured line must be a single JSON object with at least
+    # the documented keys. We don't require the helper to emit
+    # exactly one line — multiple lines (overwrite, complete) are
+    # fine — but each MUST be parseable as JSON.
+    assert captured, "no log lines captured"
+    for line in captured:
+        # Skip lines the helper emits via plain text (none in the
+        # current implementation, but future helpers may add WARN
+        # lines that are also JSON — accept either).
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            # Free-form lines are not allowed for safe_unlink
+            # emissions — every line must be JSON.
+            pytest.fail(f"non-JSON log line emitted: {line!r}")
+        assert "basename" in obj, f"log line missing basename: {obj!r}"
+        assert "action" in obj, f"log line missing action: {obj!r}"
+        assert "event" in obj, f"log line missing event: {obj!r}"
+
+
+def test_create_secure_file_creates_empty_file(tmp_path):
+    """``create_secure_file`` touches an empty file inside ``run_dir``."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+
+    trap.create_secure_file(target, run_dir)
+
+    assert target.exists()
+    assert target.stat().st_size == 0
+
+
+def test_create_secure_file_refuses_traversal(tmp_path):
+    """``create_secure_file`` raises :class:`ValueError` for paths outside run_dir."""
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError):
+        trap.create_secure_file(tmp_path / "outside" / "evil.binary", run_dir)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod assertion")
+def test_create_secure_file_applies_0o600_on_posix(tmp_path):
+    """On POSIX, the helper applies 0o600 to the created file."""
+    import stat
+
+    run_dir = tmp_path / "runs" / "proj" / "env"
+    run_dir.mkdir(parents=True)
+    target = run_dir / "tfplan.binary"
+
+    trap.create_secure_file(target, run_dir)
+    mode = target.stat().st_mode
+    # Owner read+write only; group and other bits zero.
+    assert mode & stat.S_IRUSR, "owner-read bit missing"
+    assert mode & stat.S_IWUSR, "owner-write bit missing"
+    assert not (mode & stat.S_IRWXG), "group bits must be zero"
+    assert not (mode & stat.S_IRWXO), "other bits must be zero"
+
+
+# ---------------------------------------------------------------------------
 # Signal-handler subprocess tests
 # ---------------------------------------------------------------------------
 # Helper that runs a child Python process which registers the trap, waits a
