@@ -231,6 +231,11 @@ class Orchestrator:
         baseline_path: Optional[Path],
         state_account: Optional[str],
         include_modules: bool = False,
+        scan_path_entries: Optional[list[str]] = None,
+        state_file: Optional[str] = None,
+        ignore_lockfile: bool = False,
+        registry_mirror: Optional[str] = None,
+        default_backend_key: Optional[str] = None,
     ) -> int:
         """Run the full scan and return the SCAN_RC.
 
@@ -1557,6 +1562,67 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Storage account name (required for tier=plan|state).",
     )
+    # Multi-stack flags (Todo 8). Each ``--scan-path-entry`` token is a
+    # JSON object produced by ``scanner.cli._resolve_scan_path_entries``
+    # (after glob expansion + per-entry validation). ``action="append"``
+    # preserves argv order so the orchestrator sees entries in the
+    # priority the operator typed.
+    parser.add_argument(
+        "--scan-path-entry",
+        action="append",
+        default=None,
+        metavar="JSON",
+        help=(
+            "Repeatable. One resolved scan-path entry as a JSON object "
+            "(CLI-only; populated by scanner.cli from --scan-path / "
+            "--scan-glob). Keys: path, project?, env?, backend_key?, "
+            "workspace?, stack_label?."
+        ),
+    )
+    parser.add_argument(
+        "--include-modules",
+        action="store_true",
+        help=(
+            "Source-tier only: honor scan_path entries whose stack root "
+            "is a module library (modules/, modules-<x>/, .terraform/)."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-lockfile",
+        action="store_true",
+        help=(
+            "Scan .terraform.lock.hcl even when it lives inside an "
+            "excluded directory."
+        ),
+    )
+    parser.add_argument(
+        "--state-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Offline tier=plan|state bypass: read .tfstate from a local "
+            "file instead of running 'az storage blob download'."
+        ),
+    )
+    parser.add_argument(
+        "--registry-mirror",
+        default=None,
+        metavar="URL",
+        help=(
+            "URL of a private Terraform module registry mirror. Sets "
+            "TF_CLI_CONFIG_FILE to an isolated, generated config for "
+            "this run."
+        ),
+    )
+    parser.add_argument(
+        "--backend-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Default storage backend key for entries that don't carry "
+            "an explicit per-entry backend_key."
+        ),
+    )
     return parser
 
 
@@ -1664,6 +1730,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             mapping_path=mapping_pack.path,
             baseline_path=baseline.path,
             state_account=args.state_account,
+            include_modules=bool(getattr(args, "include_modules", False)),
+            scan_path_entries=list(getattr(args, "scan_path_entry", None) or []),
+            state_file=getattr(args, "state_file", None),
+            ignore_lockfile=bool(getattr(args, "ignore_lockfile", False)),
+            registry_mirror=getattr(args, "registry_mirror", None),
+            default_backend_key=getattr(args, "backend_key", None),
         )
     except OrchestratorError as exc:
         _log("ERROR", str(exc))
