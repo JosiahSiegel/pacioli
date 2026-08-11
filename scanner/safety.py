@@ -48,7 +48,6 @@ REFUSE_PATTERN: Final[tuple[str, ...]] = (
     r"terraform\s+untaint\b",
     r"terraform\s+import\b",
     # Terraform: locking bypass
-    r"terraform\s+plan.*-lock=false",
     r"terraform\s+apply.*-lock=false",
     r"terraform\s+destroy.*-lock=false",
     # Terraform: auto-approve bypass
@@ -78,7 +77,6 @@ REFUSE_REASON: Final[dict[str, str]] = {
     r"terraform\s+taint\b": "Taint triggers destroy on next apply. Forbidden.",
     r"terraform\s+untaint\b": "Untaint clears taint marker. Forbidden.",
     r"terraform\s+import\b": "Import mutates state. Use aztfexport for legitimate imports.",
-    r"terraform\s+plan.*-lock=false": "Lock bypass defeats drift detection. Forbidden.",
     r"terraform\s+apply.*-lock=false": "Lock bypass on apply. Forbidden.",
     r"terraform\s+destroy.*-lock=false": "Lock bypass on destroy. Forbidden.",
     r"-auto-approve": "Auto-approve bypasses confirmation. Forbidden.",
@@ -212,13 +210,14 @@ def safety_selftest() -> bool:
         "terraform apply -auto-approve",
         "terraform destroy",
         "terraform state rm foo",
-        "terraform plan -lock=false",
+        "terraform apply -lock=false",
+        "terraform destroy -lock=false",
         "az group delete -n foo",
         "az storage account delete -n foo",
         "checkov -d . --fix",
     )
     should_allow = (
-        "terraform plan -out=tfplan.binary",
+        "terraform plan -out=tfplan.binary -lock=false -refresh=false",
         "terraform show -json tfplan.binary",
         "terraform init -backend=false",
         "az storage blob download --account-name foo --container-name iac --name prod.tfstate",

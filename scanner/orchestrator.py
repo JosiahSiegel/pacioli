@@ -11,9 +11,10 @@ For each ``(project, env)`` pair discovered in ``target_repo``:
 1. (Tier ``plan``/``state`` only) Emit an alert that network access to
    the ``state_account`` storage account is required (fail-closed: if
    access is missing the per-pair plan/state passes are skipped).
-   ``terraform init`` + ``terraform plan -out=tfplan.binary -lock=true``
-   + ``terraform show -json``. The scanner never mutates the storage
-   firewall — the operator is responsible for granting access.
+   ``terraform init -backend=false`` + ``terraform plan -out=tfplan.binary
+   -lock=false -refresh=false`` + ``terraform show -json``. The scanner
+   never mutates the storage firewall — the operator is responsible
+   for granting access.
 2. ``checkov`` --framework terraform  + --external-checks-dir (paac).
 3. ``checkov`` --framework terraform  built-in source scan.
 4. (Tier ``plan``/``state`` only) ``checkov`` --framework terraform_plan
@@ -762,6 +763,7 @@ class Orchestrator:
                 str(state.env_dir),
                 "init",
                 "-input=false",
+                "-backend=false",
                 "-no-color",
                 tier=self.tier,
                 timeout=300,
@@ -788,12 +790,13 @@ class Orchestrator:
     def _run_terraform_plan(self, state: _PairState) -> bool:
         """Run ``terraform plan -out=tfplan.binary`` in the env dir.
 
-        Acquires state lock and reads remote state. NO mutation. The
-        plan binary is shredded on exit by the trap (or by
-        :meth:`_shred_plan_artifacts` per-pair). Mirrors scan.sh
+        Reads remote state but does NOT mutate it (no lock acquisition,
+        no refresh). The plan binary is shredded on exit by the trap
+        (or by :meth:`_shred_plan_artifacts` per-pair). Mirrors scan.sh
         lines 425-431. Routed through the :mod:`scanner.ops` registry;
-        argv schema is the 6 tokens ``("-chdir", <env_dir>, "plan",
-        "-no-color", "-out=<plan_bin>", "-lock=true")``.
+        argv schema is the 8 tokens ``("-chdir", <env_dir>, "plan",
+        "-no-color", "-out=<plan_bin>", "-lock=false",
+        "-refresh=false")``.
         """
         plan_bin = state.env_run_dir / "tfplan.binary"
         state.plan_bin = plan_bin
@@ -811,7 +814,8 @@ class Orchestrator:
                 "plan",
                 "-no-color",
                 f"-out={plan_bin}",
-                "-lock=true",
+                "-lock=false",
+                "-refresh=false",
                 tier=self.tier,
                 timeout=600,
             )

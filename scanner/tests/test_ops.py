@@ -76,14 +76,15 @@ def test_unknown_operation_raises() -> None:
 def test_argv_schema_validation() -> None:
     """Extra argv that doesn't match schema raises ArgvSchemaViolation.
 
-    terraform.init_local schema is exactly 5 tokens. Passing 6
-    (or any mismatched length) must fail with ArgvSchemaViolation,
-    not silently drop tokens.
+    terraform.init_local schema is exactly 6 tokens (Todo 6: added
+    ``-backend=false``). Passing 7 (or any mismatched length) must
+    fail with ArgvSchemaViolation, not silently drop tokens.
     """
     with pytest.raises(ArgvSchemaViolation):
         ops.run(
             "terraform.init_local",
-            "-chdir", "/some/path", "init", "-input=false", "-no-color",
+            "-chdir", "/some/path", "init",
+            "-input=false", "-backend=false", "-no-color",
             "EXTRA_TOKEN_SHOULD_FAIL",
             tier="plan",
         )
@@ -98,7 +99,8 @@ def test_argv_schema_literal_mismatch_raises() -> None:
     with pytest.raises(ArgvSchemaViolation):
         ops.run(
             "terraform.init_local",
-            "-WRONG-LITERAL", "/some/path", "init", "-input=false", "-no-color",
+            "-WRONG-LITERAL", "/some/path", "init",
+            "-input=false", "-backend=false", "-no-color",
             tier="plan",
         )
 
@@ -112,12 +114,15 @@ def test_tier_violation() -> None:
     """terraform.plan_local with tier=source raises TierViolation.
 
     plan_local's allowed_tiers is ("plan", "state"). tier="source"
-    must be refused before any subprocess runs.
+    must be refused before any subprocess runs. The argv matches the
+    new 8-token schema (Todo 6: ``-lock=false -refresh=false``).
     """
     with pytest.raises(TierViolation):
         ops.run(
             "terraform.plan_local",
-            "-chdir", "/some/path", "plan", "-no-color", "-out=tfplan.binary", "-lock=true",
+            "-chdir", "/some/path", "plan",
+            "-no-color", "-out=tfplan.binary",
+            "-lock=false", "-refresh=false",
             tier="source",
         )
 
@@ -137,7 +142,8 @@ def test_trusted_binary_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(TrustedBinaryMissing):
         ops.run(
             "terraform.init_local",
-            "-chdir", "/some/path", "init", "-input=false", "-no-color",
+            "-chdir", "/some/path", "init",
+            "-input=false", "-backend=false", "-no-color",
             tier="plan",
         )
 
@@ -244,6 +250,107 @@ def test_self_test_script_exits_zero() -> None:
     assert result.returncode == 0, (
         f"self-test exited {result.returncode}; "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Exact argv composition for the privileged tiers (Todo 6).
+# ---------------------------------------------------------------------------
+
+
+def test_init_local_composes_to_exact_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``terraform.init_local`` produces the exact 6-token argv.
+
+    The argv after the resolved terraform binary must be exactly::
+
+        -chdir <env_dir> init -input=false -backend=false -no-color
+
+    ``-backend=false`` was added in Todo 6. If anyone swaps a literal
+    or drops a token, this test fails before any real terraform is
+    launched. ``subprocess.run`` is patched to capture the final argv
+    and return a benign CompletedProcess so the test stays hermetic.
+    """
+    captured: dict[str, object] = {}
+
+    def _fake_run(argv, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+
+    ops.run(
+        "terraform.init_local",
+        "-chdir", "/env/dir",
+        "init",
+        "-input=false",
+        "-backend=false",
+        "-no-color",
+        tier="plan",
+    )
+
+    final_argv = captured["argv"]
+    assert isinstance(final_argv, list)
+    # First token is the resolved executable; the rest is the schema.
+    assert final_argv[1:] == [
+        "-chdir", "/env/dir",
+        "init",
+        "-input=false", "-backend=false", "-no-color",
+    ], (
+        f"terraform.init_local argv drifted from the documented 6-token "
+        f"schema; got {final_argv[1:]!r}"
+    )
+
+
+def test_plan_local_composes_to_exact_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``terraform.plan_local`` produces the exact 8-token argv.
+
+    The argv after the resolved terraform binary must be exactly::
+
+        -chdir <env_dir> plan -no-color -out=<plan_bin> -lock=false -refresh=false
+
+    ``-lock=true`` was replaced with ``-lock=false -refresh=false`` in
+    Todo 6. This test pins the contract; a future schema change that
+    drops or reorders any literal must update the test deliberately
+    (this is the point — the schema is the primary safety control).
+    """
+    captured: dict[str, object] = {}
+
+    def _fake_run(argv, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+
+    ops.run(
+        "terraform.plan_local",
+        "-chdir", "/env/dir",
+        "plan",
+        "-no-color",
+        "-out=tfplan.binary",
+        "-lock=false",
+        "-refresh=false",
+        tier="plan",
+    )
+
+    final_argv = captured["argv"]
+    assert isinstance(final_argv, list)
+    assert final_argv[1:] == [
+        "-chdir", "/env/dir",
+        "plan",
+        "-no-color",
+        "-out=tfplan.binary",
+        "-lock=false", "-refresh=false",
+    ], (
+        f"terraform.plan_local argv drifted from the documented 8-token "
+        f"schema; got {final_argv[1:]!r}"
     )
 
 

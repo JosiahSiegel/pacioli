@@ -64,8 +64,12 @@ REFUSE_FIXTURES: list[tuple[str, str]] = [
     (r"terraform\s+untaint\b", "terraform untaint azurerm_resource_group.main"),
     (r"terraform\s+import\b",
      "terraform import azurerm_resource_group.main /subscriptions/abc"),
-    # terraform lock bypass (note: contains additional flags)
-    (r"terraform\s+plan.*-lock=false", "terraform plan -lock=false"),
+    # terraform lock bypass on mutating subcommands (note: contains
+    # additional flags). The `terraform plan -lock=false` form is no
+    # longer refused here — the privileged-tier argv is now
+    # `terraform plan -lock=false -refresh=false` per Todo 6, and the
+    # registry's argv_schema is the primary enforcement. apply/destroy
+    # lock bypass remains a refusal because those are mutations.
     (r"terraform\s+apply.*-lock=false", "terraform apply -lock=false"),
     (r"terraform\s+destroy.*-lock=false", "terraform destroy -lock=false"),
     # auto-approve bypass
@@ -231,11 +235,35 @@ def test_refuse_if_mutating_allows_pure_readonly_terraform(
 
     These are the read-only commands the scanner actually uses. If
     the refusal matrix ever tightens to block them, this test fails
-    and forces a deliberate decision.
+    and forces a deliberate decision. The privileged-tier argv is
+    ``-lock=false -refresh=false`` on plan (Todo 6); the refusal
+    matrix must not block this shape because the registry's argv
+    schema is the primary enforcement (regex is defense-in-depth).
     """
     guard.refuse_if_mutating("terraform plan -out=tfplan.binary")
+    guard.refuse_if_mutating(
+        "terraform plan -out=tfplan.binary -lock=false -refresh=false"
+    )
     guard.refuse_if_mutating("terraform show -json tfplan.binary")
     guard.refuse_if_mutating("terraform init -backend=false")
+
+
+def test_refuse_if_mutating_refuses_lock_bypass_on_apply_and_destroy(
+    guard: SafetyGuard,
+) -> None:
+    """``terraform apply -lock=false`` and ``destroy -lock=false`` MUST refuse.
+
+    Todo 6 removed the ``terraform plan -lock=false`` refusal because
+    the privileged plan argv now uses ``-lock=false -refresh=false``.
+    The apply/destroy lock-bypass refusals remain in REFUSE_PATTERN
+    (those subcommands mutate state, so lock bypass on them is a
+    defense-in-depth invariant). If anyone re-weaksens the matrix by
+    removing these, this test fails before the operator hits prod.
+    """
+    with pytest.raises(MutatingOperationRefused):
+        guard.refuse_if_mutating("terraform apply -lock=false")
+    with pytest.raises(MutatingOperationRefused):
+        guard.refuse_if_mutating("terraform destroy -lock=false")
 
 
 def test_refuse_if_mutating_refuses_strange_command(guard: SafetyGuard) -> None:

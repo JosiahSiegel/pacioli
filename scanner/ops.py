@@ -129,14 +129,21 @@ OPERATION_REGISTRY: Final[dict[str, Operation]] = {
     # Terraform (tier=plan/state only). Argv mirrors scanner/orchestrator.py.
     "terraform.init_local": Operation(
         name="terraform.init_local", executable="terraform",
-        argv_schema=("-chdir", ANY, "init", "-input=false", "-no-color"),
+        argv_schema=(
+            "-chdir", ANY, "init",
+            "-input=false", "-backend=false", "-no-color",
+        ),
         allowed_tiers=("plan", "state"), default_timeout=300,
         mutation_class="network", cleanup_obligation="none",
         env_allowlist=("*",),
     ),
     "terraform.plan_local": Operation(
         name="terraform.plan_local", executable="terraform",
-        argv_schema=("-chdir", ANY, "plan", "-no-color", ANY, "-lock=true"),
+        argv_schema=(
+            "-chdir", ANY, "plan",
+            "-no-color", ANY,
+            "-lock=false", "-refresh=false",
+        ),
         allowed_tiers=("plan", "state"), default_timeout=600,
         mutation_class="network", cleanup_obligation="shred",
         env_allowlist=("*",),
@@ -346,9 +353,13 @@ def _self_test() -> bool:
 
     ok = True
     # Full valid argv for terraform.init_local. Schema:
-    #   ("-chdir", ANY, "init", "-input=false", "-no-color") — 5 slots.
-    # Caller supplies ALL 5 tokens (literals must match exactly).
-    init_args = ("-chdir", "/some/path", "init", "-input=false", "-no-color")
+    #   ("-chdir", ANY, "init",
+    #    "-input=false", "-backend=false", "-no-color") — 6 slots.
+    # Caller supplies ALL 6 tokens (literals must match exactly).
+    init_args = (
+        "-chdir", "/some/path", "init",
+        "-input=false", "-backend=false", "-no-color",
+    )
 
     # 1. Registry shape.
     for name, op in OPERATION_REGISTRY.items():
@@ -364,7 +375,8 @@ def _self_test() -> bool:
     # doesn't fire first.
     ok &= _expect_raises("ArgvSchemaViolation-literal", ArgvSchemaViolation, _self.run,
                          "terraform.init_local",
-                         "-WRONG", "/some/path", "init", "-input=false", "-no-color",
+                         "-WRONG", "/some/path", "init",
+                         "-input=false", "-backend=false", "-no-color",
                          tier="plan")
 
     # 4. ArgvSchemaViolation (length mismatch — zero args).
