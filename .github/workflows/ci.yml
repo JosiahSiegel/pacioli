@@ -142,9 +142,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip==25.2
            pip install --only-binary=:all: ./dist/pacioli-*-py3-none-any.whl
+      - name: Install pytest
+        run: |
+          python -m pip install --upgrade pip==25.2
+          pip install --only-binary=:all: pytest==9.1.1
       - name: Assert refusal exits with 99
         run: |
-          python -c "import subprocess, sys; result = subprocess.run([sys.executable, '-m', 'scanner.cli', 'apply', '.']); assert result.returncode == 99, f'expected refusal exit code 99, got {result.returncode}'"
+          pytest -q scanner/tests/test_cli.py::test_cli_subprocess_exits_99_on_terraform_apply_refusal
 
   selftest:
     name: Safety self-test
