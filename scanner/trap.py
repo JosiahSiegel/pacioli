@@ -28,10 +28,10 @@ Design choices
   restoring ``SIG_DFL`` and re-raising. The handler must NOT swallow the
   signal — otherwise CI sees a clean exit on a SIGTERM that should have
   been a failure.
-* **Bounded subprocess timeouts** — every ``az`` invocation inside a
-  handler MUST be wrapped in ``subprocess.run(..., timeout=...)``. A hung
-  Azure CLI call cannot be allowed to block past the CI job's grace
-  window; the trap itself has to finish promptly.
+* **Bounded subprocess timeouts** — every ``az`` and ``shred`` invocation
+  inside a handler MUST go through :func:`scanner.ops.run` with an explicit
+  ``timeout=...``. A hung Azure CLI call cannot be allowed to block past the
+  CI job's grace window; the trap itself has to finish promptly.
 * **Windows-aware** — ``signal.SIGTERM`` registration is a no-op on
   Windows. ``SIGINT`` + ``atexit`` still fire, which is the right
   behaviour for the local Windows dev case.
@@ -48,6 +48,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
+
+from scanner import ops as scanner_ops
 
 LOGGER = logging.getLogger("scanner.trap")
 
@@ -170,26 +172,16 @@ def cleanup_ip_whitelist(
     # Idempotency check: confirm the IP is still in the firewall rules
     # before attempting removal. Mirrors the bash version's `present=`
     # query.
-    present_cmd = [
-        "az",
-        "storage",
-        "account",
-        "network-rule",
-        "list",
-        "--account-name",
-        state_account,
-        "--query",
-        f"ipRules[?ipAddressOrRange=='{ip}'].ipAddressOrRange",
-        "-o",
-        "tsv",
-    ]
     try:
-        result = subprocess.run(
-            present_cmd,
-            capture_output=True,
-            text=True,
+        result = scanner_ops.run(
+            "az.network_rule_list",
+            # argv after the executable (10 tokens total to match schema):
+            "storage", "account", "network-rule", "list",
+            "--account-name", state_account,
+            "--query", f"ipRules[?ipAddressOrRange=='{ip}'].ipAddressOrRange",
+            "-o", "tsv",
+            tier="state",
             timeout=timeout,
-            check=False,
         )
         present = (result.stdout or "").strip()
     except subprocess.TimeoutExpired:
@@ -206,26 +198,16 @@ def cleanup_ip_whitelist(
         LOGGER.info("IP %s already removed; skipping", ip)
         return True
 
-    remove_cmd = [
-        "az",
-        "storage",
-        "account",
-        "network-rule",
-        "remove",
-        "--account-name",
-        state_account,
-        "--ip-address",
-        ip,
-        "--output",
-        "none",
-    ]
     try:
-        result = subprocess.run(
-            remove_cmd,
-            capture_output=True,
-            text=True,
+        result = scanner_ops.run(
+            "az.network_rule_remove",
+            # argv after the executable (10 tokens total to match schema):
+            "storage", "account", "network-rule", "remove",
+            "--account-name", state_account,
+            "--ip-address", ip,
+            "--output", "none",
+            tier="state",
             timeout=timeout,
-            check=False,
         )
     except subprocess.TimeoutExpired:
         LOGGER.warning(
@@ -386,12 +368,11 @@ def _secure_remove(path: Path, timeout: int) -> bool:
     shred_path = shutil.which("shred")
     if shred_path is not None:
         try:
-            result = subprocess.run(
-                [shred_path, "-u", str(path)],
-                capture_output=True,
-                text=True,
+            result = scanner_ops.run(
+                "shred",
+                "-u", str(path),
+                tier="plan",
                 timeout=timeout,
-                check=False,
             )
             if result.returncode == 0 and not path.exists():
                 LOGGER.info("shredded %s", path)

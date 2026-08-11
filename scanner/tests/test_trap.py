@@ -193,14 +193,16 @@ def test_cleanup_ip_whitelist_empty_file_is_idempotent(tmp_path):
 
 
 def test_cleanup_ip_whitelist_timeout_returns_false(tmp_path, monkeypatch):
-    """When ``subprocess.run`` hits its timeout, cleanup must return ``False``.
+    """When the subprocess hits its timeout, cleanup must return ``False``.
 
-    We simulate the hang by replacing ``subprocess.run`` with a function that
-    always raises ``TimeoutExpired`` after sleeping past the caller's
+    We simulate the hang by replacing :func:`scanner.ops.run` with a function
+    that always raises ``TimeoutExpired`` after sleeping past the caller's
     ``timeout``. The real implementation must catch this and return
     ``False`` so the caller knows manual cleanup is required.
     """
     (tmp_path / ".whitelist_ip").write_text("203.0.113.42", encoding="utf-8")
+
+    from scanner import ops as _ops
 
     def fake_run(*args, **kwargs):
         # Honour the caller's timeout but always timeout.
@@ -208,7 +210,7 @@ def test_cleanup_ip_whitelist_timeout_returns_false(tmp_path, monkeypatch):
         time.sleep(min(timeout, 0.1))
         raise subprocess.TimeoutExpired(cmd=args[0] if args else "az", timeout=timeout)
 
-    monkeypatch.setattr(trap.subprocess, "run", fake_run)
+    monkeypatch.setattr(_ops, "run", fake_run)
 
     result = trap.cleanup_ip_whitelist(tmp_path, state_account="fakeacct", timeout=1)
     assert result is False
