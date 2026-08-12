@@ -21,10 +21,13 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
     steps:
+      - name: Validate resolved release tag
+        run: |
+          [ -n "$RELEASE_TAG" ] || { echo "::error::RELEASE_TAG is empty; cannot determine ref to build from"; exit 1; }
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - name: Setup Python 3.13
         uses: actions/setup-python@v5
