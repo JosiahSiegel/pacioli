@@ -8,8 +8,9 @@
 
 This repo uses [release-please](https://github.com/googleapis/release-please)
 (Google's GitHub Action) on the `main` branch to automate versioning,
-CHANGELOG generation, GitHub Releases, and PyPI publishing. Everything
-runs from `.github/workflows/release-please.yml` and the config in
+CHANGELOG generation, GitHub Releases, and the dispatch of the artifact
+build workflow. Everything runs from
+`.github/workflows/release-please.yml` and the config in
 `.github/release-please-config.json`. There is no separate `make release`
 or manual tag step.
 
@@ -101,10 +102,100 @@ is telling you "nothing here is worth shipping to users".
    CHANGELOG diff, and it bumps `pyproject.toml` (and `CITATION.cff`
    per `extra-files`).
 5. You review and merge the release PR.
-6. On the merge push, release-please creates the GitHub Release, the
-   `vX.Y.Z` tag, and runs `.github/workflows/release.yml` which builds
-   the wheel + sdist and publishes to PyPI (see `release.yml` for the
-   current PyPI config).
+6. On the merge push, release-please creates the GitHub Release and
+   the `vX.Y.Z` tag. If (and only if) its `release_created` output is
+   `'true'`, the same workflow run then dispatches
+   `.github/workflows/release.yml` with `--ref "$TAG_NAME"` so the
+   artifact build runs from the freshly created tag:
+
+   ```bash
+   gh workflow run release.yml --ref "$TAG_NAME"
+   ```
+
+   The dispatch step is gated by `if: steps.release.outputs.release_created == 'true'`
+   in `.github/workflows/release-please.yml`, so non-release commits
+   never trigger an artifact run.
+
+7. `.github/workflows/release.yml` runs against the tag, checks it
+   out, builds the wheel + sdist, produces two provenance
+   attestations, and attaches both files to the matching GitHub
+   Release. It does **not** publish to PyPI — `release.yml` only
+   builds and attaches assets. PyPI distribution for this project is
+   out of scope for `release.yml`; install instructions in the README
+   point at the GitHub Release URLs.
+
+---
+
+## Recovering a missing artifact run
+
+Sometimes the release-please dispatch step does not fire (a transient
+GitHub API hiccup, a token permission gap, or a release-please run
+that completed before the dispatch step was added). The GitHub Release
+and tag exist, but `.github/workflows/release.yml` never ran against
+them, so the wheel + sdist are missing from the Release assets. Use
+the manual fallback below.
+
+### When to use it
+
+Confirm that the chain stopped at step 6 before reaching `release.yml`:
+
+```bash
+# 1. The release exists, but...
+gh release view vX.Y.Z
+
+# 2. ...no release.yml run has targeted that tag.
+gh run list --workflow=release.yml --limit 5
+```
+
+If `gh release view vX.Y.Z` shows the release with `0` assets (or only
+provenance attestations) and `gh run list --workflow=release.yml` does
+not list a run for that tag, the dispatch was missed — proceed.
+
+### Manual fallback dispatch
+
+`.github/workflows/release.yml` exposes a `workflow_dispatch` input
+named `tag` (see `.github/workflows/release.yml:9-13`). To rebuild
+and attach artifacts for an existing tag, run:
+
+```bash
+gh workflow run release.yml -f tag=vX.Y.Z
+```
+
+> The input is named **`tag`**, not `ref`. Passing `--ref` without the
+> input leaves the resolved tag empty and the workflow fails its
+> "Validate resolved release tag" guard before doing any work. The
+> workflow internally derives `RELEASE_TAG` from
+> `inputs.tag || github.event.release.tag_name || github.ref_name`,
+> so the `tag` input takes precedence and is the right path for
+> recovering a missed dispatch.
+
+### Verifying the recovery
+
+After dispatching, confirm the run started, succeeded, and the assets
+landed on the right release:
+
+```bash
+# 1. Find the new release.yml run.
+gh run list --workflow=release.yml --limit 5
+
+# 2. Inspect a specific run (replace <run-id> with the id from step 1).
+gh run view <run-id>
+
+# 3. Confirm the wheel + sdist are attached to the release.
+gh release view vX.Y.Z
+gh release view vX.Y.Z --json assets --jq '.assets[].name'
+```
+
+The asset list must include both `pacioli-X.Y.Z-py3-none-any.whl` and
+`pacioli-X.Y.Z.tar.gz`, plus the two `.intoto.jsonl` provenance
+attestations produced by `actions/attest-build-provenance@v1`. If the
+run failed, `gh run view <run-id> --log-failed` shows the failing step.
+
+> Recovery does **not** re-run release-please and does **not** publish
+> to PyPI; it re-runs `release.yml` to (re-)build and attach the
+> artifacts. Repeating the dispatch is idempotent —
+> `softprops/action-gh-release@v2` overwrites existing assets for the
+> same `tag_name`.
 
 ---
 
@@ -199,9 +290,9 @@ If you expected a release and didn't get one, walk this list:
 
 | File | What it controls |
 |---|---|
-| `.github/workflows/release-please.yml` | Triggers on push to `main`, calls `googleapis/release-please-action@v4` with `release-type: python` and `publish-target: github`. |
+| `.github/workflows/release-please.yml` | Triggers on push to `main`, calls `googleapis/release-please-action@v4` with `release-type: python`. On `release_created == 'true'`, it dispatches `release.yml` with `--ref "$TAG_NAME"`. Requires `actions: write` permission. |
 | `.github/release-please-config.json` | `package-name`, `changelog-path`, `changelog-sections` (which types are visible), `version-file: pyproject.toml`, `extra-files: [CITATION.cff]`. |
-| `.github/workflows/release.yml` | Triggered by a successful release-please run. Builds the wheel + sdist and publishes to PyPI. |
+| `.github/workflows/release.yml` | Dispatched by release-please on `release_created == 'true'` (also runs on tag push, on `release: published`, and on `workflow_dispatch` with a `tag` input). Checks out the resolved tag, builds the wheel + sdist, produces two provenance attestations, and attaches both artifacts to the matching GitHub Release. Does **not** publish to PyPI. |
 | `pyproject.toml` | The version field release-please updates on each release PR. |
 | `CITATION.cff` | Listed in `extra-files`; release-please updates the `version:` and `date-released:` fields here too. |
 | `CHANGELOG.md` | Listed in `changelog-path`; release-please appends the new section here on each release PR. |
@@ -214,9 +305,9 @@ If you expected a release and didn't get one, walk this list:
   treats this normally (0.2.0 → 0.2.1 → 0.3.0); there's no
   `bump-minor-pre-major` config set. If we want to change that, edit
   `.github/release-please-config.json`.
-- **Manual PyPI uploads.** Everything goes through
-  `.github/workflows/release.yml`. If you need to upload a one-off
-  build manually, that's a separate workflow not documented here.
+- **Manual PyPI uploads.** This repo does not publish to PyPI from
+  `.github/workflows/release.yml`. If/when PyPI distribution is added,
+  that is a separate workflow not documented here.
 - **The release-please release PR's review process.** We currently
   auto-merge release PRs by convention; if we change that, update this
   doc.
