@@ -290,7 +290,7 @@ If you expected a release and didn't get one, walk this list:
 
 | File | What it controls |
 |---|---|
-| `.github/workflows/release-please.yml` | Triggers on push to `main`, calls `googleapis/release-please-action@v4` with `release-type: python` and `publish-target: github`. |
+| `.github/workflows/release-please.yml` | Triggers on push to `main`, calls `googleapis/release-please-action@v4` with `release-type: python`. On `release_created == 'true'`, it dispatches `release.yml` with `--ref "$TAG_NAME"`. Requires `actions: write` permission. |
 | `.github/release-please-config.json` | `package-name`, `changelog-path`, `changelog-sections` (which types are visible), `version-file: pyproject.toml`, `extra-files: [CITATION.cff]`. |
 | `.github/workflows/release.yml` | Dispatched by release-please on `release_created == 'true'` (also runs on tag push, on `release: published`, and on `workflow_dispatch` with a `tag` input). Checks out the resolved tag, builds the wheel + sdist, produces two provenance attestations, and attaches both artifacts to the matching GitHub Release. Does **not** publish to PyPI. |
 | `pyproject.toml` | The version field release-please updates on each release PR. |
