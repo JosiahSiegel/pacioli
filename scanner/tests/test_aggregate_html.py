@@ -18,7 +18,7 @@ broken into four logical groups:
 
 Helpers (walk_run_dir, load_findings, is_suppressed,
 _parse_inline_skip_kwargs, load_inline_skips, is_inline_suppressed,
-attach_pci_reqs, load_remediation_map, _collect_drift_findings,
+attach_reqs, load_remediation_map, _collect_drift_findings,
 _render_drift_section, er_locate_sarif) are covered inline by either a
 direct unit call or as a side-effect of the orchestration path.
 
@@ -56,7 +56,7 @@ from scanner.aggregate import (  # noqa: E402  (import after sys.path.insert)
     _collect_drift_findings,
     _parse_inline_skip_kwargs,
     _render_drift_section,
-    attach_pci_reqs,
+    attach_reqs,
     build_coverage_matrix,
     compute_coverage_gaps,
     is_inline_suppressed,
@@ -389,7 +389,7 @@ class TestCoverageMatrix:
         note_by_req = {
             "10.7": "no working Checkov 3.3.9 coverage for 12-month retention"
         }
-        # Filter PCI_NOTE_TOKENS out — the function doesn't filter itself,
+        # Filter NOTE_TOKENS out — the function doesn't filter itself,
         # build_coverage_matrix does. Simulate the post-filter state.
         fired: set[str] = set()
         gaps = compute_coverage_gaps(expected_by_req, fired, note_by_req)
@@ -413,7 +413,7 @@ class TestCoverageMatrix:
         text = out.read_text(encoding="utf-8")
         # Header includes every documented column.
         for col in (
-            "pci_requirement",
+            "requirement",
             "title",
             "expected_count",
             "fired_count",
@@ -421,7 +421,7 @@ class TestCoverageMatrix:
             "missing_check_ids",
             "triage_hint",
             "librarian_verified_at",
-            "pci_anchor_url",
+            "doc_anchor_url",
         ):
             assert col in text, f"missing column {col!r} in coverage_gaps.csv"
         # Both req IDs appear as rows.
@@ -440,7 +440,7 @@ class TestCoverageMatrix:
         write_coverage_csv(out, ["1.2.1"], ["CKV_AZURE_44"], cells, [])
         text = out.read_text(encoding="utf-8")
         for col in (
-            "pci_requirement",
+            "requirement",
             "check_id",
             "status",
             "missing_for_req",
@@ -540,8 +540,10 @@ class TestOutputWriters:
         er = EnvResultFull(
             project="myapp", env="prod", scan_status="ok",
             plan_dir=tmp_path,
-            sarif_terraform_source=tmp_path / "r1.sarif",
-            sarif_secrets=tmp_path / "r2.sarif",
+            sarif_files={
+                "source": tmp_path / "r1.sarif",
+                "secrets": tmp_path / "r2.sarif",
+            },
         )
         out = tmp_path / "combined.sarif"
         write_combined_sarif(out, [er])
@@ -550,15 +552,23 @@ class TestOutputWriters:
         assert data["version"] == "2.1.0"
         assert len(data["runs"]) == 2
         # Each source SARIF contributes one run; the writer tags with
-        # pci_project / pci_env so downstream tooling can filter.
+        # project / env so downstream tooling can filter. Property names
+        # come from scanner.frameworks (single source of truth shared
+        # with baseline_init._collect_stub_pairs).
+        from scanner.frameworks import (
+            SARIF_PROPERTY_ENV,
+            SARIF_PROPERTY_PROJECT,
+            SARIF_PROPERTY_SOURCE_SARIF,
+        )
         tags = sorted(
-            (r["properties"]["pci_project"], r["properties"]["pci_env"])
+            (r["properties"][SARIF_PROPERTY_PROJECT],
+             r["properties"][SARIF_PROPERTY_ENV])
             for r in data["runs"]
         )
         assert tags == [("myapp", "prod"), ("myapp", "prod")]
         # Sources are also labelled for debug.
         source_sarifs = sorted(
-            r["properties"]["pci_source_sarif"] for r in data["runs"]
+            r["properties"][SARIF_PROPERTY_SOURCE_SARIF] for r in data["runs"]
         )
         assert source_sarifs == ["r1.sarif", "r2.sarif"]
 
@@ -571,13 +581,13 @@ class TestOutputWriters:
             env="prod", project="myapp", check_id="CKV_AZURE_44",
             severity="HIGH", resource="azurerm_storage_account.ex",
             file_path="main.tf", line=17, message="TLS latest",
-            framework="terraform", pci_requirements=["1.2.1"],
+            framework="terraform", requirements=["1.2.1"],
         )
         f_low = Finding(
             env="prod", project="myapp", check_id="CKV_AZURE_70",
             severity="LOW", resource="diag", file_path="m.tf", line=3,
             message="diagnostic settings", framework="terraform",
-            pci_requirements=[],
+            requirements=[],
         )
         er = EnvResult(project="myapp", env="prod", scan_status="ok",
                        findings=[f_high, f_low])
@@ -814,15 +824,15 @@ class TestHelpers:
         ]
         assert is_suppressed(f, baseline, today="2026-08-10") is False
 
-    def test_attach_pci_reqs_populates_list(self) -> None:
-        """attach_pci_reqs mutates findings[*].pci_requirements in place."""
+    def test_attach_reqs_populates_list(self) -> None:
+        """attach_reqs mutates findings[*].requirements in place."""
         f = Finding(
             env="prod", project="myapp", check_id="CKV_AZURE_44",
             severity="HIGH", resource="r", file_path="m.tf", line=1,
             message="m", framework="terraform",
         )
-        attach_pci_reqs([f], {"CKV_AZURE_44": ["1.2.1", "1.3"]})
-        assert f.pci_requirements == ["1.2.1", "1.3"]
+        attach_reqs([f], {"CKV_AZURE_44": ["1.2.1", "1.3"]})
+        assert f.requirements == ["1.2.1", "1.3"]
 
     def test_load_remediation_map_returns_check_id_to_blocks(
         self, tmp_path: Path
@@ -880,12 +890,12 @@ class TestHelpers:
         idx = {(r.project, r.env): r for r in results}
         # projA/prod: ok + has source SARIF
         assert idx[("projA", "prod")].scan_status == "ok"
-        assert idx[("projA", "prod")].sarif_terraform_source is not None
+        assert idx[("projA", "prod")].sarif_files.get("source") is not None
         # projA/dev: NO SARIFs → scan_status=no_sarif
         assert idx[("projA", "dev")].scan_status == "no_sarif"
         # projB/staging: ok + has paac SARIF
         assert idx[("projB", "staging")].scan_status == "ok"
-        assert idx[("projB", "staging")].sarif_paac is not None
+        assert idx[("projB", "staging")].sarif_files.get("paac") is not None
 
     def test_load_findings_populates_env_results(self, tmp_path: Path) -> None:
         """load_findings mutates each EnvResultFull.findings from its SARIFs."""
@@ -921,7 +931,9 @@ class TestHelpers:
             EnvResultFull(
                 project="p", env="e", scan_status="ok",
                 plan_dir=env_dir,
-                sarif_terraform_source=env_dir / "results_terraform_source.sarif",
+                sarif_files={
+                    "source": env_dir / "results_terraform_source.sarif",
+                },
             )
         ]
         load_findings(results)

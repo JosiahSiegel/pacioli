@@ -1,25 +1,28 @@
 # Pacioli — Operator Guide
 
 > **Read [Consuming Pacioli](CONSUMING_GUIDE.md) first** if you are
-> setting up the scanner in a Terraform repo for the first time. This
+> setting up the scanner in an IaC repo for the first time. This
 > guide assumes that setup is already done and you have a working
 > `pci_scope.yaml`, `pci_baseline.yaml`, and `pci_mapping.yaml` in your
 > consumer repo.
 
 ## What Pacioli is
 
-A read-only compliance scanner for Azure Terraform code. Built on top
-of [Checkov](https://github.com/bridgecrewio/checkov), but with a
-focused purpose: produce a single, audit-ready HTML report that maps
-every Checkov finding to a specific clause in a compliance framework
-(PCI DSS v4.0.1 by default; SOC 2, CIS Azure, NIST 800-53, ISO 27001
-via custom mapping packs).
+A read-only compliance scanner for any Checkov-supported IaC framework.
+Built on top of [Checkov](https://github.com/bridgecrewio/checkov),
+but with a focused purpose: produce a single, audit-ready HTML report
+that maps every Checkov finding to a specific clause in a compliance
+framework (the shipped `mappings/pci_dss_4.0.1.yaml` pack is the
+primary worked example; SOC 2, CIS, NIST 800-53, ISO 27001 ship via
+custom mapping packs — see
+[Mapping Schema → Supported frameworks](MAPPING_SCHEMA.md#supported-frameworks)
+for the authoritative framework list).
 
-The scanner is **read-only against Azure**. It does not change storage
-firewall rules. If a tier needs access that is unavailable, Pacioli emits
-an `ACCESS REQUIRED` alert and skips the dependent layer. Arrange access
-outside Pacioli, then rerun the scan. See [Safety Model](SAFETY_MODEL.md)
-for the complete invariant.
+The scanner is **read-only against your cloud provider**. It does not
+change storage firewall rules. If a tier needs access that is
+unavailable, Pacioli emits an `ACCESS REQUIRED` alert and skips the
+dependent layer. Arrange access outside Pacioli, then rerun the scan.
+See [Safety Model](SAFETY_MODEL.md) for the complete invariant.
 
 ## Quick start
 
@@ -42,11 +45,11 @@ pacioli scan --project myapp --env prod
 
 ## Three scan tiers
 
-| Tier | Command | What it does | When to use |
-|---|---|---|---|
-| 1. Source | `pacioli scan` | Static `.tf` parse. Runs Checkov's `terraform` + `secrets` framework + the custom `CKV_AZURE_PCI_*` checks. **Seconds.** No init, no plan, no storage. | Pre-commit, day-to-day CI, fast feedback. |
-| 2. Plan | `pacioli scan --tier plan` | Adds `terraform init` + `terraform plan -out=tfplan.binary` so Checkov can inspect *resolved* values (catches things the source can't see, like CMK buried in a module output). | Monthly deep reviews, audit prep. |
-| 3. State | `pacioli scan --tier state` | Adds `.tfstate` blob download from Azure Storage and emits a `drift_report.json` comparing source plan vs state plan. Catches `ignore_changes` drift. | Triage drift incidents, after manual Azure changes. |
+| Tier | Command | What it does | When to use | Framework scope |
+|---|---|---|---|---|
+| 1. Source | `pacioli scan` | Static parse of the detected IaC source. Runs Checkov's `terraform` + `secrets` framework + the custom `CKV_AZURE_PCI_*` checks for Terraform packs (other frameworks get the equivalent Checkov framework). **Seconds.** No init, no plan, no storage. | Pre-commit, day-to-day CI, fast feedback. | Any Checkov framework. |
+| 2. Plan | `pacioli scan --tier plan` | Adds `terraform init` + `terraform plan -out=tfplan.binary` so Checkov can inspect *resolved* values (catches things the source can't see, like CMK buried in a module output). | Monthly deep reviews, audit prep. | **Terraform-family only.** Rejected for non-Terraform frameworks. |
+| 3. State | `pacioli scan --tier state` | Adds `.tfstate` blob download from Azure Storage and emits a `drift_report.json` comparing source plan vs state plan. Catches `ignore_changes` drift. | Triage drift incidents, after manual Azure changes. | **Terraform-family only.** Rejected for non-Terraform frameworks. |
 
 Tier 1 is the right default. Tier 2/3 may contact the Terraform registry
 for provider and module resolution, and require the runner to have the
@@ -180,13 +183,20 @@ or non_compliant) or an explicit out-of-scope approval, NOT a
 Each layer produces its own SARIF file; the aggregator walks all five
 (and the `ruleIndex` map joins them).
 
-1. **Source scan** (`--framework terraform`, tier 1+)
-   - Static parse of `.tf` files. No init, no plan, no Azure mutation.
-   - Output: `<env>/results_terraform_source.sarif`.
+1. **Source scan** (`--framework terraform` for the shipped pack;
+   other Checkov frameworks are equally supported — see
+   [Mapping Schema → Supported frameworks](MAPPING_SCHEMA.md#supported-frameworks)
+   for the authoritative list, tier 1+)
+   - Static parse of `.tf` files (or the matching source type for
+     the chosen framework). No init, no plan, no provider mutation.
+   - Output: `<env>/results_<framework>_source.sarif`.
 
 2. **Custom policy-as-code** (`--framework terraform` with the
    custom checks in `scanner/checks/`, tier 1+)
-   - Five custom checks: `CKV_AZURE_PCI_001..005`.
+   - Five custom checks: `CKV_AZURE_PCI_001..005`. The PaaC layer
+     currently targets Terraform-family frameworks because the
+     shipped custom checks are Terraform-shaped; non-Terraform
+     packs rely on Checkov's built-in rules instead.
    - Catches patterns the source plan misses (lifecycle ignore_changes,
      default-deny, TLS min, CMK, KV purge).
    - Output: `<env>/results_paac.sarif`.
@@ -391,10 +401,15 @@ Every 90 days:
 5. **Re-run golden env smoke test** — confirm the report output for
    the canonical env is stable.
 6. **Review new Checkov rules** — run
-   `checkov -l 2>&1 | grep '^CKV(_2)?_AZURE_' | sort > /tmp/checkov-snapshot.txt`
-   and diff against the prior quarter's snapshot. Any new rule id
-   needs a row in `pci_mapping.yaml` and a severity entry in
-   `SEVERITY_OVERRIDE` if the resource type is in scope.
+   `checkov -l 2>&1 | grep '^CKV' | sort > /tmp/checkov-snapshot.txt`
+   and diff against the prior quarter's snapshot. The grep is
+   intentionally cloud-agnostic (`^CKV` instead of the old
+   `^CKV(_2)?_AZURE_`); the scanner ships one pack per framework
+   family today, but the snapshot diff must cover every prefix
+   (`CKV_AWS_*`, `CKV_AZURE_*`, `CKV_GCP_*`, `CKV_K8S_*`,
+   `CKV2_*`, etc.). Any new rule id needs a row in the matching
+   mapping pack and a `severity_overrides` entry if the resource
+   type is in scope.
 
 ## Adding a new project to scope
 

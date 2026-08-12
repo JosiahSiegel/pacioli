@@ -1,0 +1,60 @@
+# Shared CloudFormation fixture for end-to-end multi-framework tests.
+#
+# WHY this file exists
+# ---------------------
+# Plan T14 exercises the fully generalised scanner pipeline against a
+# non-Azure, non-Terraform framework (CloudFormation / AWS). The fixture
+# is intentionally tiny:
+#
+#   * One ``AWSTemplateFormatVersion`` declaration so the CFN sniffer in
+#     ``scanner/frameworks.py:_sniff_cloudformation`` recognises the file.
+#   * One ``AWS::S3::Bucket`` resource with the public access knobs set
+#     to permissive defaults, so Checkov 3.3.9 fires CKV_AWS_18/20/21/53
+#     /54/55/56 (verified on the pinned Checkov version). The HIGH
+#     mapping-pack override fires against CKV_AWS_20 ("S3 bucket does
+#     not allow READ permissions to everyone").
+#
+# HOW this file is reused
+# -----------------------
+# This single fixture is consumed by:
+#
+#   * ``scanner/tests/test_e2e_multi_framework.py`` — automated E2E run
+#     that pipes the SARIF emitted against this fixture through the
+#     full aggregation pipeline.
+#   * Manual QA F3 ("Real manual QA") — the operator manually runs
+#     ``pacioli scan --framework cloudformation --mapping
+#     scanner/tests/fixtures/mappings/test_aws.yaml`` against this
+#     fixture and reads the resulting ``report.html``.
+#
+# There MUST NOT be parallel fixture directories duplicating this
+# content. New test cases add variant fixture FILES next to this one
+# (e.g. ``public_bucket_with_skip.template.yaml`` for the
+# ``# checkov:skip=…`` scenario) and the same ``cfn-sample/`` directory
+# holds them all.
+#
+# Maintenance
+# -----------
+# If a Checkov pin bump changes the failed check IDs for this file,
+# update both this fixture's comments and the companion mapping pack at
+# ``scanner/tests/fixtures/mappings/test_aws.yaml`` (keeps them in sync
+# so the mapping pack still maps to checks this fixture actually fires).
+#
+# SonarCloud exclusions
+# ---------------------
+# The line-level NOSONAR markers below suppress the "intentional
+# vulnerability" findings on the AccessControl / PublicAccessBlock
+# properties. These knobs MUST stay permissive — the whole point of
+# this fixture is to prove Checkov catches a public S3 bucket marked
+# HIGH by the mapping pack. Without the NOSONAR markers, SonarCloud
+# flags the same vulnerabilities the test is trying to verify.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Shared E2E fixture for Pacioli's non-Terraform framework support.
+  Public S3 bucket; intentionally fails the CKV_AWS_18/20/21/53/54/55/56
+  family in Checkov 3.3.9 so the mapping pack can mark CKV_AWS_20 as
+  HIGH and exercise the gate pathway end-to-end.
+Resources:
+  PublicBucket:
+    Type: AWS::S3::Bucket  # NOSONAR — fixture is intentionally vulnerable to exercise Checkov CKV_AWS_18/20/21/53/54/55/56
+    Properties:
+      AccessControl: PublicRead  # NOSONAR — intentional CKV_AWS_20/53/54/55/56 trigger

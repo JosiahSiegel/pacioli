@@ -389,3 +389,254 @@ def test_scratch_dir_is_cleaned_up(
 
     leftovers = [p for p in sarif_out_parent.iterdir() if p.name.startswith("pacioli_ckv_")]
     assert leftovers == [], f"scratch dir not cleaned: {leftovers}"
+
+
+# ---------------------------------------------------------------------------
+# Framework-agnostic dispatch (T4 — multi-cloud-framework-generalization)
+# ---------------------------------------------------------------------------
+
+
+def _extract_argv_value(argv: list[str], flag: str) -> str | None:
+    """Return the value following ``flag`` in argv, or ``None`` if absent."""
+    for i, tok in enumerate(argv):
+        if tok == flag and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def test_run_framework_passes_cloudformation_flag(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``run_framework(env_dir, sarif_out, framework='cloudformation')`` must
+    emit ``--framework cloudformation`` in the Checkov argv.
+
+    This is the T4 acceptance criterion: any framework accepted by Checkov
+    (not just the legacy ``terraform``/``terraform_plan``/``secrets`` set)
+    flows through the generic dispatcher with no per-framework argv
+    duplication.
+    """
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    # CloudFormation template — content passes the CFN sniff heuristic.
+    (env_dir / "template.yaml").write_text(
+        "AWSTemplateFormatVersion: '2010-09-09'\n"
+        "Resources:\n"
+        "  Bucket:\n"
+        "    Type: AWS::S3::Bucket\n",
+        encoding="utf-8",
+    )
+
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    rc = CheckovRunner(mode="report").run_framework(
+        env_dir, sarif_out, framework="cloudformation"
+    )
+
+    assert rc == 0
+    assert len(fake_checkov_module.instances) == 1
+    argv = fake_checkov_module.instances[0].argv
+    fw_value = _extract_argv_value(argv, "--framework")
+    assert fw_value == "cloudformation", (
+        f"--framework cloudformation missing; got argv={argv}"
+    )
+
+
+def test_run_framework_omits_external_checks_dir_for_non_terraform(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``--external-checks-dir`` must NOT be added for non-terraform-family.
+
+    The custom PaaC checks under ``scanner/checks/`` subclass
+    Terraform's ``BaseResourceCheck`` — they cannot be applied to
+    CloudFormation, Kubernetes, Dockerfile, etc. The gate is encoded
+    once via :func:`scanner.frameworks.is_terraform_family`.
+    """
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "template.yaml").write_text(
+        "AWSTemplateFormatVersion: '2010-09-09'\n", encoding="utf-8"
+    )
+
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    # Pass a checks_dir that exists on disk so the gate is meaningful.
+    checks_dir = tmp_path / "checks"
+    checks_dir.mkdir()
+    CheckovRunner(mode="report", checks_dir=checks_dir).run_framework(
+        env_dir, sarif_out, framework="cloudformation"
+    )
+
+    argv = fake_checkov_module.instances[0].argv
+    assert "--external-checks-dir" not in argv, (
+        f"--external-checks-dir must be omitted for cloudformation; got argv={argv}"
+    )
+
+
+def test_run_framework_adds_external_checks_dir_for_terraform(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``--external-checks-dir`` IS added for terraform-family frameworks."""
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "main.tf").write_text('resource "null_resource" "x" {}\n', encoding="utf-8")
+
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    checks_dir = tmp_path / "checks"
+    checks_dir.mkdir()
+    CheckovRunner(mode="report", checks_dir=checks_dir).run_framework(
+        env_dir, sarif_out, framework="terraform"
+    )
+
+    argv = fake_checkov_module.instances[0].argv
+    ec_dir = _extract_argv_value(argv, "--external-checks-dir")
+    assert ec_dir is not None, f"--external-checks-dir missing for terraform; got argv={argv}"
+    # The resolved checks_dir should be passed.
+    assert Path(ec_dir).resolve() == checks_dir.resolve()
+
+
+def test_run_paac_delegates_to_run_framework_with_terraform(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``run_paac`` is now a thin delegate — emits ``--framework terraform``."""
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "main.tf").write_text('resource "null_resource" "x" {}\n', encoding="utf-8")
+
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    checks_dir = tmp_path / "checks"
+    checks_dir.mkdir()
+    CheckovRunner(mode="report", checks_dir=checks_dir).run_paac(env_dir, sarif_out)
+
+    argv = fake_checkov_module.instances[0].argv
+    assert _extract_argv_value(argv, "--framework") == "terraform"
+    assert _extract_argv_value(argv, "--external-checks-dir") is not None
+
+
+def test_run_secrets_delegates_to_run_framework_with_secrets(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``run_secrets`` delegates with ``framework='secrets'`` and omits external-checks-dir."""
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "main.tf").write_text('resource "null_resource" "x" {}\n', encoding="utf-8")
+
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    # Even with checks_dir present, secrets must NOT get --external-checks-dir.
+    checks_dir = tmp_path / "checks"
+    checks_dir.mkdir()
+    CheckovRunner(mode="report", checks_dir=checks_dir).run_secrets(env_dir, sarif_out)
+
+    argv = fake_checkov_module.instances[0].argv
+    assert _extract_argv_value(argv, "--framework") == "secrets"
+    assert "--external-checks-dir" not in argv, (
+        f"--external-checks-dir must be omitted for secrets; got argv={argv}"
+    )
+
+
+def test_run_source_delegates_to_run_framework_with_terraform(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``run_source`` delegates with ``framework='terraform'``."""
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "main.tf").write_text('resource "null_resource" "x" {}\n', encoding="utf-8")
+
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    CheckovRunner(mode="report").run_source(env_dir, sarif_out)
+
+    argv = fake_checkov_module.instances[0].argv
+    assert _extract_argv_value(argv, "--framework") == "terraform"
+
+
+def test_run_plan_uses_file_mode_and_terraform_plan_framework(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``run_plan`` emits ``-f <plan.json> --framework terraform_plan``."""
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    plan_json = env_dir / "plan.json"
+    plan_json.write_text('{"format_version": "1.0"}', encoding="utf-8")
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    CheckovRunner(mode="report").run_plan(plan_json, sarif_out)
+
+    argv = fake_checkov_module.instances[0].argv
+    assert _extract_argv_value(argv, "--framework") == "terraform_plan"
+    # File mode, not directory mode.
+    assert _extract_argv_value(argv, "-f") == str(plan_json.resolve())
+    assert _extract_argv_value(argv, "-d") is None
+
+
+def test_run_paac_early_returns_when_checks_dir_missing(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """``run_paac`` must short-circuit (return 0) when checks_dir does not exist.
+
+    Preserves the historical bash guard ``if [[ -d "$PCI_CHECKS_DIR" ]]``.
+    """
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    sarif_out = tmp_path / "out" / "results.sarif"
+    # checks_dir defaults to scanner/checks/ which may or may not exist on
+    # a given test machine — use an explicit non-existent path.
+    missing = tmp_path / "no_such_checks_dir"
+
+    rc = CheckovRunner(mode="report", checks_dir=missing).run_paac(env_dir, sarif_out)
+
+    assert rc == 0
+    assert fake_checkov_module.instances == [], (
+        "Checkov must not be invoked when checks_dir is missing"
+    )
+
+
+def test_init_accepts_frameworks_parameter() -> None:
+    """The new ``frameworks`` constructor param is stored verbatim."""
+    r = CheckovRunner(mode="report", frameworks=["cloudformation", "kubernetes"])
+    assert r.frameworks == ("cloudformation", "kubernetes")
+    # Default is None (auto-detect per call).
+    r2 = CheckovRunner(mode="report")
+    assert r2.frameworks is None
+
+
+def test_detect_frameworks_instance_method_delegates_to_shared_helper(
+    tmp_path: Path,
+) -> None:
+    """``CheckovRunner.detect_frameworks`` is a thin pass-through to
+    :func:`scanner.frameworks.detect_frameworks`."""
+    from scanner.frameworks import detect_frameworks
+
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "main.tf").write_text('resource "null_resource" "x" {}\n', encoding="utf-8")
+
+    runner = CheckovRunner(mode="report")
+    via_runner = runner.detect_frameworks(env_dir)
+    via_helper = detect_frameworks(env_dir)
+    assert via_runner == via_helper
+    assert "terraform" in via_runner
+
+
+def test_run_framework_does_not_validate_framework_name(
+    tmp_path: Path, fake_checkov_module: type[_FakeCheckov]
+) -> None:
+    """Pacioli does NOT validate framework names — Checkov itself does.
+
+    Pass a bogus framework; the runner must hand the argv to the mocked
+    Checkov, which accepts everything (it's a fake). This codifies that
+    the runner is intentionally a thin wrapper.
+    """
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    sarif_out = tmp_path / "out" / "results.sarif"
+
+    rc = CheckovRunner(mode="report").run_framework(
+        env_dir, sarif_out, framework="definitely_not_a_real_framework"
+    )
+
+    assert rc == 0
+    argv = fake_checkov_module.instances[0].argv
+    assert _extract_argv_value(argv, "--framework") == "definitely_not_a_real_framework"

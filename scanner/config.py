@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from scanner.frameworks import scan_mapping_packs
+
 
 # --- constants -----------------------------------------------------------
 
@@ -36,47 +38,51 @@ INTERACTIVE_ENV_VAR: str = "PACIOLI_INTERACTIVE"
 #: Environment variable that overrides the mapping path.
 MAPPING_ENV_VAR: str = "PACIOLI_MAPPING"
 
-#: Operator-facing status string for frameworks not yet bundled with Pacioli.
-#: This literal is rendered directly into the first-run picker menu and is also
-#: interpolated into runtime prompts shown to the user; changing it requires a
-#: corresponding update to the operator-facing docs (CLI_REFERENCE.md,
-#: CONSUMING_GUIDE.md, OPERATOR_GUIDE.md) so treat it as a public contract.
-FRAMEWORK_NOT_SHIPPED_HINT: str = "not yet shipped - provide a custom path"
+
+def _shipped_mapping_dir() -> Path:
+    """Locate the bundled ``mappings/`` directory shipped with the package.
+
+    Resolution order:
+        1. ``PACIOLI_MAPPINGS_DIR`` env var (for development / testing)
+        2. ``<repo_root>/mappings`` relative to this file's location
+        3. ``./mappings`` relative to CWD (fallback for installed wheel layouts)
+    """
+    override = os.environ.get("PACIOLI_MAPPINGS_DIR")
+    if override:
+        return Path(override)
+    here = Path(__file__).resolve().parent.parent
+    candidate = here / "mappings"
+    if candidate.is_dir():
+        return candidate
+    cwd_candidate = Path.cwd() / "mappings"
+    return cwd_candidate
+
+
+def _discover_builtin_frameworks() -> list[dict[str, str]]:
+    """Auto-discover mapping packs shipped under ``mappings/``.
+
+    Wraps :func:`scanner.frameworks.scan_mapping_packs` with the project's
+    shipped-mapping directory lookup (:func:`_shipped_mapping_dir`). The
+    single source of truth for mapping-pack enumeration lives in
+    ``scanner.frameworks``; this helper just provides the dir.
+
+    Returns an empty list when the mappings directory is missing or empty
+    (e.g., a wheel install before ``make sync-mappings`` has run, or a
+    slim build). The first-run picker still offers the "Custom path"
+    option in that case so the operator is not stranded.
+    """
+    mappings_dir = _shipped_mapping_dir()
+    return scan_mapping_packs(mappings_dir)
+
 
 #: Shipped framework choices shown in the first-run picker.
-#: Each entry: (display name, filename in mappings/, "shipped" | "not shipped")
-BUILTIN_FRAMEWORKS: list[dict[str, str]] = [
-    {
-        "key": "pci_dss_4.0.1",
-        "label": "PCI DSS v4.0.1",
-        "filename": "pci_dss_4.0.1.yaml",
-        "status": "shipped",
-    },
-    {
-        "key": "soc2",
-        "label": "SOC 2",
-        "filename": "soc2.yaml",
-        "status": FRAMEWORK_NOT_SHIPPED_HINT,
-    },
-    {
-        "key": "cis_azure",
-        "label": "CIS Azure Benchmark",
-        "filename": "cis_azure.yaml",
-        "status": FRAMEWORK_NOT_SHIPPED_HINT,
-    },
-    {
-        "key": "nist_800_53",
-        "label": "NIST 800-53",
-        "filename": "nist_800_53.yaml",
-        "status": FRAMEWORK_NOT_SHIPPED_HINT,
-    },
-    {
-        "key": "iso_27001",
-        "label": "ISO 27001",
-        "filename": "iso_27001.yaml",
-        "status": FRAMEWORK_NOT_SHIPPED_HINT,
-    },
-]
+#: Each entry: {"key", "label", "filename", "status"}.
+#:
+#: Populated at import time by :func:`_discover_builtin_frameworks` from the
+#: ``mappings/*.yaml`` files shipped with the package. Adding a new mapping
+#: pack is purely a content change — drop a YAML into ``mappings/`` and the
+#: picker picks it up on the next run. No code edit required.
+BUILTIN_FRAMEWORKS: list[dict[str, str]] = _discover_builtin_frameworks()
 
 #: Sentinel for the "custom path" option in the picker menu.
 CUSTOM_PATH_KEY: str = "custom"
@@ -178,25 +184,6 @@ def save_config(config: PacioliConfig, config_path: Optional[Path] = None) -> No
 
 # --- first-run picker ----------------------------------------------------
 
-def _shipped_mapping_dir() -> Path:
-    """Locate the bundled ``mappings/`` directory shipped with the package.
-
-    Resolution order:
-        1. ``PACIOLI_MAPPINGS_DIR`` env var (for development / testing)
-        2. ``<repo_root>/mappings`` relative to this file's location
-        3. ``./mappings`` relative to CWD (fallback for installed wheel layouts)
-    """
-    override = os.environ.get("PACIOLI_MAPPINGS_DIR")
-    if override:
-        return Path(override)
-    here = Path(__file__).resolve().parent.parent
-    candidate = here / "mappings"
-    if candidate.is_dir():
-        return candidate
-    cwd_candidate = Path.cwd() / "mappings"
-    return cwd_candidate
-
-
 def _format_picker_menu() -> str:
     """Build the numbered picker text shown to the user."""
     lines = [
@@ -204,8 +191,7 @@ def _format_picker_menu() -> str:
         "",
     ]
     for idx, fw in enumerate(BUILTIN_FRAMEWORKS, start=1):
-        suffix = "" if fw["status"] == "shipped" else f"  [{fw['status']}]"
-        lines.append(f"  {idx}. {fw['label']}{suffix}")
+        lines.append(f"  {idx}. {fw['label']}")
     custom_idx = len(BUILTIN_FRAMEWORKS) + 1
     lines.append(f"  {custom_idx}. Custom path")
     lines.append("")
@@ -231,9 +217,9 @@ def _prompt_for_custom_path() -> Path:
 def first_run_picker(config_path: Optional[Path] = None) -> Path:
     """Run the interactive first-run mapping picker.
 
-    Presents a numbered menu of the 5 built-in framework choices plus a
-    "Custom path" option. The chosen path is persisted to ``~/.pacioli/config``
-    before returning.
+    Presents a numbered menu of the auto-discovered mapping packs shipped
+    under ``mappings/`` plus a "Custom path" option. The chosen path is
+    persisted to ``~/.pacioli/config`` before returning.
 
     This function MUST only be called when stdin is a TTY (or when
     ``PACIOLI_INTERACTIVE=1`` is set). It blocks on ``input()`` and will
@@ -257,11 +243,11 @@ def first_run_picker(config_path: Optional[Path] = None) -> Path:
         choice = int(choice_raw)
         if 1 <= choice <= len(BUILTIN_FRAMEWORKS):
             fw = BUILTIN_FRAMEWORKS[choice - 1]
-            if fw["status"] == "shipped":
-                return _shipped_mapping_dir() / fw["filename"]
-            # Not yet shipped: still let the user provide a path
-            print(f"  {fw['label']} pack is {fw['status']}.")
-            return _prompt_for_custom_path()
+            # All auto-discovered packs are "shipped" — the picker used to
+            # show entries with status="not yet shipped" that redirected to
+            # the custom-path prompt. With auto-discovery, any pack the
+            # operator sees is genuinely present in mappings/.
+            return _shipped_mapping_dir() / fw["filename"]
         if choice == custom_idx:
             return _prompt_for_custom_path()
         return None
@@ -357,7 +343,6 @@ __all__ = [
     "BUILTIN_FRAMEWORKS",
     "CUSTOM_PATH_KEY",
     "DEFAULT_CONFIG_PATH",
-    "FRAMEWORK_NOT_SHIPPED_HINT",
     "INTERACTIVE_ENV_VAR",
     "MAPPING_ENV_VAR",
     "NoMappingConfigError",

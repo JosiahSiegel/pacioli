@@ -5,12 +5,16 @@ message: >-
   CFF standard (https://citation-file-format.github.io/).
 title: Pacioli
 abstract: >-
-  A read-only compliance scanner for Azure Terraform code. Built on
-  Checkov, but aggregates per-environment SARIF into a single coverage
-  matrix mapped to a chosen framework (PCI DSS v4.0.1, SOC 2, CIS
-  Azure, NIST 800-53, ISO 27001). Emits a self-contained HTML report
-  with full per-requirement drill-down, in-line azurerm 4.x remediation
-  HCL, severity breakdowns, and a CI gate.
+  A read-only compliance scanner for any Checkov-supported IaC
+  framework (Terraform, CloudFormation, Kubernetes, Helm, Bicep, ARM,
+  Dockerfile, OpenAPI, …). Built on Checkov, but aggregates
+  per-environment SARIF into a single coverage matrix mapped to a
+  chosen framework (PCI DSS v4.0.1 by default; SOC 2, CIS, NIST
+  800-53, ISO 27001, and any custom framework via mapping packs).
+  Emits a self-contained HTML report with full per-requirement
+  drill-down, in-line remediation HCL for Terraform-family packs
+  (the shipped PCI/Azure pack ships azurerm 4.x fixes), severity
+  breakdowns, and a CI gate.
 type: software
 license: Apache-2.0
 # repository-code: filled in at first public release; see SUPPORT.md

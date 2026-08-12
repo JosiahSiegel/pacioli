@@ -1,0 +1,92 @@
+# Minimal test mapping pack for Pacioli's end-to-end multi-framework
+# coverage (Plan TODO 14). NOT a shipped pack — it is a fixed
+# fixture-only artefact pinned to the CKV_AWS_* rules that the
+# shared CloudFormation fixture under
+# ``scanner/tests/fixtures/cfn-sample/public_bucket.template.yaml``
+# actually fires on Checkov 3.3.9 (verified at plan time on the pinned
+# pin). The mapping pack defines three in-scope requirements against
+# three Checkov rule families:
+#
+#   * S3-PUBLIC-READ   -> CKV_AWS_20   (public read on bucket)
+#   * S3-PBA           -> CKV_AWS_53/54/55/56 (block-public-acl family)
+#   * S3-HYGIENE       -> CKV_AWS_18/19/21  (logging/encryption/versioning)
+#
+# `severity_overrides` pins CKV_AWS_20 to HIGH (the test's gate pathway
+# depends on a HIGH finding being visible). All other rules fall
+# through to the resolver's DEFAULT_SEVERITY, exercising the
+# severity-resolution precedence documented in docs/MAPPING_SCHEMA.md.
+#
+# Schema parity with the shipped PCI pack:
+#   * ``version: 2`` (matches docs/MAPPING_SCHEMA.md top-level schema).
+#   * ``verified_against`` is REQUIRED by the schema; we record the
+#     date this fixture was last cross-checked against Checkov 3.3.9 so
+#     the auditor can see when this pack's anchor list was last
+#     re-validated. Bump it whenever the CFN fixture's failing check
+#     set shifts.
+#   * ``framework_name`` and ``framework_version`` drive the HTML
+#     report's title and subtitle (verify-render assertion in
+#     test_e2e_multi_framework.py::test_html_report_uses_pack_framework_name).
+#   * Empty ``out_of_scope_requirements`` (required key per the schema)
+#     keeps the validator path green without populating demo entries.
+#   * No ``note_tokens`` (no symbolic placeholders in the pack so the
+#     NOTE_TOKENS coverage-gaps path is not exercised here; that's
+#     covered in test_aggregate_pci.py for the PCI pack).
+
+version: 2
+verified_against: "2026-08-12"
+framework_name: "AWS S3 Bucket Hardening (E2E test pack)"
+framework_version: "0.1.0"
+doc_anchor: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/security-best-practices.html"
+
+# Per-pack severity policy. The mapping pack is the source of truth
+# (see docs/MAPPING_SCHEMA.md#severity-overrides). A new pack that
+# omits this top-level key falls through to DEFAULT_SEVERITY=``MEDIUM``
+# for every finding.
+#
+# CKV_AWS_20 is the HIGH finding that the gate pathway exercises. All
+# other rules in this pack (CKV_AWS_18/19/21/53-56) fall through to
+# ``MEDIUM`` so the test's HTML report demonstrates BOTH a HIGH row
+# (which fires the gate) and a MEDIUM row (which doesn't), mirroring
+# the behaviour the shipped PCI pack produces.
+severity_overrides:
+  CKV_AWS_20: HIGH      # S3 bucket allows READ to everyone — public data risk
+  CKV_AWS_18: MEDIUM    # access logging missing — operational telemetry
+  CKV_AWS_19: MEDIUM    # server-side encryption — defaults; not HIGH
+  CKV_AWS_21: MEDIUM    # versioning — replace-on-failure / audit
+  CKV_AWS_53: MEDIUM    # block public ACLs
+  CKV_AWS_54: MEDIUM    # block public policy
+  CKV_AWS_55: MEDIUM    # ignore public ACLs
+  CKV_AWS_56: MEDIUM    # RestrictPublicBuckets
+
+requirements:
+  - id: S3-PUBLIC-READ
+    title: S3 buckets must not allow READ access to the public
+    checks:
+      - CKV_AWS_20
+    approach: defined
+    note: Public-read on a bucket is the highest-risk misconfiguration in this pack.
+
+  - id: S3-PBA
+    title: S3 buckets must enable the four Block Public Access toggles where appropriate
+    checks:
+      - CKV_AWS_53
+      - CKV_AWS_54
+      - CKV_AWS_55
+      - CKV_AWS_56
+    approach: defined
+    note: |
+      Four sibling checks cover the four Block Public Access toggles.
+      Intentionally-configured static-site buckets will fail them; the
+      operator is expected to suppress with a justified ``# checkov:skip``
+      comment at the resource declaration.
+
+  - id: S3-HYGIENE
+    title: S3 buckets must enable access logging, server-side encryption, and versioning
+    checks:
+      - CKV_AWS_18
+      - CKV_AWS_19
+      - CKV_AWS_21
+    approach: defined
+    note: Hygiene requirements for change-tracking and encryption-at-rest.
+
+out_of_scope_requirements: []

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pacioli"
 version = "0.2.2"
-description = "Read-only compliance scanner for Azure Terraform. PCI DSS v4.0.1, SOC 2, CIS Azure, NIST 800-53, ISO 27001."
+description = "Read-only compliance scanner for any IaC framework. Powered by Checkov. Supports PCI DSS, SOC 2, CIS, NIST 800-53, ISO 27001 and any framework via mapping packs."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [{name = "Pacioli Contributors"}]
@@ -23,8 +23,10 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 keywords = [
-    "compliance", "pci-dss", "soc2", "cis-azure", "nist-800-53",
+    "compliance", "pci-dss", "soc2", "cis", "nist-800-53",
     "checkov", "terraform", "azure", "policy-as-code", "security", "iac",
+    "cloudformation", "kubernetes", "helm", "bicep", "arm",
+    "dockerfile", "openapi", "iso-27001",
 ]
 dependencies = [
     "pyyaml>=6.0,<7.0",

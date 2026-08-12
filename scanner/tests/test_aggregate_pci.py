@@ -17,16 +17,21 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scanner.aggregate import load_pci_mapping, load_pci_baseline, main as aggregate_main  # noqa: E402  (import after sys.path.insert)
+from scanner.aggregate import (  # noqa: E402  (import after sys.path.insert)
+    load_baseline,
+    load_mapping,
+    main as aggregate_main,
+    resolve_severity,
+)
 
 
-def test_load_pci_mapping_parses_top_level_keys():
+def test_load_mapping_parses_top_level_keys():
     """The real pci_mapping.yaml must load with the expected top-level keys."""
     # Use the file shipped with the repo.
     mapping_path = Path(__file__).resolve().parents[3] / "pci_mapping.yaml"
     if not mapping_path.exists():
         pytest.skip(f"{mapping_path} not present (CI may not have the full repo)")
-    mapping = load_pci_mapping(mapping_path)
+    mapping = load_mapping(mapping_path)
     assert isinstance(mapping, dict)
     # The mapping is {check_id: [req_ids, ...]} — inverted for fast lookup.
     # Should have at least one check mapped
@@ -40,18 +45,18 @@ def test_load_pci_mapping_parses_top_level_keys():
         assert all(any(ch.isdigit() for ch in r) for r in req_ids)
 
 
-def test_load_pci_mapping_unknown_path(tmp_path):
+def test_load_mapping_unknown_path(tmp_path):
     """Loading a nonexistent file returns an empty dict (degraded mode)."""
-    mapping = load_pci_mapping(tmp_path / "nonexistent.yaml")
+    mapping = load_mapping(tmp_path / "nonexistent.yaml")
     assert mapping == {}
 
 
-def test_load_pci_baseline_returns_list():
+def test_load_baseline_returns_list():
     """Baseline file loads as a list of dicts."""
     baseline_path = Path(__file__).resolve().parents[3] / "pci_baseline.yaml"
     if not baseline_path.exists():
         pytest.skip(f"{baseline_path} not present")
-    baseline = load_pci_baseline(baseline_path)
+    baseline = load_baseline(baseline_path)
     assert isinstance(baseline, list)
     # Empty file or all entries may be stub; assert type only
     for entry in baseline:
@@ -214,7 +219,7 @@ def test_aggregate_main_falls_back_to_install_bundled_mapping(
 
     # Aggregate must succeed; the install-bundled fallback path was
     # the one that located the mapping. report.html is the visible
-    # signal that the full pipeline (load_pci_mapping + walk_run_dir
+    # signal that the full pipeline (load_mapping + walk_run_dir
     # + load_findings + HTML render) completed.
     assert rc == 0, (
         f"aggregate.main() returned rc={rc}; "
@@ -290,4 +295,118 @@ def test_aggregate_main_does_not_silently_overwrite_explicit_mapping(
     assert "install-bundled fallback" not in captured.out, (
         f"install-bundled fallback fired despite an explicit --mapping "
         f"argument; stdout={captured.out!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Severity resolution (resolve_severity + severity_overrides fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_severity_falls_back_when_pack_has_no_overrides() -> None:
+    """A mapping pack without ``severity_overrides`` still resolves cleanly.
+
+    Contract for the multi-cloud generalization (T2): brand-new packs
+    (SOC 2, CIS, NIST, …) can be authored WITHOUT declaring a
+    ``severity_overrides`` table at the top level. ``resolve_severity``
+    must not raise, must not return ``None``, and must keep the
+    pack's findings gated consistently.
+
+    Two assertions:
+
+    1. **Pack-local lookup** — when the supplied pack declares
+       ``severity_overrides`` and the lookup MISSES, the function
+       returns ``DEFAULT_SEVERITY`` (``MEDIUM``). It does NOT reach
+       into the install-bundled PCI pack and pull in PCI-flavored
+       overrides (which would be a framework-mismatch bug).
+    2. **Pack-absent fallback** — when the supplied pack OMITS the
+       ``severity_overrides`` key entirely, the function still
+       returns ``MEDIUM`` for unknown rules (no crash, no empty
+       return). This is the load-bearing case for SOC 2 / CIS packs
+       that ship before anyone authors overrides.
+    """
+    # Case 1: pack declares severity_overrides but doesn't list our check.
+    pack_with_overrides = {
+        "framework_name": "SOC 2",
+        "framework_version": "2017",
+        "requirements": [],
+        "out_of_scope_requirements": [],
+        "severity_overrides": {
+            "SOME_OTHER_CHECK": "CRITICAL",
+        },
+    }
+    sev = resolve_severity("CKV_AZURE_44", pack_with_overrides)
+    assert sev == "MEDIUM", (
+        f"pack-local miss should return DEFAULT_SEVERITY (MEDIUM); got {sev!r}"
+    )
+
+    # Case 2: pack omits severity_overrides entirely.
+    pack_without_overrides = {
+        "framework_name": "CIS Azure Benchmark",
+        "framework_version": "2.0",
+        "requirements": [],
+        "out_of_scope_requirements": [],
+        # NO severity_overrides key at all.
+    }
+    sev = resolve_severity("CKV_AZURE_44", pack_without_overrides)
+    assert sev == "MEDIUM", (
+        f"pack without severity_overrides should still resolve cleanly "
+        f"via DEFAULT_SEVERITY; got {sev!r}"
+    )
+
+    # Case 3: pack lists an override that DOES match — must be honored.
+    sev_override = resolve_severity(
+        "CUSTOM_FINDING",
+        {"severity_overrides": {"CUSTOM_FINDING": "high"}},  # lowercase
+    )
+    assert sev_override == "HIGH", (
+        f"pack-local override should be upper-cased and honored; got {sev_override!r}"
+    )
+
+    # Case 4: pack-empty dict {} (truthy=False) should fall through.
+    sev_empty_pack = resolve_severity("CKV_AZURE_44", {"severity_overrides": {}})
+    assert sev_empty_pack == "MEDIUM", (
+        f"empty severity_overrides dict should fall through to DEFAULT_SEVERITY; "
+        f"got {sev_empty_pack!r}"
+    )
+
+
+def test_resolve_severity_rule_property_takes_precedence() -> None:
+    """SARIF rule.properties.severity wins over mapping-pack override.
+
+    Precedence is documented in docs/MAPPING_SCHEMA.md (Resolution
+    precedence, item 1): when a SARIF producer emits
+    ``rule.properties.severity``, that value wins over the
+    mapping-pack override table. This test pins that contract so a
+    future refactor cannot silently flip the order.
+    """
+    pack = {"severity_overrides": {"CKV_AZURE_44": "HIGH"}}
+    # SARIF says MEDIUM, pack says HIGH → MEDIUM wins.
+    assert resolve_severity("CKV_AZURE_44", pack, rule_severity="MEDIUM") == "MEDIUM"
+    # SARIF severity is lower-cased on input but upper-cased on output.
+    assert resolve_severity("CKV_AZURE_44", pack, rule_severity="low") == "LOW"
+    # Empty/None rule severity falls through to the pack override.
+    assert resolve_severity("CKV_AZURE_44", pack, rule_severity=None) == "HIGH"
+    assert resolve_severity("CKV_AZURE_44", pack, rule_severity="") == "HIGH"
+
+
+def test_resolve_severity_bundled_pci_pack_is_reachable() -> None:
+    """The install-bundled PCI pack ships the full 27-rule override table.
+
+    Regression guard for the install-bundled mirror
+    (scanner/mappings/pci_dss_4.0.1.yaml). If someone forgets to
+    rsync that file when editing mappings/pci_dss_4.0.1.yaml at
+    the repo root, ``resolve_severity`` returns ``MEDIUM`` for
+    every PCI check — which silently downgrades HIGH findings
+    and breaks ``pacioli gate``. This test catches that drift.
+    """
+    sev = resolve_severity("CKV_AZURE_44")  # no pack → bundled fallback
+    assert sev == "HIGH", (
+        f"install-bundled PCI pack must declare CKV_AZURE_44=HIGH; "
+        f"got {sev!r}. Did you forget to sync scanner/mappings/pci_dss_4.0.1.yaml "
+        f"after editing mappings/pci_dss_4.0.1.yaml at the repo root?"
+    )
+    # Spot-check a MEDIUM entry too.
+    assert resolve_severity("CKV_AZURE_18") == "MEDIUM", (
+        "CKV_AZURE_18 should be MEDIUM in the install-bundled PCI pack"
     )

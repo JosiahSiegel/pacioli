@@ -20,16 +20,47 @@ from pathlib import Path
 
 import pytest
 
-import paths as paths_mod
-from paths import (
-    PathResolutionError,
-    TargetRepo,
-    resolve_baseline,
-    resolve_mapping,
-    resolve_paths,
-    resolve_run_dir,
-    resolve_target_repo,
-)
+# Mirror the pattern in scanner/tests/test_aggregate_html.py:38-51: insert
+# the repo root into sys.path so ``import scanner.paths`` resolves
+# correctly when this file is invoked from a non-default cwd (e.g. inside
+# an editor's test runner, or when the wheel install puts the package on
+# sys.path under a different name). The legacy flat-system import
+# (``import paths as paths_mod``) is kept as a fallback so the test
+# itself runs in either layout.
+import sys
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT_STR = str(_REPO_ROOT)
+if _REPO_ROOT_STR not in sys.path:
+    sys.path.insert(0, _REPO_ROOT_STR)
+
+try:
+    # Preferred: import via the scanner package (works with both
+    # editable install and wheel install).
+    from scanner.paths import (
+        PathResolutionError,
+        TargetRepo,
+        resolve_baseline,
+        resolve_mapping,
+        resolve_paths,
+        resolve_run_dir,
+        resolve_target_repo,
+    )
+    import scanner.paths as paths_mod
+except ModuleNotFoundError:
+    # Fallback: legacy flat-system import (works only when this file is
+    # run with PYTHONPATH=scanner, e.g. via ``make test`` from the repo
+    # root in an editable install).
+    import paths as paths_mod  # type: ignore[no-redef]
+    from paths import (  # type: ignore[no-redef]
+        PathResolutionError,
+        TargetRepo,
+        resolve_baseline,
+        resolve_mapping,
+        resolve_paths,
+        resolve_run_dir,
+        resolve_target_repo,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -617,3 +648,101 @@ def test_install_bundled_mapping_is_shipped_via_importlib_resources() -> None:
         "check [tool.setuptools.package-data] in pyproject.toml "
         "(requires 'mappings/*.yaml' under the 'scanner' entry)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth: mappings/ (repo root) is canonical,
+# scanner/mappings/ is a build-time mirror.
+# ---------------------------------------------------------------------------
+
+
+def _repo_root() -> Path:
+    """Path to the repo root (parent of both ``mappings/`` and ``scanner/``).
+
+    ``scanner/tests/test_paths.py`` is two directories below the repo
+    root, so ``parents[2]`` is the repo root regardless of where pytest
+    is invoked from.
+    """
+    return Path(__file__).resolve().parents[2]
+
+
+def test_mapping_pack_single_source_of_truth() -> None:
+    """Assert that every YAML in ``scanner/mappings/`` is byte-identical to
+    its counterpart under ``mappings/`` at the repo root.
+
+    ``mappings/`` is the single source of truth. ``scanner/mappings/``
+    is a build-time mirror produced by ``scripts/sync_mappings.py``
+    (target ``make sync-mappings``) so the wheel install can ship the
+    pack inside the ``scanner`` package. The mirror is git-ignored.
+
+    This test catches two regression classes:
+
+    1. **Drift** — someone edits ``mappings/<name>.yaml`` at the repo
+       root but forgets to run ``make sync-mappings`` before the wheel
+       is built. The runtime fallback would silently ship the stale
+       pack. This test fires before ``pip install`` ever runs.
+    2. **Orphan files** — a YAML exists under ``scanner/mappings/``
+       that has no source in ``mappings/``. Either the source was
+       renamed/deleted without a sync, or someone hand-edited the
+       mirror (which is git-ignored precisely to prevent this).
+
+    The test runs from the repo's checkout (not from the install), so
+    it exercises the contract CI/pre-commit must enforce. For the
+    install-time check (does the wheel still ship the mapping?), see
+    ``test_install_bundled_mapping_is_shipped_via_importlib_resources``.
+    """
+    repo_root = _repo_root()
+    source_dir = repo_root / "mappings"
+    mirror_dir = repo_root / "scanner" / "mappings"
+
+    # The source directory MUST exist — if it doesn't, the test runner
+    # is not in a real checkout (e.g. installed wheel), and this test
+    # is not applicable. Skip cleanly in that case.
+    if not source_dir.is_dir():
+        pytest.skip(
+            f"repo-root mappings/ not found at {source_dir}; "
+            "this test only runs from a source checkout"
+        )
+
+    # 1. Every YAML in scanner/mappings/ MUST be byte-identical to
+    #    its counterpart under mappings/.
+    if mirror_dir.is_dir():
+        # Non-YAML files in the mirror (README.md, .gitkeep) are
+        # documentation / VCS bookkeeping, not mapping packs, so they
+        # are skipped — they are not data and have no source counterpart.
+        for mirror_file in mirror_dir.iterdir():
+            if not mirror_file.is_file():
+                continue
+            if mirror_file.suffix.lower() not in {".yaml", ".yml"}:
+                continue
+            source_file = source_dir / mirror_file.name
+            assert source_file.is_file(), (
+                f"orphan mapping pack in scanner/mappings/: {mirror_file.name} "
+                f"has no source under {source_dir}. Either re-add the source "
+                f"file, or run `make sync-mappings` to drop the stale mirror."
+            )
+            assert mirror_file.read_bytes() == source_file.read_bytes(), (
+                f"mapping pack {mirror_file.name} has drifted between "
+                f"{source_file} (source of truth) and {mirror_file} "
+                f"(build-time mirror). Run `make sync-mappings` to repair."
+            )
+
+    # 2. Every YAML under mappings/ MUST be present (and identical) in
+    #    scanner/mappings/. This catches the inverse drift: a developer
+    #    added a new mapping pack at the repo root but forgot to sync.
+    if mirror_dir.is_dir():
+        for source_file in source_dir.iterdir():
+            if not source_file.is_file():
+                continue
+            if source_file.suffix.lower() not in {".yaml", ".yml"}:
+                continue
+            mirror_file = mirror_dir / source_file.name
+            assert mirror_file.is_file(), (
+                f"source mapping pack {source_file.name} has no mirror "
+                f"under {mirror_dir}. Run `make sync-mappings` to create it."
+            )
+            assert mirror_file.read_bytes() == source_file.read_bytes(), (
+                f"mapping pack {source_file.name} has drifted: "
+                f"{source_file} != {mirror_file}. "
+                f"Run `make sync-mappings` to repair."
+            )

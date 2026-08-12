@@ -1,12 +1,15 @@
 # Pacioli — Consuming Guide
 
-> **First-time setup for adding Pacioli to a Terraform repo.** If you
+> **First-time setup for adding Pacioli to an IaC repo.** If you
 > already have a working `pci_scope.yaml` and `pci_baseline.yaml` and
 > are just running scans, you want [Operator Guide](OPERATOR_GUIDE.md)
 > instead.
 
 This guide walks through, end to end, what you need to do to start
-scanning your Terraform code with Pacioli.
+scanning your IaC code with Pacioli. The worked example uses Terraform
++ Azure (the primary shipped mapping pack, `pci_dss_4.0.1.yaml`),
+but the same flow applies to every framework listed in
+[Mapping Schema → Supported frameworks](MAPPING_SCHEMA.md#supported-frameworks).
 
 ## Quick start
 

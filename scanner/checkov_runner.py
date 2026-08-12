@@ -2,15 +2,21 @@
 
 Ports the four Checkov invocations from ``scanner/scan.sh`` (lines
 461-597) to the Checkov Python API, so the standalone CLI can run the
-scan without shelling out:
+scan without shelling out. The runner is framework-agnostic: it accepts
+any Checkov framework name (terraform, terraform_plan, secrets,
+cloudformation, kubernetes, dockerfile, arm, bicep, helm, etc.) and
+only special-cases terraform-family frameworks for ``--external-checks-dir``
+(custom PaaC checks subclass Terraform's ``BaseResourceCheck``).
+
+Public passes — all thin delegates over :meth:`run_framework`:
 
   * ``run_paac``   — ``--framework terraform`` + ``--external-checks-dir``
                      (the custom policy-as-code checks under
                      ``scanner/checks/``).
-  * ``run_source`` — ``--framework terraform`` built-in source scan.
-  * ``run_plan``   — ``--framework terraform_plan`` over a
+  * ``run_source`` — built-in source scan over the source tree.
+  * ``run_plan``   — ``terraform_plan`` framework over a
                      ``terraform show -json`` document.
-  * ``run_secrets``— ``--framework secrets`` over the same source tree.
+  * ``run_secrets``— ``secrets`` framework over the same source tree.
 
 Each method returns Checkov's exit code and writes SARIF to the caller-
 supplied path, with ``helpUri`` fields rewritten to canonical GitHub
@@ -54,6 +60,8 @@ from pathlib import Path
 # Allow both `python -m scanner.checkov_runner` and direct execution.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scanner.frameworks import detect_frameworks as _detect_frameworks  # noqa: E402
+from scanner.frameworks import is_terraform_family  # noqa: E402
 from scanner.url_rewrite import rewrite_sarif_file  # noqa: E402
 
 # Checkov always names its SARIF artifact this, inside --output-file-path.
@@ -84,11 +92,33 @@ class CheckovRunner:
             the bash scanner's MODE semantics.
         checks_dir: Directory of custom checks for :meth:`run_paac`.
             Defaults to ``scanner/checks/``.
+        frameworks: Optional iterable of framework names to expose via
+            :attr:`frameworks`. When ``None`` (the default), the set is
+            auto-detected per call to :meth:`run_framework` via
+            :func:`scanner.frameworks.detect_frameworks`. The constructor
+            itself does NOT run detection — the parameter is a hint for
+            callers that want to know the resolved set without running
+            a scan. The single source of truth for framework identity is
+            :mod:`scanner.frameworks`; this runner does not maintain a
+            parallel list.
     """
 
-    def __init__(self, mode: str = "report", checks_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        mode: str = "report",
+        checks_dir: Path | None = None,
+        frameworks: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         self.mode = mode
         self.checks_dir = Path(checks_dir) if checks_dir else DEFAULT_CHECKS_DIR
+        # ``frameworks`` is stored verbatim when supplied — the caller may
+        # use it to short-circuit or sanity-check. When ``None``, each
+        # ``run_framework`` call performs its own detection; we do NOT
+        # auto-detect at __init__ time because the env_dir differs per
+        # call.
+        self.frameworks: tuple[str, ...] | None = (
+            tuple(frameworks) if frameworks is not None else None
+        )
 
     # -- internals --------------------------------------------------
 
@@ -106,6 +136,35 @@ class CheckovRunner:
             if (env_dir / name).exists():
                 flags += ["--skip-path", name]
         return flags
+
+    def _build_framework_argv(
+        self,
+        env_dir: Path,
+        framework: str,
+        input_arg: tuple[str, str],
+    ) -> list[str]:
+        """Build the per-framework argv tail (before ``--output``/fail flags).
+
+        Shared between :meth:`run_framework` (directory mode) and
+        :meth:`run_plan` (file mode). Adding ``--external-checks-dir``
+        is gated on :func:`scanner.frameworks.is_terraform_family` —
+        the custom PaaC checks subclass Terraform's BaseResourceCheck.
+
+        Args:
+            env_dir: Directory used to discover aztfexport files.
+            framework: Checkov framework name (``--framework <value>``).
+            input_arg: ``("-d", "<dir>")`` for directory mode or
+                ``("-f", "<file>")`` for file mode (terraform_plan).
+
+        Returns:
+            argv tail list — does NOT include ``--output``/``--output-file-path``
+            or the fail-mode flags; those are appended by :meth:`_run`.
+        """
+        argv = [input_arg[0], input_arg[1], "--framework", framework]
+        if is_terraform_family(framework) and self.checks_dir.is_dir():
+            argv += ["--external-checks-dir", str(self.checks_dir.resolve())]
+        argv += self._skip_path_flags(env_dir)
+        return argv
 
     def _run(self, env_dir: Path, args: list[str], sarif_out: Path) -> int:
         """Invoke Checkov from inside ``env_dir`` and place SARIF at ``sarif_out``.
@@ -163,35 +222,83 @@ class CheckovRunner:
 
     # -- public passes ----------------------------------------------
 
+    def run_framework(
+        self,
+        env_dir: Path,
+        sarif_out: Path,
+        framework: str,
+    ) -> int:
+        """Single generic Checkov pass for any supported framework.
+
+        Builds the argv with ``--framework <framework>`` and delegates
+        to :meth:`_run`. Adds ``--external-checks-dir`` only when the
+        framework is terraform-family — the custom PaaC checks subclass
+        :class:`checkov.terraform.checks.resource.azure.BaseResourceCheck`
+        (and friends), so they apply only to terraform/terraform_plan.
+
+        Args:
+            env_dir: Directory to scan (``-d .``). The CWD chdir to this
+                path (Windows relpath workaround) happens inside
+                :meth:`_run`.
+            sarif_out: Final destination for the SARIF artifact.
+            framework: Checkov framework name. Any value accepted by
+                ``--framework`` is allowed; Pacioli does NOT validate
+                the name — Checkov itself raises on unknown values.
+
+        Returns:
+            Checkov's exit code (``0`` on a clean run).
+        """
+        env_dir = Path(env_dir)
+        args = self._build_framework_argv(env_dir, framework, ("-d", "."))
+        return self._run(env_dir, args, sarif_out)
+
     def run_paac(self, env_dir: Path, sarif_out: Path) -> int:
         """Custom policy-as-code pass over the ``.tf`` source.
 
+        Thin delegate over :meth:`run_framework` with ``framework="terraform"``.
         Mirrors scan.sh step 1: ``--framework terraform`` plus
         ``--external-checks-dir <checks_dir>``. If the checks directory
         does not exist the pass is skipped and ``0`` is returned, which
         matches the bash guard ``if [[ -d "$PCI_CHECKS_DIR" ]]``.
         """
-        env_dir = Path(env_dir)
+        # Preserve the historical "skip when checks dir absent" early
+        # return — keeps run_paac's contract identical to the bash scanner.
         if not self.checks_dir.is_dir():
             return 0
-        args = [
-            "-d", ".",
-            "--framework", "terraform",
-            "--external-checks-dir", str(self.checks_dir.resolve()),
-        ] + self._skip_path_flags(env_dir)
-        return self._run(env_dir, args, sarif_out)
+        return self.run_framework(env_dir, sarif_out, framework="terraform")
 
-    def run_source(self, env_dir: Path, sarif_out: Path) -> int:
-        """Built-in ``terraform`` framework pass over the ``.tf`` source.
+    def run_source(
+        self,
+        env_dir: Path,
+        sarif_out: Path,
+        framework: str = "terraform",
+    ) -> int:
+        """Built-in ``<framework>`` source pass over the env tree.
 
-        Mirrors scan.sh step 2 — the deepest source-only layer.
+        Thin delegate over :meth:`run_framework`. Mirrors scan.sh step 2
+        — the deepest source-only layer.
+
+        .. note::
+
+            ``framework`` defaults to ``"terraform"`` for backward
+            compatibility — the prior hard-coded literal. Callers
+            (notably :meth:`scanner.orchestrator.Orchestrator._emit_source`)
+            now pass through the operator-supplied ``--framework`` flag
+            so a non-Terraform stack (``cloudformation``, ``kubernetes``,
+            ``dockerfile``, etc.) actually exercises the corresponding
+            Checkov framework instead of scanning Terraform-shaped
+            files that may not be present (yielding 0 findings and
+            bogus terraform remediation blocks).
+
+        Args:
+            env_dir: Directory to scan (``-d .``). The CWD chdir to this
+                path (Windows relpath workaround) happens inside
+                :meth:`_run`.
+            sarif_out: Final destination for the SARIF artifact.
+            framework: Checkov framework name. Defaults to
+                ``"terraform"`` for backward compatibility.
         """
-        env_dir = Path(env_dir)
-        args = [
-            "-d", ".",
-            "--framework", "terraform",
-        ] + self._skip_path_flags(env_dir)
-        return self._run(env_dir, args, sarif_out)
+        return self.run_framework(env_dir, sarif_out, framework=framework)
 
     def run_plan(
         self,
@@ -201,7 +308,9 @@ class CheckovRunner:
     ) -> int:
         """``terraform_plan`` framework pass over a plan JSON document.
 
-        Mirrors scan.sh step 3.
+        Builds its argv via the shared :meth:`_build_framework_argv`
+        helper, which encodes the ``--external-checks-dir`` gate in one
+        place.
 
         Args:
             plan_json: A ``terraform show -json`` output file.
@@ -211,27 +320,31 @@ class CheckovRunner:
         """
         plan_json = Path(plan_json).resolve()
         run_dir = Path(env_dir) if env_dir is not None else plan_json.parent
-        args = [
-            "-f", str(plan_json),
-            "--framework", "terraform_plan",
-        ] + self._skip_path_flags(Path(run_dir))
-        if self.checks_dir.is_dir():
-            args += ["--external-checks-dir", str(self.checks_dir.resolve())]
+        args = self._build_framework_argv(
+            Path(run_dir), "terraform_plan", ("-f", str(plan_json))
+        )
         return self._run(run_dir, args, sarif_out)
 
     def run_secrets(self, env_dir: Path, sarif_out: Path) -> int:
         """``secrets`` framework pass over the source tree.
 
-        Mirrors scan.sh step 4. Always safe to run — purely static.
+        Thin delegate over :meth:`run_framework`. Mirrors scan.sh step 4.
+        Always safe to run — purely static. ``secrets`` is not in the
+        terraform family, so :meth:`run_framework` correctly omits
+        ``--external-checks-dir`` (custom PaaC checks target terraform
+        resources only).
         """
-        env_dir = Path(env_dir)
-        args = [
-            "-d", ".",
-            "--framework", "secrets",
-        ] + self._skip_path_flags(env_dir)
-        if self.checks_dir.is_dir():
-            args += ["--external-checks-dir", str(self.checks_dir.resolve())]
-        return self._run(env_dir, args, sarif_out)
+        return self.run_framework(env_dir, sarif_out, framework="secrets")
+
+    def detect_frameworks(self, env_dir: Path) -> set[str]:
+        """Return frameworks detected in ``env_dir`` via the shared helper.
+
+        Thin pass-through to :func:`scanner.frameworks.detect_frameworks`
+        so callers do not need to import :mod:`scanner.frameworks`
+        directly. Kept as an instance method for API ergonomics only —
+        no runner state is involved.
+        """
+        return _detect_frameworks(Path(env_dir))
 
 
 def _smoke() -> int:

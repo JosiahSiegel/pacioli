@@ -12,9 +12,11 @@ Single entry point for the ``pacioli`` console script. Subcommands:
                                      (delegates to scanner.baseline_init).
 
 Flags (top-level, accepted by ``scan``/``gate``/``audit`` as relevant):
-    --target-repo PATH       Consumer Terraform repo (default: $PACIOLI_TARGET_REPO or cwd).
+    --target-repo PATH       Consumer IaC repo (default: $PACIOLI_TARGET_REPO or cwd).
     --tier {source,plan,state}
-                             Scan depth tier (default: source).
+                             Scan depth tier (default: source). Plan/state
+                             require a Terraform-family framework.
+    --framework NAME         Explicit Checkov framework (default: auto-detect).
     --mode {gate,report,audit}
                              Scan mode (default: report; gate-mode promoted when CI=1).
     --mapping PATH           Framework mapping pack YAML.
@@ -109,6 +111,11 @@ from typing import Any, Final, Optional, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+from scanner.frameworks import (  # noqa: E402
+    SUPPORTED_FRAMEWORKS,
+    is_terraform_family,
+)
+from scanner.orchestrator import OrchestratorError  # noqa: E402
 from scanner.safety import MutatingOperationRefused  # noqa: E402
 
 
@@ -134,10 +141,10 @@ REPORT_FILENAME: str = "report.html"
 DEFAULT_REPORTS_CONTAINER: str = "pacioli-reports"
 
 # Verbatim safety disclaimer from scan.sh lines 120-129 (the read-only
-# invariant Pacioli enforces against Azure).
+# invariant Pacioli enforces against your cloud provider).
 SAFETY_DISCLAIMER: str = (
     "Safety:\n"
-    "  This script is READ-ONLY against Azure. It will REFUSE to run:\n"
+    "  This is a READ-ONLY scanner. It will REFUSE to run:\n"
     "  - terraform apply / destroy / state rm / state mv / state import / taint\n"
     "  - terraform plan/apply/destroy -lock=false\n"
     "  - az <resource> delete / update / create\n"
@@ -240,18 +247,37 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
         "target_dir",
         nargs="?",
         default=None,
-        help="Target Terraform repo (positional; falls back to --target-repo).",
+        help="Target IaC repo (positional; falls back to --target-repo).",
     )
     parser.add_argument(
         "--target-repo",
         default=None,
-        help="Consumer Terraform repo (default: $PACIOLI_TARGET_REPO or cwd).",
+        help="Consumer IaC repo (default: $PACIOLI_TARGET_REPO or cwd).",
     )
     parser.add_argument(
         "--tier",
         choices=VALID_TIERS,
         default="source",
-        help="Scan depth tier: source (default), plan, or state.",
+        help=(
+            "Scan depth tier: source (default), plan, or state. "
+            "Tier 'plan' and 'state' require a Terraform-family "
+            "framework -- terraform init/plan and state-blob download "
+            "are Terraform-only; non-Terraform frameworks are rejected "
+            "when these tiers are requested."
+        ),
+    )
+    parser.add_argument(
+        "--framework",
+        choices=tuple(SUPPORTED_FRAMEWORKS),
+        default=None,
+        metavar="NAME",
+        help=(
+            "Explicit Checkov framework (e.g., terraform, cloudformation, "
+            "kubernetes). Defaults to auto-detect from <target-dir>. "
+            "Tier 'plan' and 'state' are rejected for non-Terraform-family "
+            "frameworks because terraform init/plan and state-blob "
+            "download are Terraform-only."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -663,6 +689,40 @@ def _validate_include_modules_vs_tier(tier: str, include_modules: bool) -> None:
         )
 
 
+def _validate_tier_vs_framework(tier: str, framework: Optional[str]) -> None:
+    """Reject ``--tier plan|state`` combined with a non-Terraform-family framework.
+
+    Todo 12 (multi-cloud framework generalization): the CLI now
+    advertises ``--framework`` so the operator can pin Checkov to
+    ``cloudformation``, ``kubernetes``, ``dockerfile``, etc. Tier
+    ``plan`` and tier ``state`` invoke ``terraform init`` / ``terraform
+    plan`` and (for state) read the ``.tfstate`` blob from storage —
+    both are Terraform-only. ``source`` is always valid for every
+    framework.
+
+    Delegates to :func:`scanner.frameworks.is_terraform_family` so the
+    SINGLE SOURCE OF TRUTH for tier eligibility lives in
+    ``scanner/frameworks.py`` (not duplicated here). Raises
+    :class:`scanner.orchestrator.OrchestratorError` so the same error
+    category the orchestrator uses surfaces here — the existing
+    orchestrator + CLI catch chain handles it consistently.
+
+    ``framework=None`` is allowed at every tier — the CLI cannot know
+    what the auto-detector will return, so the per-pair orchestrator
+    loop applies the same check when the framework resolves.
+    """
+    if framework is None:
+        return
+    if tier in ("plan", "state") and not is_terraform_family(framework):
+        raise OrchestratorError(
+            f"--tier {tier!r} requires a Terraform-family framework; "
+            f"--framework {framework!r} does not support plan/state "
+            f"tiers (terraform init/plan and state-blob download are "
+            f"Terraform-only). Drop --tier or switch --framework to "
+            f"terraform/terraform_plan."
+        )
+
+
 def _validate_registry_mirror(url: Optional[str]) -> None:
     """Validate ``--registry-mirror`` URL syntax.
 
@@ -862,6 +922,13 @@ def _build_orchestrator_argv(
     argv += ["--tier", args.tier]
     if getattr(args, "target_repo", None):
         argv += ["--target-repo", str(args.target_repo)]
+    # ``--framework`` (Todo 10) — explicit Checkov framework. The
+    # orchestrator validates tier+framework compatibility at scan-time
+    # via :func:`scanner.frameworks.is_terraform_family`. Empty string
+    # means "not supplied" (the default — defer to auto-detect).
+    framework = getattr(args, "framework", None)
+    if framework:
+        argv += ["--framework", str(framework)]
     _append_value_pair(argv, args, "mode", "--mode")
     _append_value_pair(argv, args, "mapping", "--mapping")
     _append_value_pair(argv, args, "baseline", "--baseline")
@@ -937,6 +1004,15 @@ def _handle_scan(args: argparse.Namespace) -> int:
     # Resolve target_repo from positional + flags.
     args.target_repo = str(_resolve_target_repo(args))
 
+    # Validate tier/framework compatibility BEFORE invoking the
+    # orchestrator so the user sees a clear CLI-level error.
+    # Raises OrchestratorError if plan/state is requested with a
+    # non-Terraform-family framework.
+    _validate_tier_vs_framework(
+        tier=args.tier,
+        framework=getattr(args, "framework", None),
+    )
+
     from scanner import orchestrator as _orchestrator
 
     argv = _build_orchestrator_argv(args)
@@ -957,6 +1033,13 @@ def _handle_gate(args: argparse.Namespace) -> int:
     args = _apply_backcompat(args)
     args.mode = "gate"  # force regardless of what the user passed
     args.target_repo = str(_resolve_target_repo(args))
+
+    # Same tier/framework validation as _handle_scan -- gate is just
+    # scan --mode gate, so the same CLI-level guards apply.
+    _validate_tier_vs_framework(
+        tier=args.tier,
+        framework=getattr(args, "framework", None),
+    )
 
     from scanner import orchestrator as _orchestrator
 
@@ -1443,10 +1526,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pacioli",
         description=(
-            "Compliance-as-code for Azure Terraform. Read-only scanner that "
-            "checks Terraform code against compliance frameworks (PCI DSS 4.0.1 "
-            "by default), emits a self-contained HTML report, and gates CI on "
-            "HIGH/CRITICAL findings."
+            "Compliance-as-code for any IaC framework. Mapping pack "
+            "determines the compliance framework. Read-only scanner "
+            "that checks your code via Checkov, emits a self-contained "
+            "HTML report, and gates CI on HIGH/CRITICAL findings."
         ),
     )
 
@@ -1485,10 +1568,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "scan",
         help="Run a scan (delegates to scanner.orchestrator).",
         description=(
-            "Run a Pacioli scan against the consumer's Terraform repo. "
+            "Run a Pacioli scan against the consumer's IaC repo. "
             "Defaults to a source-only scan in --mode report; CI=1 promotes "
-            "to --mode gate. Use --tier plan|state to enable terraform "
-            "init+plan and (optionally) state-blob download + drift diff."
+            "to --mode gate. Use --tier plan|state (Terraform-family only) "
+            "to enable terraform init+plan and (optionally) state-blob "
+            "download + drift diff. Use --framework to pin a specific "
+            "Checkov framework; otherwise the scanner auto-detects."
         ),
         epilog=scan_epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -319,12 +319,22 @@ version (`checkov==3.3.9`). When a new Checkov release is published:
 2. Run `make test` — many pytest tests will fail if rules have
    been renumbered.
 3. Run `pacioli scan --project <test-env> --env prod <test-env>`
-   against the golden env.
-4. Diff the SARIF against the prior run:
-   - New rule IDs that fired → add to `mappings/pci_dss_4.0.1.yaml`.
-   - Rule IDs that disappeared → remove from mappings or remap.
-   - Severities that changed → update `SEVERITY_OVERRIDE`.
-5. Bump `verified_against` in `mappings/pci_dss_4.0.1.yaml`.
+   against the golden env (and repeat for any non-Terraform
+   framework fixture you maintain — the current primary worked
+   example is PCI/Terraform, but the runbook applies to every
+   shipped pack).
+4. For EVERY `mappings/*.yaml` (not just the PCI pack), diff the
+   SARIF against the prior run:
+   - New rule IDs that fired → add to the matching mapping pack.
+   - Rule IDs that disappeared → remove from the matching mapping
+     pack or remap.
+   - Severities that changed → update the pack's
+     `severity_overrides` table (the legacy `SEVERITY_OVERRIDE`
+     constant in `scanner/aggregate.py` is a thin alias for the
+     PCI pack only).
+5. Bump `verified_against` in EVERY mapping pack that changed
+   (not just PCI). The aggregator renders a "stale" badge for any
+   pack whose `verified_against` is older than the cutoff.
 6. Commit the mapping changes as a separate PR titled
    `mapping: refresh for checkov <new>`.
 

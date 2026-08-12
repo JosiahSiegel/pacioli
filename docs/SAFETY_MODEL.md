@@ -1,8 +1,8 @@
 # Pacioli Safety Model
 
-> **The scanner is read-only against Azure.** This document describes the
-> controls that enforce that contract, the operations the scanner can run,
-> and the limits of what those controls verify.
+> **The scanner is read-only against your cloud provider.** This document
+> describes the controls that enforce that contract, the operations the
+> scanner can run, and the limits of what those controls verify.
 
 ## Primary control: the typed operation registry
 
@@ -19,14 +19,20 @@ provides the refusal checks and `MutatingOperationRefused` error used by the
 registry as defense in depth. A refusal is raised before the command runs and
 causes the scanner to exit with code 99.
 
-The refused command families include:
+The refused command families include (the registry is currently
+Azure-flavored because the state tier downloads the `.tfstate` blob
+from Azure Storage; the structure is designed to be extended for other
+providers as those tiers land):
 
 - Terraform apply, destroy, import, state mutation, taint, and untaint.
 - Terraform plans that disable locking when the operation is not the
   privileged read-only composition described below.
 - Any command using `-auto-approve`.
-- Azure resource, group, role-assignment, Key Vault, SQL, App Service, and
-  storage-account deletion or update operations.
+- Cloud-provider resource, group, role-assignment, Key Vault, SQL,
+  App Service, and storage-account deletion or update operations. The
+  shipped refusal matrix is Azure (`az …`); equivalent AWS / GCP /
+  Kubernetes providers will be added in the same shape when their
+  state tiers ship.
 - Checkov `--fix`.
 
 The exact patterns and reasons live in `scanner/safety.py`; the typed
@@ -34,8 +40,8 @@ registry in `scanner/ops.py` is the control callers must use.
 
 ## Firewall behavior is alert-only
 
-The scanner does not change Azure storage firewall rules. It never runs
-`az storage account network-rule add` or `remove` as part of a scan.
+The scanner does not change cloud-provider storage firewall rules. It
+never adds or removes network rules as part of a scan.
 
 When a tier that needs remote state cannot access the configured storage
 account, the scanner emits an access-required alert and skips the dependent
@@ -49,7 +55,7 @@ The alert has this shape:
 ACCESS REQUIRED: <operation> cannot reach <resource>.
   Required access: <access requirement>.
   Action: grant access outside Pacioli, then rerun the scan.
-  No Azure firewall changes were made by Pacioli.
+  No firewall changes were made by Pacioli.
 ```
 
 The exact operation and resource are filled in at runtime. Treat this as an
@@ -81,7 +87,7 @@ operators must verify the network boundary and mirror contents themselves.
 
 Because `refresh=false` prevents live refresh, the plan describes Terraform's
 configured inputs and locally available state, not a current guarantee about
-Azure. The scanner reports when this layer cannot run rather than turning an
+the cloud provider. The scanner reports when this layer cannot run rather than turning an
 incomplete plan into a complete result.
 
 ## Discovery scope
@@ -126,8 +132,8 @@ scoped to what the scanner can actually verify through its typed operation
 registry, refusal checks, configured discovery paths, and cleanup code.
 SSD behavior, copy-on-write storage, journaling, VM snapshots, and Windows
 filesystem semantics are not covered by the cleanup claim. The scanner also
-cannot prove that an external caller, credential, Terraform process, or Azure
-administrator will not make a change outside the scanner.
+cannot prove that an external caller, credential, Terraform process, or
+cloud-provider administrator will not make a change outside the scanner.
 
 ## Self-test and extension rules
 
@@ -148,7 +154,7 @@ changing the registry or refusal rules:
 5. Run `make selftest` and the relevant test suite.
 6. Document any residual risk in this file and in the change review.
 
-Do not add an Azure firewall mutation as an exception. Access failures must
+Do not add a cloud-provider firewall mutation as an exception. Access failures must
 remain alert-only.
 
 ## Worked examples
@@ -157,8 +163,10 @@ These examples condense common scan situations into ten representative
 cases. They describe the boundary of the scanner, not a promise that every
 case is safe or complete.
 
-1. **Source-only repository scan.** `pacioli scan` reads Terraform source,
-   runs source checks, and makes no Terraform or Azure calls.
+1. **Source-only repository scan.** `pacioli scan` reads the detected IaC
+   source, runs source checks, and makes no privileged provider calls.
+   Terraform source-tier and CloudFormation / Kubernetes / Bicep scans
+   all fall in this bucket.
 2. **Plan scan with local resolution.** A plan-tier run uses
    `terraform init -backend=false`, then
    `terraform plan -lock=false -refresh=false`. Provider and module

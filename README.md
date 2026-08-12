@@ -1,8 +1,8 @@
 # Pacioli
 
-> **Compliance-as-code for Azure Terraform.**
+> **Compliance-as-code for any IaC framework — powered by Checkov.**
 
-Compliance-as-code for Azure Terraform. Read-only scanner. Emits a self-contained HTML report.
+Compliance-as-code for any IaC framework (Terraform, CloudFormation, Kubernetes, Helm, Bicep, ARM, Dockerfile, OpenAPI, …). Read-only scanner. Emits a self-contained HTML report. The shipped mappings directory ships with PCI DSS v4.0.1 as the primary worked example; SOC 2, CIS, NIST 800-53, and ISO 27001 are supported via custom mapping packs (see [Mapping Schema → Supported frameworks](docs/MAPPING_SCHEMA.md#supported-frameworks)).
 
 ## Install
 
@@ -34,11 +34,11 @@ Pacioli refuses Terraform mutations, Checkov `--fix`, and Azure mutations throug
 
 ## Three scan tiers
 
-| Tier | Command | Description |
-|---|---|---|
-| 1. Source | `pacioli scan <target-repo>` | Static `.tf` parse, with no init, plan, or storage access. |
-| 2. Plan | `pacioli scan --tier plan <target-repo>` | Adds `terraform plan` so Checkov sees resolved values. |
-| 3. State | `pacioli scan --tier state <target-repo>` | Adds `.tfstate` blob scanning and drift comparison. |
+| Tier | Command | Description | Framework scope |
+|---|---|---|---|
+| 1. Source | `pacioli scan <target-repo>` | Static parse of the detected IaC source. No init, plan, or storage access. | Any framework (Terraform, CloudFormation, Kubernetes, Helm, Bicep, ARM, Dockerfile, OpenAPI, …). |
+| 2. Plan | `pacioli scan --tier plan <target-repo>` | Adds `terraform plan` so Checkov sees resolved values. | **Terraform-family only.** Plan tier rejects non-Terraform frameworks with a clear error. |
+| 3. State | `pacioli scan --tier state <target-repo>` | Adds `.tfstate` blob scanning and drift comparison. | **Terraform-family only.** State tier rejects non-Terraform frameworks with a clear error. |
 
 ## CI gate
 
@@ -54,7 +54,7 @@ pacioli scan <target-repo>
 
 **Start here:**
 
-- [docs/CONSUMING_GUIDE.md](docs/CONSUMING_GUIDE.md) — first-time setup for adding the scanner to a Terraform repo.
+- [docs/CONSUMING_GUIDE.md](docs/CONSUMING_GUIDE.md) — first-time setup for adding the scanner to an IaC repo.
 - [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) — full operator runbook.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the pieces fit together.
 - [docs/INDEX.md](docs/INDEX.md) — master table of contents.
