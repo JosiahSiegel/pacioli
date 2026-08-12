@@ -30,6 +30,6 @@ keywords:
 authors:
   - name: Pacioli Contributors
 # x-release-please-version
-version: 0.1.0
+version: 0.2.1
 # x-release-please-version
-date-released: 2026-08-06
+date-released: 2026-08-12
