@@ -5,6 +5,13 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [0.2.1](https://github.com/JosiahSiegel/pacioli/compare/v0.2.0...v0.2.1) (2026-08-12)
+
+
+### Documentation
+
+* add RELEASING.md and correct CONTRIBUTING release-please description ([#16](https://github.com/JosiahSiegel/pacioli/issues/16)) ([3ab5d2d](https://github.com/JosiahSiegel/pacioli/commit/3ab5d2dabd4f6057e9e41548ea67674afeb77b2a))
+
 ## [0.2.0](https://github.com/JosiahSiegel/pacioli/compare/v0.1.1...v0.2.0) (2026-08-11)
 
 
