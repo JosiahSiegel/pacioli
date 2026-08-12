@@ -44,3 +44,11 @@ coverage_matrix.csv
 .DS_Store
 
 .omo/
+
+# Generated mapping-pack copies (single source of truth: mappings/ at repo root).
+# scanner/mappings/<name>.yaml is produced by `make sync-mappings` from
+# mappings/<name>.yaml so the wheel install ships the pack under the
+# `scanner` package for the importlib.resources fallback in
+# scanner/paths.py:resolve_mapping(). Do NOT commit hand-edits here —
+# edit mappings/<name>.yaml at the repo root and re-run `make sync-mappings`.
+scanner/mappings/*.yaml

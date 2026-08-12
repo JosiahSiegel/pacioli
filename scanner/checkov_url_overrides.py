@@ -34,10 +34,48 @@ Why this lives in its own module:
 
 from __future__ import annotations
 
+from typing import Final
+
+from checkov.docs_generator import ID_PARTS_PATTERN
+
+# Cloud prefix -> Checkov source directory name (under
+# checkov/terraform/checks/resource/). This is the SINGLE source of truth
+# for the mapping; do NOT maintain a parallel list anywhere else.
+#
+# Verified against Checkov's actual directory layout in
+# checkov/terraform/checks/resource/ on 2026-08-12. Unknown clouds
+# resolve to the repo root (no directory) — better a 200 on the tree view
+# than a 404 on a guessed directory.
+CLOUD_TO_DIR: Final[dict[str, str]] = {
+    "AWS": "aws",
+    "AZURE": "azure",
+    "GCP": "gcp",
+    "K8S": "kubernetes",
+    "ALI": "alicloud",
+    "DIO": "digitalocean",
+    "GIT": "github",
+    "GLB": "gitlab",
+    "LIN": "linode",
+    "NCP": "ncp",
+    "OCI": "oci",
+    "OKTA": "okta",
+    "OPENSTACK": "openstack",
+    "PAN": "panos",
+    "TC": "tencentcloud",
+    "YC": "yandexcloud",
+}
+
 # Canonical Checkov rule ID -> canonical GitHub source URL.
-# 83 entries. The 4 CKV_SECRET_* entries point to checkov/secrets/runner.py
-# because those rules are loaded from Bridgecrew platform metadata rather
-# than the open-source source files.
+# 82 entries (verified 2026-08-12). 78 are CKV_AZURE_*/CKV2_AZURE_* (PCI-focused
+# pack); the remaining 4 are CKV_SECRET_* (point to checkov/secrets/runner.py
+# because those rules are loaded from Bridgecrew platform metadata rather than
+# open-source source files) and 1 CKV_TF_1 (Terraform-generic).
+#
+# This table is the EXPLICIT OVERRIDE MAP for the per-rule canonical URLs used
+# by aggregate.py and rewrite_sarif_help.py. It is NOT a fallback for the
+# build_sed_filter() rewrite — that path derives the directory dynamically
+# from the check ID's cloud prefix. The map is PCI/Azure-focused today and
+# will be supplemented by AWS/GCP/K8s packs as those rule sets are reviewed.
 RULE_SOURCE_URLS: dict[str, str] = {
     "CKV_AZURE_13": "https://github.com/bridgecrewio/checkov/blob/main/checkov/terraform/checks/resource/azure/AppServiceAuthentication.py",
     "CKV_AZURE_16": "https://github.com/bridgecrewio/checkov/blob/main/checkov/terraform/checks/resource/azure/AppServiceIdentity.py",
@@ -156,12 +194,15 @@ def get_help_uri(rule_id: str, upstream_help_uri: str | None = None) -> str:
     return "https://github.com/bridgecrewio/checkov"
 
 
-def build_sed_filter() -> str:
+def build_sed_filter(
+    cloud_prefix: str | None = None,
+    check_id: str | None = None,
+) -> str:
     """Build a sed expression that rewrites Checkov's CLI output URLs.
 
     Returns a sed `s|...|...|g` expression that replaces any
-    docs.prismacloud.io URL with the canonical GitHub source URL of the
-    matching rule. The checkov CLI prints lines like:
+    docs.prismacloud.io URL with a Checkov GitHub source-tree URL for the
+    given cloud. The checkov CLI prints lines like:
 
         Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/azure-policies/bc-azr-general-2
 
@@ -169,13 +210,40 @@ def build_sed_filter() -> str:
     do a per-rule rewrite via sed alone. Instead we replace the entire
     upstream base URL with a stable landing page that points operators
     at our canonical sources. The `Guide:` line ends with the broken
-    prisma URL; we replace it with the Checkov GitHub repo root which
-    is always 200 and lets the operator drill down to the rule file.
+    prisma URL; we replace it with the Checkov GitHub source tree for
+    the matching cloud directory (e.g. `checkov/terraform/checks/resource/aws/`)
+    — or, for unknown clouds / no prefix, the repo root, which is always
+    200 and lets the operator drill down to the rule file.
+
+    Args:
+      cloud_prefix: The Checkov cloud prefix (e.g. "AWS", "AZURE", "K8S").
+        When `None` or unknown, the filter rewrites to the Checkov GitHub
+        repo root.
+      check_id: A full Checkov rule ID (e.g. "CKV_AZURE_13"). When
+        provided, the cloud prefix is parsed from it via
+        `ID_PARTS_PATTERN` (Checkov's canonical regex
+        `r'([^_]*)_([^_]*)_(\d+)'`) and takes precedence over the
+        `cloud_prefix` arg. This avoids re-defining the regex locally —
+        the DRY/LIGHTWEIGHT rule (d) of the T11 plan.
+
+    Returns:
+      A sed substitution expression.
 
     For richer filtering (where the rule ID is in scope), the
     rewrite_sarif_help.py script does a per-rule rewrite on the SARIF.
     """
-    return (
-        "s|https://docs\\.prismacloud\\.io/en/enterprise-edition/policy-reference/|"
-        "https://github.com/bridgecrewio/checkov/tree/main/checkov/terraform/checks/resource/azure/|g"
-    )
+    upstream_anchor = r"https://docs\.prismacloud\.io/en/enterprise-edition/policy-reference/"
+    repo_root = "https://github.com/bridgecrewio/checkov"
+    # Parse the cloud prefix from check_id using Checkov's own regex
+    # (DRY/LIGHTWEIGHT rule d — never redefine the pattern locally).
+    if check_id:
+        match = ID_PARTS_PATTERN.match(check_id)
+        if match:
+            cloud_prefix = match.group(2)
+    if cloud_prefix and cloud_prefix in CLOUD_TO_DIR:
+        target = f"{repo_root}/tree/main/checkov/terraform/checks/resource/{CLOUD_TO_DIR[cloud_prefix]}/"
+    else:
+        # Unknown cloud (or no prefix) -> Checkov repo root. Better a 200
+        # on the tree view than a 404 on a guessed directory.
+        target = f"{repo_root}/tree/main/"
+    return f"s|{upstream_anchor}|{target}|g"

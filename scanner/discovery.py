@@ -1,4 +1,4 @@
-"""Auto-discover (project, env) pairs in a Terraform target repo.
+"""Auto-discover (project, env) pairs in an IaC target repo.
 
 Ports the precedence rules from ``scanner/lib/common.sh`` (bash):
 
@@ -10,13 +10,18 @@ Ports the precedence rules from ``scanner/lib/common.sh`` (bash):
 
   2. Else if ``<target>/env/`` exists, walk ``env/<project>/<env>/``
      subdirectories and emit one pair per env that contains at least
-     one real ``*.tf`` file (excluding ``~*`` stubs).
+     one IaC file detected by
+     :func:`scanner.frameworks.detect_frameworks` (excluding ``~*``
+     stubs). The check is framework-aware — Terraform ``*.tf``,
+     Kubernetes ``*.yaml``, Dockerfile, Bicep, CloudFormation, etc.
+     all qualify.
 
-  3. Else scan every ``*.tf`` at the repo root; if any exist, return
+  3. Else detect IaC files at the repo root via
+     :func:`scanner.frameworks.detect_frameworks`; if any exist, return
      ``[("default", "default")]`` (a flat repo with no env layout).
 
   4. If none of the above produces any pairs, raise
-     :class:`NoTerraformFoundError`.
+     :class:`NoIaCFoundError` (alias :class:`NoTerraformFoundError`).
 
 ``scan_paths:`` extension
 -------------------------
@@ -68,14 +73,33 @@ except ImportError:  # pragma: no cover
     _yaml = None
     _HAVE_YAML = False
 
+# Framework-aware directory scanner (SINGLE SOURCE OF TRUTH).
+# Delegating here keeps ``_has_iac_files`` a one-liner and avoids
+# any parallel file-globbing code in discovery.py.
+from scanner.frameworks import detect_frameworks  # noqa: E402
 
-class NoTerraformFoundError(FileNotFoundError):
-    """Raised when the target repo has no Terraform files to scan.
+
+class NoIaCFoundError(FileNotFoundError):
+    """Raised when the target repo has no IaC files to scan.
+
+    "IaC" is intentionally framework-agnostic — ``terraform``,
+    ``kubernetes``, ``dockerfile``, ``cloudformation``, ``bicep``,
+    etc. all count. The check is delegated to
+    :func:`scanner.frameworks.detect_frameworks` so any framework
+    Checkov supports is automatically detected.
 
     Inherits from ``FileNotFoundError`` so callers that catch the
     stdlib exception still work, but also has a distinct type so
     callers can catch this specifically.
     """
+
+
+# Deprecated alias — keep old name working for backward compat.
+# Existing callers (e.g. ``scanner/orchestrator.py``) import
+# ``NoTerraformFoundError``; do not remove without coordinated update.
+# This is a one-line alias, not a subclass — a single identity check
+# (``x is NoIaCFoundError``) works for both names.
+NoTerraformFoundError = NoIaCFoundError
 
 
 # Filename of the optional in-scope YAML manifest at the repo root.
@@ -210,24 +234,24 @@ class DiscoveredPair:
         yield self.env
 
 
-def _has_real_tf_files(env_dir: Path) -> bool:
-    """Return True if ``env_dir`` contains at least one real .tf file.
+def _has_iac_files(env_dir: Path) -> bool:
+    """Return True if ``env_dir`` contains at least one real IaC file.
 
-    A "real" .tf file is any ``*.tf`` at the top level of ``env_dir``
-    that does not start with ``~`` (tilde-prefixed files are stubs).
-    Mirrors the bash ``require_env_dir`` check in ``common.sh``.
+    "IaC" here means a file detected by
+    :func:`scanner.frameworks.detect_frameworks` — Terraform
+    ``*.tf``/``*.tf.json``, Kubernetes ``*.yaml``/``*.yml`` (sniffed),
+    Dockerfile, Bicep, CloudFormation, ARM, Helm, etc. Tilde-prefixed
+    files (``~*.tf`` and friends) are excluded because they are stubs;
+    :func:`detect_frameworks` enforces that rule internally.
+
+    Thin wrapper — the directory scan lives in
+    ``scanner/frameworks.py`` (SINGLE SOURCE OF TRUTH). Adding a new
+    framework to :data:`scanner.frameworks.FRAMEWORK_FILE_PATTERNS`
+    automatically widens this check without further changes here.
     """
     if not env_dir.is_dir():
         return False
-    for entry in env_dir.iterdir():
-        if not entry.is_file():
-            continue
-        name = entry.name
-        if name.startswith("~"):
-            continue
-        if name.endswith(".tf"):
-            return True
-    return False
+    return bool(detect_frameworks(env_dir))
 
 
 def _load_pci_scope(scope_file: Path) -> list[tuple[str, str]]:
@@ -235,7 +259,8 @@ def _load_pci_scope(scope_file: Path) -> list[tuple[str, str]]:
 
     Only entries with ``status: in_scope`` are honored. The YAML's
     ``envs`` list per entry determines which envs are scanned.
-    Raises :class:`NoTerraformFoundError` if no in-scope entries
+    Raises :class:`NoIaCFoundError` (alias
+    :class:`NoTerraformFoundError`) if no in-scope entries
     yield any pairs.
     """
     if not _HAVE_YAML:
@@ -311,7 +336,7 @@ def _discover_from_yaml(
     style validation happens in the scan loop, not here. Replicating
     it here would conflate discovery with validation.
 
-    This helper does NOT raise :class:`NoTerraformFoundError` when the
+    This helper does NOT raise :class:`NoIaCFoundError` when the
     ``projects:`` list is empty — it may legitimately be empty in the
     presence of a ``scan_paths:`` block. The caller (:func:`discover_pairs`)
     raises after consulting both branches, so the "scan_paths:
@@ -328,12 +353,15 @@ def _discover_from_env_tree(
 ) -> list[tuple[str, str]]:
     """Walk ``env/<project>/<env>/`` and emit one pair per real env.
 
-    A subdirectory counts as a real env iff it contains at least one
-    non-tilde-prefixed ``*.tf`` file at the top level (mirrors bash
-    ``require_env_dir``). The walk is one level deep: ``env/<proj>``
-    is a directory of env directories, not nested further.
+    A subdirectory counts as a real env iff
+    :func:`scanner.frameworks.detect_frameworks` returns a non-empty
+    set for it (mirrors bash ``require_env_dir``, generalized from
+    Terraform-only to all Checkov frameworks). The walk is one level
+    deep: ``env/<proj>`` is a directory of env directories, not
+    nested further.
 
-    Raises :class:`NoTerraformFoundError` if the env/ tree is empty
+    Raises :class:`NoIaCFoundError` (alias
+    :class:`NoTerraformFoundError`) if the env/ tree is empty
     (i.e. no real envs under any project). An empty result after
     filtering is a valid non-error result and is returned as ``[]``.
     """
@@ -350,14 +378,15 @@ def _discover_from_env_tree(
         for env_dir in sorted(project_dir.iterdir()):
             if not env_dir.is_dir():
                 continue
-            if _has_real_tf_files(env_dir):
+            if _has_iac_files(env_dir):
                 pairs.append((project_name, env_dir.name))
 
     if not pairs:
-        raise NoTerraformFoundError(
-            f"No Terraform files found under {target_repo}. "
+        raise NoIaCFoundError(
+            f"No IaC files found under {target_repo}. "
             "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
-            "or *.tf at the repo root."
+            "or framework files (*.tf, *.yaml, Dockerfile, *.bicep, "
+            "*.template.json, etc.) at the repo root."
         )
     return _apply_filters(pairs, project_filter, env_filter)
 
@@ -369,9 +398,13 @@ def _discover_flat_repo(
 ) -> list[tuple[str, str]]:
     """Fallback for a flat repo with no ``env/`` directory.
 
-    Returns ``[("default", "default")]`` if any ``*.tf`` file exists
-    at the repo root (NOT recursive — a flat repo means the .tf files
-    live at the top level). Otherwise raises :class:`NoTerraformFoundError`.
+    Returns ``[("default", "default")]`` if
+    :func:`scanner.frameworks.detect_frameworks` returns a non-empty
+    set for ``target_repo`` (NOT recursive — a flat repo means the
+    IaC files live at the top level). Any framework Checkov supports
+    qualifies: Terraform ``*.tf``, Kubernetes ``*.yaml``, Dockerfile,
+    Bicep, CloudFormation, ARM, Helm, etc. Otherwise raises
+    :class:`NoIaCFoundError` (alias :class:`NoTerraformFoundError`).
 
     ``--project`` / ``--env`` filters RELABEL the single
     ``(default, default)`` pair rather than filtering to zero. A flat
@@ -379,15 +412,15 @@ def _discover_flat_repo(
     is "what label should the output use?" — dropping it would lose
     the only available signal.
     """
-    for entry in target_repo.iterdir():
-        if entry.is_file() and entry.name.endswith(".tf"):
-            label_project = project_filter or "default"
-            label_env = env_filter or "default"
-            return [(label_project, label_env)]
-    raise NoTerraformFoundError(
-        f"No Terraform files found under {target_repo}. "
+    if detect_frameworks(target_repo):
+        label_project = project_filter or "default"
+        label_env = env_filter or "default"
+        return [(label_project, label_env)]
+    raise NoIaCFoundError(
+        f"No IaC files found under {target_repo}. "
         "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
-        "or *.tf at the repo root."
+        "or framework files (*.tf, *.yaml, Dockerfile, *.bicep, "
+        "*.template.json, etc.) at the repo root."
     )
 
 
@@ -609,7 +642,7 @@ def _discover_from_scan_paths(
     caller (in :func:`discover_pairs`) unions this list with the
     legacy branches when both are present.
 
-    Raises :class:`NoTerraformFoundError` is NOT raised here — that
+    Raises :class:`NoIaCFoundError` is NOT raised here — that
     signal belongs to the legacy branches. The scan_paths branch
     coexists with them.
     """
@@ -642,13 +675,17 @@ def discover_pairs(
          the single pair rather than filtering to zero.
 
     Filters are applied inside the branch helpers so a non-matching
-    filter returns ``[]`` rather than raising (``NoTerraformFoundError``
-    is reserved for the "nothing to scan at all" case — see below).
+    filter returns ``[]`` rather than raising (``NoIaCFoundError``
+    is reserved for the "nothing to scan at all" case — see below;
+    :class:`NoTerraformFoundError` is a deprecated alias kept for
+    backward compat).
 
     Raises:
-        NoTerraformFoundError: when NEITHER the ``projects:`` list NOR
+        NoIaCFoundError: when NEITHER the ``projects:`` list NOR
             the ``scan_paths:`` list OR the env/-tree walk produces
             any pairs (the legacy "nothing to scan at all" signal).
+            Also raised by :func:`_discover_from_env_tree` /
+            :func:`_discover_flat_repo` for their empty-repo cases.
         ScanPathsCollisionError: when two ``scan_paths:`` entries
             collide on ``(project, env)`` and neither has a
             ``stack_label``.
@@ -700,17 +737,19 @@ def discover_pairs(
     # result is a valid "no matches" signal and returns ``[]``
     # (matching the legacy contract).
     if not merged and project_filter is None and env_filter is None:
-        raise NoTerraformFoundError(
-            f"No Terraform files found under {target_repo}. "
+        raise NoIaCFoundError(
+            f"No IaC files found under {target_repo}. "
             "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
-            "or *.tf at the repo root."
+            "or framework files (*.tf, *.yaml, Dockerfile, *.bicep, "
+            "*.template.json, etc.) at the repo root."
         )
 
     return merged
 
 
 __all__ = [
-    "NoTerraformFoundError",
+    "NoIaCFoundError",
+    "NoTerraformFoundError",  # deprecated alias for NoIaCFoundError
     "ScanPathsCollisionError",
     "ScanPathEntry",
     "DiscoveredPair",

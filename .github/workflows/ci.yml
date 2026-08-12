@@ -71,13 +71,13 @@ jobs:
           from pathlib import Path
           import sys
           sys.path.insert(0, 'scanner')
-          from aggregate import load_pci_mapping, validate_out_of_scope_entries
+          from aggregate import load_mapping, validate_out_of_scope_entries
           data = yaml.safe_load(Path('mappings/pci_dss_4.0.1.yaml').read_text())
           # Required top-level keys
           for key in ('framework_name', 'framework_version', 'requirements'):
               assert key in data, f'pci_mapping.yaml missing required key: {key}'
           # Map loads cleanly
-          mapping = load_pci_mapping(Path('mappings/pci_dss_4.0.1.yaml'))
+          mapping = load_mapping(Path('mappings/pci_dss_4.0.1.yaml'))
           assert len(mapping) > 0, 'no checks mapped'
           # OOS entries validate (the key must be present even if the list is empty)
           oos = data.get('out_of_scope_requirements', [])

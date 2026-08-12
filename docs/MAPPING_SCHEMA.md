@@ -1,9 +1,33 @@
 # Pacioli — Mapping Schema
 
 > **The format of `mappings/<framework>_<version>.yaml` files.**
-> Use this when you add a new framework pack (SOC 2, CIS Azure,
-> NIST 800-53, ISO 27001, …), edit an existing row, or add an
-> out-of-scope exclusion.
+> Use this when you add a new framework pack (SOC 2, CIS, NIST 800-53,
+> ISO 27001, …), edit an existing row, or add an out-of-scope exclusion.
+
+## Supported frameworks
+
+Pacioli runs against every Checkov 3.3.9 framework. The
+authoritative list lives in `scanner/frameworks.py` as the
+`SUPPORTED_FRAMEWORKS` tuple (auto-discovered from Checkov's
+`checkov_runners` at import time, with a 22-framework hardcoded
+fallback when Checkov is not installed). At Checkov 3.3.9 that set
+is (alphabetical):
+
+`ansible`, `argo_workflows`, `arm`, `azure_pipelines`, `bicep`,
+`bitbucket_configuration`, `bitbucket_pipelines`, `circleci_pipelines`,
+`cloudformation`, `dockerfile`, `github_actions`, `github_configuration`,
+`gitlab_ci`, `gitlab_configuration`, `helm`, `kubernetes`, `kustomize`,
+`openapi`, `secrets`, `serverless`, `terraform`, `terraform_plan`.
+
+The same tuple is the canonical source for the keyword list in
+`pyproject.toml`, the framework examples in `README.md` and the
+operator / consumer guides — do NOT duplicate the literal list
+elsewhere in the docs; link to this section instead. The full
+list of mapping packs shipped in `mappings/` is whatever YAML
+files are present at install time; today the only shipped pack is
+`mappings/pci_dss_4.0.1.yaml` (the primary worked example), with
+SOC 2 / CIS / NIST / ISO 27001 packs delivered as custom mapping
+packs authored by the consumer.
 
 The aggregator (`scanner/aggregate.py`) reads the mapping file at
 startup. Every field in the schema is required unless explicitly
@@ -53,6 +77,7 @@ out_of_scope_requirements:                     # List of out-of-scope requiremen
 | `pci_dss_version` | no | PCI-specific legacy alias for `framework_version`. Kept for backward compat with pre-extraction tooling. |
 | `requirements` | yes | List of in-scope requirements. May be empty. |
 | `out_of_scope_requirements` | yes (as a key) | List of out-of-scope requirement families. May be empty. The aggregator still validates the list — see below. |
+| `severity_overrides` | no | Optional `check_id → severity` map. See [Severity overrides](#severity-overrides) below. When absent, every check falls through to `DEFAULT_SEVERITY` (`MEDIUM`). |
 
 The key `out_of_scope_requirements` must be present even if the
 list is empty. The aggregator iterates over it unconditionally.
@@ -88,12 +113,21 @@ map at load time. A check_id can appear in multiple requirements
 
 Valid check_id formats:
 
+- `CKV_AWS_<N>` — Checkov OSS AWS checks (e.g. `CKV_AWS_18`,
+  `CKV_AWS_53`)
 - `CKV_AZURE_<N>` — Checkov OSS Azure checks (e.g. `CKV_AZURE_212`)
+- `CKV_GCP_<N>` — Checkov OSS GCP checks (e.g. `CKV_GCP_6`,
+  `CKV_GCP_21`)
+- `CKV_K8S_<N>` — Checkov OSS Kubernetes checks (e.g. `CKV_K8S_8`,
+  `CKV_K8S_22`)
 - `CKV2_AZURE_<N>` — Checkov graph checks (e.g. `CKV2_AZURE_1`)
+- `CKV2_AWS_<N>` — Checkov graph checks (e.g. `CKV2_AWS_6`)
 - `CKV_SECRET_<N>` — Checkov secrets framework
 - `CKV_TF_<N>` — Checkov generic Terraform checks
 - `CKV_AZURE_PCI_<NNN>` — Pacioli's custom PaaC checks
-  (`CKV_AZURE_PCI_001` through `CKV_AZURE_PCI_005` ship today)
+  (`CKV_AZURE_PCI_001` through `CKV_AZURE_PCI_005` ship today;
+  custom checks follow the same `<cloud>_<pack>_<NNN>` shape so
+  the prefix matches the rule ID family they target)
 - `CKV_AZURE_PCI_NOTE_<X>` — symbolic placeholder for reqs with
   no working Checkov coverage. See below.
 
@@ -126,6 +160,56 @@ Adding a new note token requires updating the
 pytest test `test_aggregate_pci.py` validates the mapping
 loader; the manual list lives at the top of
 `scanner/aggregate.py`.
+
+### Severity overrides
+
+Each mapping pack MAY declare a top-level `severity_overrides`
+table that pins a Checkov rule ID to a canonical severity tag.
+This is the per-pack replacement for the legacy in-code
+`SEVERITY_OVERRIDE` constant — the table now travels with the
+mapping YAML so a SOC 2 / CIS / NIST pack can ship its own
+severity policy without touching `scanner/aggregate.py`.
+
+```yaml
+severity_overrides:
+  CKV_AZURE_44: HIGH     # Storage Account TLS latest version (PCI 4.2.1)
+  CKV_AZURE_18: MEDIUM   # Web App http2_enabled (PCI 10.2.1)
+  CKV_AZURE_70: MEDIUM   # Function app HTTPS only (PCI 4.2.1)
+  CKV2_AZURE_1: HIGH     # Storage critical data encrypted with CMK
+```
+
+| Field | Required | Format | Description |
+|---|---|---|---|
+| key | yes | Checkov rule ID (`CKV_AZURE_<N>`, `CKV2_AZURE_<N>`, `CKV_SECRET_<N>`, `CKV_TF_<N>`) | The rule whose severity you want to pin. |
+| value | yes | Upper-case `HIGH` \| `MEDIUM` \| `LOW` \| `CRITICAL` | Severity tag emitted in the HTML report and consulted by `pacioli gate`. |
+
+**Resolution precedence** (highest first), implemented in
+`resolve_severity(check_id, mapping_pack, rule_severity=...)`:
+
+1. `rule.properties.severity` from the SARIF rule entry (when
+   the SARIF producer actually emits it — Checkov 3.3.9 does
+   not, so this slot is normally `None`).
+2. `mapping_pack["severity_overrides"][check_id]` — the
+   per-pack table. Lookup is **pack-scoped**: once a pack is
+   in play, the function does NOT silently substitute the
+   install-bundled PCI overrides. A SOC 2 / CIS pack that
+   omits `severity_overrides` (or declares an empty table)
+   sees a MISS for every check and falls through to
+   `DEFAULT_SEVERITY`. This avoids a framework-mismatch bug
+   where a non-PCI pack would silently inherit PCI's
+   `CKV_AZURE_44=HIGH` (or similar) for shared rule IDs.
+3. `DEFAULT_SEVERITY` (`MEDIUM`) — last-resort for any rule
+   not pinned by either of the above.
+
+When `severity_overrides` is **omitted** from a pack entirely,
+the pack still loads and runs end-to-end — every finding just
+defaults to `MEDIUM`. This is the contract `test_resolve_severity_falls_back_when_pack_has_no_overrides`
+asserts in `scanner/tests/test_aggregate_pci.py`.
+
+The legacy `SEVERITY_OVERRIDE` Python constant in
+`scanner/aggregate.py` is preserved as a thin alias for any
+external caller that imports it directly. New code should call
+`resolve_severity()` instead.
 
 ### Out-of-scope requirement schema
 
@@ -201,22 +285,43 @@ When the `STALE` badge appears:
 
 ## Adding a new mapping pack
 
-1. Copy `mappings/pci_dss_4.0.1.yaml` to `mappings/<framework>_<version>.yaml`.
+1. Copy `mappings/pci_dss_4.0.1.yaml` to
+   `mappings/<framework>_<version>.yaml`.
 2. Change `framework_name` and `framework_version` at the top.
-3. Replace the `requirements:` list with the new framework's
-   controls. The `checks:` IDs MUST be valid Checkov rule IDs (run
-   `checkov -l | grep CKV_` for the list).
-4. Replace `out_of_scope_requirements` with the req families that
+3. (Optional) Declare a top-level `severity_overrides` table that
+   pins Checkov rule IDs to canonical severity tags — see
+   [Severity overrides](#severity-overrides) below. A pack without
+   `severity_overrides` falls through to `DEFAULT_SEVERITY`
+   (`MEDIUM`) for every check.
+4. Replace the `requirements:` list with the new framework's
+   controls. The `checks:` IDs MUST be valid Checkov rule IDs
+   (run `checkov -l | grep CKV_` for the full list, scoped to
+   the framework your pack targets — e.g. `CKV_AWS_*` for an AWS
+   SOC 2 pack, `CKV_K8S_*` for a Kubernetes CIS pack).
+5. Replace `out_of_scope_requirements` with the req families that
    the scanner cannot evaluate for this framework.
-5. Re-run the scanner with `--mapping mappings/<framework>_<version>.yaml`.
-6. The HTML title and sidebar will reflect the new framework name.
+6. Re-run the scanner with
+   `--mapping mappings/<framework>_<version>.yaml
+   --framework <matching-framework>`. Auto-detection also works
+   when the pack's `framework_name` matches a Checkov framework;
+   otherwise pass `--framework` explicitly.
+7. The HTML title and sidebar will reflect the new framework name.
+8. Optionally, set `PACIOLI_MAPPING` (or `--mapping`) in CI so
+   every run ships with the new pack.
 
 For the custom checks in `scanner/checks/`:
 
-- Keep them (they're general Azure hygiene checks that apply to any
-  compliance framework), or
+- Keep them (the existing `CKV_AZURE_PCI_*` checks are
+  Terraform-family hygiene checks that apply to any compliance
+  framework that targets Azure Terraform), or
 - Move them to a framework-specific subdirectory and update the
-  `--external-checks-dir` flag in `scanner/orchestrator.py`.
+  `--external-checks-dir` flag in `scanner/checkov_runner.py`
+  (the orchestrator consumes the runner; the
+  `--external-checks-dir` gate lives in `_run` /
+  `_run_paac`). The current pack filters to the Terraform
+  framework only because the shipped custom checks are
+  Terraform-shaped — a non-Terraform pack will not get them
+  wired in automatically.
 
 ## Verifying the mapping file
 

@@ -83,6 +83,11 @@ from scanner.discovery import (  # noqa: E402
     NoTerraformFoundError,
     discover_pairs,
 )
+from scanner.frameworks import (  # noqa: E402
+    SUPPORTED_FRAMEWORKS,
+    detect_frameworks,
+    is_terraform_family,
+)
 from scanner.paths import (  # noqa: E402
     PathResolutionError,
     resolve_mapping as resolve_mapping_path,
@@ -114,7 +119,13 @@ from scanner.trap import (  # noqa: E402
 AGGREGATE_FINDINGS_RC: int = 7
 
 # Tier -> which passes run. Source-only is the default (no terraform
-# init / plan / storage read).
+# init / plan / storage read). The mapping itself is
+# framework-agnostic — the per-pass dispatch in :meth:`_scan_one_pair`
+# uses :func:`scanner.frameworks.is_terraform_family` to skip the
+# ``plan``/``state``/``drift`` passes for non-Terraform-family
+# frameworks. Tier *eligibility* (whether the tier itself is valid for
+# the active framework) is enforced separately in
+# :meth:`Orchestrator._validate_mode_and_tier`.
 TIER_PASSES: dict[str, tuple[str, ...]] = {
     "source": ("paac", "source", "secrets"),
     "plan": ("paac", "source", "plan", "secrets"),
@@ -262,6 +273,7 @@ class Orchestrator:
         include_modules: bool = False,
         ignore_lockfile: bool = False,
         registry_mirror: Optional[str] = None,
+        framework: Optional[str] = None,
     ) -> int:
         """Run the full scan and return the SCAN_RC.
 
@@ -286,6 +298,15 @@ class Orchestrator:
                 whose stack root is a module library (``modules/``,
                 ``modules-<x>/``, ``.terraform/``) are honored. Default
                 is ``False``; the CLI flag (Todo 8) overrides this.
+            framework: Explicit Checkov framework name (e.g.,
+                ``"terraform"``, ``"cloudformation"``, ``"kubernetes"``).
+                When supplied, ``--tier plan`` / ``--tier state`` are
+                rejected for non-Terraform-family frameworks via
+                :func:`scanner.frameworks.is_terraform_family`. The CLI
+                flag (Todo 12) wires ``--framework`` here. ``None``
+                defers tier/framework validation to the per-pair loop,
+                which auto-detects and skips the heavy passes
+                accordingly.
 
         Returns:
             The shell-style SCAN_RC. ``gate`` mode may return any non-
@@ -294,7 +315,9 @@ class Orchestrator:
         """
         try:
             # Mode / tier validation first — fail fast before doing work.
-            self._validate_mode_and_tier()
+            # Framework (when supplied) gates tier eligibility: non-
+            # Terraform frameworks cannot request plan/state tiers.
+            self._validate_mode_and_tier(framework=framework)
 
             # Store registry_mirror so _run_terraform_* call sites can
             # generate the per-run TF_CLI_CONFIG_FILE (Todo 9).
@@ -308,6 +331,12 @@ class Orchestrator:
             # opt-out for ``modules/``-style stack roots.
             self._include_modules = bool(include_modules)
             self._ignore_lockfile = bool(ignore_lockfile)
+
+            # Store the active framework so per-pair helpers can gate
+            # Terraform-only passes (plan/state/drift/paac) via
+            # :func:`scanner.frameworks.is_terraform_family` without
+            # threading ``framework`` through every signature.
+            self._framework = framework
 
             output_dir = Path(output_dir).resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -329,7 +358,7 @@ class Orchestrator:
                 _log("WARN", "no (project, env) pairs matched --project/--env filters")
                 return 0
 
-            self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs)
+            self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs, framework=framework)
 
             runner = CheckovRunner(mode=self.mode)
 
@@ -397,13 +426,26 @@ class Orchestrator:
 
     # -- scan() helpers ----------------------------------------------
 
-    def _validate_mode_and_tier(self) -> None:
+    def _validate_mode_and_tier(
+        self,
+        framework: Optional[str] = None,
+    ) -> None:
         """Fail fast on invalid mode / tier before doing any work.
 
         Extracted from :meth:`scan` to keep that method's cognitive
         complexity under control. ``audit`` mode is intentionally not
         implemented in the Python orchestrator — the bash
         ``scan_audit.sh`` companion handles that flow.
+
+        Framework awareness (Todo 10): when ``framework`` is supplied,
+        tier eligibility is checked via
+        :func:`scanner.frameworks.is_terraform_family`. The ``plan``
+        and ``state`` tiers require a Terraform-family framework
+        (they invoke ``terraform init`` / ``terraform plan`` and read
+        Azure state blobs). A user passing ``--tier plan`` or
+        ``--tier state`` with a non-Terraform framework gets a hard
+        :class:`OrchestratorError` — never a silent skip. Tier
+        ``source`` is always valid for every framework.
         """
         if self.mode not in VALID_MODES:
             raise OrchestratorError(
@@ -417,6 +459,21 @@ class Orchestrator:
         if self.tier not in VALID_TIERS:
             raise OrchestratorError(
                 f"invalid tier: {self.tier!r} (must be one of {VALID_TIERS})"
+            )
+        # Framework/tier compatibility: only enforce when a framework
+        # is supplied AND it's not in the Terraform family. ``None``
+        # (auto-detect deferred) skips this check — the per-pair loop
+        # picks the framework and gates the heavy passes there.
+        if (
+            framework is not None
+            and self.tier in ("plan", "state")
+            and not is_terraform_family(framework)
+        ):
+            raise OrchestratorError(
+                f"tier {self.tier!r} requires a Terraform-family "
+                f"framework; {framework!r} does not support plan/state "
+                f"tiers (terraform init/plan and Azure state-blob "
+                f"download are Terraform-only)"
             )
 
     @staticmethod
@@ -462,11 +519,17 @@ class Orchestrator:
         resolved_mapping: Path,
         resolved_baseline: Optional[Path],
         pairs: list[DiscoveredPair],
+        framework: Optional[str] = None,
     ) -> None:
         """Emit the per-run INFO banner before the per-pair loop starts.
 
         Extracted from :meth:`scan` so the top-level orchestrator reads
         as a thin glue layer.
+
+        Framework awareness (Todo 10): when ``framework`` is supplied,
+        the banner logs the detected framework(s) so the operator can
+        see at a glance which Checkov framework is active. ``None``
+        means auto-detect was deferred to the per-pair loop.
         """
         _log("INFO", f"mode: {mode}")
         _log("INFO", f"tier: {tier}")
@@ -474,6 +537,16 @@ class Orchestrator:
         _log("INFO", f"mapping: {resolved_mapping}")
         if resolved_baseline:
             _log("INFO", f"baseline: {resolved_baseline}")
+        # Log the detected framework(s) so operators can confirm which
+        # Checkov framework is active (Todo 10). ``None`` means the
+        # per-pair loop will auto-detect from the env dir's contents.
+        if framework is not None:
+            family = (
+                "terraform-family" if is_terraform_family(framework) else "non-terraform"
+            )
+            _log("INFO", f"framework: {framework} ({family})")
+        else:
+            _log("INFO", "framework: auto-detect (deferred to per-pair loop)")
         _log(
             "INFO",
             f"discovered {len(pairs)} (project, env) pair(s): "
@@ -620,12 +693,35 @@ class Orchestrator:
         state: _PairState,
         state_account: Optional[str],
     ) -> int:
-        """Drive one (project, env) pair through the tier-dispatched passes."""
+        """Drive one (project, env) pair through the tier-dispatched passes.
+
+        Framework awareness (Todo 10): the heavy Terraform-only passes
+        (``paac``, ``plan``, ``state``, ``drift``) and the Azure-specific
+        tier-2/3 prep (:meth:`_run_plan_tier`) are gated by
+        :func:`scanner.frameworks.is_terraform_family`. The single
+        ``is_terraform_family`` guard at the top of each heavy section
+        ensures non-Terraform frameworks (CloudFormation, Kubernetes,
+        Dockerfile, etc.) never invoke ``terraform init``, ``az storage
+        blob download``, or the PaaC pack. The ``source`` and
+        ``secrets`` passes are framework-agnostic and run for every
+        framework.
+        """
         pair_rc = 0
+
+        # Active framework for this pair (set by :meth:`scan` from the
+        # CLI ``--framework`` flag). ``None`` means auto-detect; the
+        # per-tier guards below fall through to the framework-agnostic
+        # passes only, so an unset framework still works for any repo
+        # type (consumers that defer framework selection get a safe
+        # source-tier-equivalent scan by default).
+        framework = getattr(self, "_framework", None)
+        is_tf = is_terraform_family(framework) if framework else True
 
         # Tier 2/3: terraform init + plan (acquires state lock, no mutation
         # beyond the firewall whitelist). Mirrors scan.sh lines 388-436.
-        if self.tier in ("plan", "state"):
+        # Terraform-family only — non-Terraform frameworks never invoke
+        # terraform or touch Azure storage.
+        if self.tier in ("plan", "state") and is_tf:
             tier_rc = self._run_plan_tier(state, state_account)
             if tier_rc < 0:
                 return pair_rc
@@ -633,30 +729,45 @@ class Orchestrator:
         # Compute pass list based on tier.
         passes = TIER_PASSES[self.tier]
 
-        if "paac" in passes:
+        # Pass 1: paac (custom policy-as-code). Terraform-family only —
+        # the pack was authored for Azure Terraform and is meaningless
+        # against CloudFormation/Kubernetes/Dockerfile.
+        if "paac" in passes and is_tf:
             pair_rc = self._accumulate(pair_rc, self._emit_paac(runner, state))
 
         # Pass 2: source (built-in terraform framework).
         # Mirrors scan.sh line 503: source tier runs this; plan/state
         # tier ALSO runs this (it is the deepest source layer).
+        # Framework-agnostic — every Checkov framework has a ``source``
+        # pass (cloudformation, kubernetes, etc.).
         if "source" in passes:
             pair_rc = self._accumulate(pair_rc, self._emit_source(runner, state))
 
         # Pass 3: plan (terraform_plan framework on plan.json).
-        if "plan" in passes:
+        # Terraform-family only — non-Terraform frameworks have no
+        # ``terraform plan`` output to scan.
+        if "plan" in passes and is_tf:
             plan_rc = self._emit_plan_pass(runner, state)
             if plan_rc is not None:
                 pair_rc = self._accumulate(pair_rc, plan_rc)
 
         # Pass 4: secrets (always when tier allows).
+        # Framework-agnostic — ``checkov --framework secrets`` runs on
+        # any text file regardless of source framework.
         if "secrets" in passes:
             pair_rc = self._accumulate(pair_rc, self._emit_secrets(runner, state))
 
         # Pass 5 (state-only): state-as-plan scan + drift diff.
-        if "state" in passes:
+        # Terraform-family only — the state-blob download is Azure+TF
+        # specific (az.blob_download) and has no analogue for other
+        # frameworks.
+        if "state" in passes and is_tf:
             self._scan_state_blob(runner, state, state_account)
 
         # Pass 6: shred plan artifacts (PCI 10.7 hygiene).
+        # Always run — harmless for non-TF pairs (no plan artifacts
+        # were created) and ensures the tier=plan/state paths still
+        # clean up after themselves.
         self._shred_plan_artifacts(state)
 
         return pair_rc
@@ -726,16 +837,43 @@ class Orchestrator:
         return 0
 
     def _emit_paac(self, runner: CheckovRunner, state: _PairState) -> int:
-        """Run the paac (custom policy-as-code) pass; record + return rc."""
+        """Run the paac (custom policy-as-code) pass; record + return rc.
+
+        Generic SARIF filename (``results_paac.sarif``) — single naming
+        contract shared with :mod:`scanner.aggregate` (Todo 9). The
+        caller (:meth:`_scan_one_pair`) gates the invocation behind
+        :func:`scanner.frameworks.is_terraform_family` so non-Terraform
+        frameworks never see the PaaC pass.
+        """
         paac_out = state.env_run_dir / "results_paac.sarif"
         rc = runner.run_paac(state.env_dir, paac_out)
         self._record_checkov_rc(rc, state, "paac")
         return rc
 
     def _emit_source(self, runner: CheckovRunner, state: _PairState) -> int:
-        """Run the built-in terraform source pass; record + return rc."""
-        src_out = state.env_run_dir / "results_terraform_source.sarif"
-        rc = runner.run_source(state.env_dir, src_out)
+        """Run the built-in source pass; record + return rc.
+
+        Generic SARIF filename (``results_source.sarif``) — single
+        naming contract shared with :mod:`scanner.aggregate` (Todo 9).
+        The aggregator's :data:`scanner.aggregate.OLD_TO_NEW_FILENAME`
+        still maps legacy ``results_terraform_source.sarif`` to
+        ``"source"`` for backward compatibility with old run-dirs.
+
+        Framework-aware (T11 — fix for F3 acceptance): the active
+        Checkov framework is selected via the ``--framework`` CLI flag
+        stored on ``self._framework`` (set in :meth:`scan`). When the
+        operator passed ``--framework cloudformation``, the source pass
+        MUST run with ``--framework cloudformation`` — otherwise the
+        default 'terraform' framework was scanning non-Terraform files
+        and emitting 0 findings plus a flood of irrelevant terraform
+        remediation blocks. When ``self._framework`` is ``None`` the
+        helper auto-detects from the env tree via
+        :func:`scanner.frameworks.detect_frameworks` and picks the
+        first detected framework as a best-effort default.
+        """
+        src_out = state.env_run_dir / "results_source.sarif"
+        fw = self._resolve_source_framework(state.env_dir)
+        rc = runner.run_source(state.env_dir, src_out, framework=fw)
         self._record_checkov_rc(rc, state, "source")
         return rc
 
@@ -748,16 +886,61 @@ class Orchestrator:
 
         Returns ``None`` when no plan.json is available (caller should
         skip accumulation); otherwise the checkov rc.
+
+        Generic SARIF filename (``results_plan.sarif``) — single naming
+        contract shared with :mod:`scanner.aggregate` (Todo 9). The
+        caller (:meth:`_scan_one_pair`) gates the invocation behind
+        :func:`scanner.frameworks.is_terraform_family` so non-Terraform
+        frameworks never invoke this pass.
         """
         if not (state.plan_json and state.plan_json.is_file()):
             return None
-        plan_out = state.env_run_dir / "results_terraform_plan.sarif"
+        plan_out = state.env_run_dir / "results_plan.sarif"
         rc = runner.run_plan(state.plan_json, plan_out, env_dir=state.env_dir)
         self._record_checkov_rc(rc, state, "plan")
         return rc
 
+    def _resolve_source_framework(self, env_dir: Path) -> str:
+        """Pick the framework to pass to :meth:`CheckovRunner.run_source`.
+
+        Resolution order (T11 — F3 fix):
+
+          1. If ``self._framework`` is set (``--framework <x>`` was passed),
+             use it verbatim. Checkov rejects unknown values, so no
+             name validation here.
+          2. Otherwise, auto-detect via
+             :func:`scanner.frameworks.detect_frameworks` and pick the
+             first detected framework. This is the per-pair equivalent
+             of the banner-level "auto-detect" log line emitted in
+             :meth:`_emit_scan_banner`.
+          3. If both fall through (no detection hits), default to
+             ``"terraform"`` so the historical contract — a generic
+             source scan over ``.tf`` files — is preserved for legacy
+             repos where detect_frameworks finds nothing.
+
+        Note that ``secrets`` is deliberately NOT in the auto-detect
+        set (see :data:`scanner.frameworks._DETECT_EXCLUDED`) — secrets
+        is handled by its own pass via :meth:`_emit_secrets`, not via
+        this helper.
+
+        Returns:
+            A non-empty Checkov framework name ready to pass to
+            :meth:`CheckovRunner.run_source` as the ``framework=`` arg.
+        """
+        explicit = getattr(self, "_framework", None)
+        if explicit:
+            return explicit
+        detected = sorted(detect_frameworks(env_dir))
+        if detected:
+            return detected[0]
+        return "terraform"
+
     def _emit_secrets(self, runner: CheckovRunner, state: _PairState) -> int:
-        """Run the secrets pass on the .tf source; record + return rc."""
+        """Run the secrets pass on the .tf source; record + return rc.
+
+        Generic SARIF filename (``results_secrets.sarif``) — single
+        naming contract shared with :mod:`scanner.aggregate` (Todo 9).
+        """
         secrets_out = state.env_run_dir / "results_secrets.sarif"
         rc = runner.run_secrets(state.env_dir, secrets_out)
         self._record_checkov_rc(rc, state, "secrets")
@@ -1813,8 +1996,8 @@ class Orchestrator:
         self._log_aggregate_rc(agg_rc, run_dir)
         return agg_rc
 
-    @staticmethod
     def _resolve_aggregate_argv(
+        self,
         run_dir: Path,
         mapping_path: Optional[Path],
         baseline_path: Optional[Path],
@@ -1823,12 +2006,36 @@ class Orchestrator:
 
         Mirrors scan.sh's aggregate invocation flags. Absolute paths
         are used so the aggregate step does not depend on CWD.
+
+        ``--source-framework`` (F3 fix — second stage): when the
+        orchestrator's active ``self._framework`` is set AND is not in
+        the Terraform family (e.g. ``"cloudformation"``,
+        ``"kubernetes"``, ``"dockerfile"``, …), we append
+        ``--source-framework <self._framework>`` so the aggregator
+        tags the source-pass findings with the correct framework label
+        instead of the historical ``"terraform"`` default. The
+        mapping from framework name to the loader's ``source`` key is
+        direct: the framework name IS the source key (e.g.
+        ``--framework cloudformation`` → ``--source-framework
+        cloudformation``), because Checkov emits the framework name
+        verbatim on its findings and ``parse_sarif`` carries it through
+        to ``Finding.framework``. When ``self._framework`` is in the
+        Terraform family (``"terraform"`` or ``"terraform_plan"``),
+        or is unset (auto-detect deferred to per-pair loop), we omit
+        the flag — the aggregate default ``--source-framework
+        terraform`` matches the historical contract for those scans.
         """
         argv: list[str] = ["aggregate.py", "--run-dir", str(run_dir)]
         if mapping_path is not None:
             argv += ["--mapping", str(mapping_path)]
         if baseline_path is not None:
             argv += ["--baseline", str(baseline_path)]
+        # Emit --source-framework ONLY for non-Terraform-family scans.
+        # The framework name from --framework IS the value to forward
+        # (Checkov emits the framework name verbatim on findings).
+        fw = getattr(self, "_framework", None)
+        if fw is not None and not is_terraform_family(fw):
+            argv += ["--source-framework", fw]
         return argv
 
     @staticmethod
@@ -2072,6 +2279,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not auto-open the generated report.html in the default browser after the scan.",
     )
+    parser.add_argument(
+        "--framework",
+        choices=tuple(SUPPORTED_FRAMEWORKS),
+        default=None,
+        metavar="NAME",
+        help=(
+            "Explicit Checkov framework (e.g., terraform, cloudformation, "
+            "kubernetes, dockerfile). Defaults to auto-detect from "
+            "<target-repo>. When set, tier 'plan' and tier 'state' are "
+            "rejected for non-Terraform-family frameworks — those tiers "
+            "require terraform init/plan and Azure state-blob download."
+        ),
+    )
     return parser
 
 
@@ -2188,6 +2408,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             include_modules=bool(getattr(args, "include_modules", False)),
             ignore_lockfile=bool(getattr(args, "ignore_lockfile", False)),
             registry_mirror=getattr(args, "registry_mirror", None),
+            framework=getattr(args, "framework", None),
         )
     except OrchestratorError as exc:
         _log("ERROR", str(exc))

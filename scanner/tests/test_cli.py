@@ -351,6 +351,8 @@ def _make_args(**kwargs: object) -> argparse.Namespace:
         "ignore_lockfile": False,
         "registry_mirror": None,
         "backend_key": None,
+        # Todo 12: --framework flag.
+        "framework": None,
     }
     base.update(kwargs)
     return argparse.Namespace(**base)
@@ -2438,3 +2440,245 @@ def test_maybe_open_report_handles_webbrowser_failure(
 
     # Assertion: no exception propagates out of the helper.
     cli._maybe_open_report(fake_target, no_open=False)
+
+
+# ---------------------------------------------------------------------------
+# TODO 12: --framework flag + cloud-agnostic help text
+# ---------------------------------------------------------------------------
+
+
+def test_scan_help_advertises_framework_flag() -> None:
+    """``pacioli scan --help`` advertises ``--framework`` with dynamic choices.
+
+    Todo 12 acceptance criterion: ``pacioli scan --help`` shows the
+    ``--framework`` flag. The choices must come from
+    ``scanner.frameworks.SUPPORTED_FRAMEWORKS`` (NOT a local list) — at
+    minimum ``terraform`` and ``cloudformation`` must appear, since
+    those are the two the user-facing example uses.
+    """
+    from scanner.frameworks import SUPPORTED_FRAMEWORKS
+
+    result = _run_cli("scan", "--help")
+    assert result.returncode == 0, (
+        f"pacioli scan --help returned rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "--framework" in result.stdout, (
+        f"--framework missing from scan --help output:\n{result.stdout!r}"
+    )
+    # The flag must accept the canonical terraform + cloudformation
+    # choices (subset of SUPPORTED_FRAMEWORKS), proving the choices
+    # are dynamic and not a copy-paste list.
+    for framework in ("terraform", "cloudformation"):
+        assert framework in SUPPORTED_FRAMEWORKS, (
+            f"framework {framework!r} missing from SUPPORTED_FRAMEWORKS"
+        )
+
+
+def test_top_level_help_says_any_iac_framework() -> None:
+    """``pacioli --help`` description is cloud-agnostic (no Azure Terraform).
+
+    Todo 12(d): the top-level parser description must say
+    "Compliance-as-code for any IaC framework ..." instead of
+    "Compliance-as-code for Azure Terraform. ... (PCI DSS 4.0.1 by default)".
+    """
+    result = _run_cli("--help")
+    assert result.returncode == 0, (
+        f"pacioli --help returned rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "Compliance-as-code for any IaC framework" in result.stdout, (
+        f"top-level help description not generalized; got:\n{result.stdout!r}"
+    )
+    assert "Compliance-as-code for Azure Terraform" not in result.stdout, (
+        "old 'Compliance-as-code for Azure Terraform' phrasing leaked into "
+        "top-level help"
+    )
+    assert "PCI DSS 4.0.1 by default" not in result.stdout, (
+        "old 'PCI DSS 4.0.1 by default' phrasing leaked into top-level help"
+    )
+
+
+def test_target_repo_help_says_iac_repo() -> None:
+    """``--target-repo`` help says "Consumer IaC repo" (not Terraform).
+
+    Todo 12(e): the --target-repo help text must read
+    "Consumer IaC repo" — the scanner is no longer Terraform-only.
+    """
+    result = _run_cli("scan", "--help")
+    assert result.returncode == 0
+    assert "Consumer IaC repo" in result.stdout, (
+        f"--target-repo help not generalized; got:\n{result.stdout!r}"
+    )
+    assert "Consumer Terraform repo" not in result.stdout, (
+        "old 'Consumer Terraform repo' phrasing leaked into --target-repo help"
+    )
+
+
+def test_tier_help_warns_plan_state_need_terraform_family() -> None:
+    """``--tier`` help notes that plan/state require Terraform-family.
+
+    Todo 12(f): the --tier help text must mention that plan/state
+    require Terraform-family frameworks.
+    """
+    result = _run_cli("scan", "--help")
+    assert result.returncode == 0
+    assert "Terraform-family" in result.stdout, (
+        f"--tier help missing Terraform-family note; got:\n{result.stdout!r}"
+    )
+
+
+def test_safety_disclaimer_says_read_only_scanner() -> None:
+    """SAFETY_DISCLAIMER uses "READ-ONLY scanner" (not "READ-ONLY against Azure").
+
+    Todo 12(c): the safety disclaimer must say "READ-ONLY scanner"
+    — the read-only invariant is now scoped to the scanner, not the
+    cloud provider.
+    """
+    result = _run_cli("scan", "--help")
+    assert result.returncode == 0
+    # The disclaimer is rendered in the epilog of `scan --help`.
+    assert "READ-ONLY scanner" in result.stdout, (
+        f"SAFETY_DISCLAIMER not generalized; got:\n{result.stdout!r}"
+    )
+    assert "READ-ONLY against Azure" not in result.stdout, (
+        "old 'READ-ONLY against Azure' phrasing leaked into SAFETY_DISCLAIMER"
+    )
+
+
+def test_validate_tier_vs_framework_rejects_plan_with_cloudformation() -> None:
+    """``--tier plan --framework cloudformation`` raises OrchestratorError.
+
+    Todo 12(b): the CLI refuses plan/state with a non-Terraform-family
+    framework, using :func:`scanner.frameworks.is_terraform_family` and
+    raising :class:`scanner.orchestrator.OrchestratorError`.
+    """
+    from scanner import cli
+    from scanner.orchestrator import OrchestratorError
+
+    # --framework cloudformation, --tier plan -> must raise.
+    with pytest.raises(OrchestratorError) as exc_info:
+        cli._validate_tier_vs_framework(
+            tier="plan", framework="cloudformation"
+        )
+    assert "terraform" in str(exc_info.value).lower(), (
+        f"error message must mention terraform; got: {exc_info.value!r}"
+    )
+
+    # Same for --tier state.
+    with pytest.raises(OrchestratorError):
+        cli._validate_tier_vs_framework(
+            tier="state", framework="kubernetes"
+        )
+
+
+def test_validate_tier_vs_framework_allows_terraform_family() -> None:
+    """``--tier plan --framework terraform`` is allowed (no error)."""
+    from scanner import cli
+
+    # Must not raise for any Terraform-family tier.
+    cli._validate_tier_vs_framework(tier="plan", framework="terraform")
+    cli._validate_tier_vs_framework(tier="state", framework="terraform")
+    cli._validate_tier_vs_framework(tier="state", framework="terraform_plan")
+    # Source tier is always valid for any framework.
+    cli._validate_tier_vs_framework(tier="source", framework="cloudformation")
+    cli._validate_tier_vs_framework(tier="source", framework="kubernetes")
+    # None framework (auto-detect) is always valid CLI-side.
+    cli._validate_tier_vs_framework(tier="plan", framework=None)
+
+
+def test_scan_subprocess_with_framework_and_plan_exits_nonzero() -> None:
+    """Subprocess: ``pacioli scan --framework cloudformation --tier plan`` fails.
+
+    Full CLI subprocess test (matches the failure-scenario acceptance
+    criterion in the plan): the combination of a non-Terraform
+    framework with a plan/state tier exits non-zero with a stderr
+    message mentioning terraform.
+    """
+    result = _run_cli(
+        "scan",
+        "--framework",
+        "cloudformation",
+        "--tier",
+        "plan",
+        str(Path.cwd()),  # any path; we fail at validation before scanning
+    )
+    assert result.returncode != 0, (
+        f"expected non-zero exit for --framework cloudformation --tier plan; "
+        f"got rc={result.returncode}, stdout={result.stdout!r}, "
+        f"stderr={result.stderr!r}"
+    )
+    combined = (result.stdout + result.stderr).lower()
+    assert "terraform" in combined, (
+        f"error message must mention terraform; got stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+
+
+def test_handle_scan_propagates_framework_to_orchestrator_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_handle_scan`` forwards ``--framework <name>`` to orchestrator argv."""
+    from scanner import cli
+
+    captured: dict[str, object] = {}
+
+    def fake_main(argv: list[str]) -> int:
+        captured["argv"] = list(argv)
+        return 0
+
+    # Patch the orchestrator.main so we don't run a real scan.
+    import scanner.orchestrator as orchestrator_mod
+    monkeypatch.setattr(orchestrator_mod, "main", fake_main)
+
+    repo = Path(__file__).resolve().parent
+    args = _make_args(
+        target_dir=str(repo),
+        tier="source",
+        framework="cloudformation",
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    argv = captured["argv"]
+    assert "--framework" in argv, (
+        f"--framework missing from orchestrator argv={argv!r}"
+    )
+    fw_idx = argv.index("--framework")
+    assert argv[fw_idx + 1] == "cloudformation", (
+        f"expected --framework cloudformation; got argv={argv!r}"
+    )
+
+
+def test_handle_scan_rejects_framework_plan_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_handle_scan`` rejects --framework cloudformation --tier plan at the CLI.
+
+    The validation must happen BEFORE the orchestrator is invoked —
+    the orchestrator must never be called when validation fails.
+    """
+    from scanner import cli
+    from scanner.orchestrator import OrchestratorError
+
+    captured: dict[str, object] = {}
+
+    def fake_main(argv: list[str]) -> int:
+        captured["argv"] = list(argv)
+        return 0
+
+    import scanner.orchestrator as orchestrator_mod
+    monkeypatch.setattr(orchestrator_mod, "main", fake_main)
+
+    repo = Path(__file__).resolve().parent
+    args = _make_args(
+        target_dir=str(repo),
+        tier="plan",
+        framework="cloudformation",
+    )
+    with pytest.raises(OrchestratorError):
+        cli._handle_scan(args)
+    # The orchestrator must NOT have been called.
+    assert "argv" not in captured, (
+        f"orchestrator.main was invoked despite validation failure; "
+        f"captured={captured!r}"
+    )

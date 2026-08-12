@@ -1,11 +1,12 @@
 """Round-trip parity tests for `pacioli baseline init`.
 
 These tests prove that the YAML emitted by ``scanner.baseline_init``
-is loadable by ``scanner.aggregate.load_pci_baseline`` and that every
-stub entry exposes the fields the aggregation rule depends on.
+is loadable by ``scanner.aggregate.load_baseline`` (formerly named
+``load_baseline``) and that every stub entry exposes the fields
+the aggregation rule depends on.
 
 The 7 fields the producer (``baseline_init._build_stub_entries``) writes
-AND that the consumer (``load_pci_baseline``) round-trips are:
+AND that the consumer (``load_baseline``) round-trips are:
 
     check_id
     resource_pattern
@@ -28,7 +29,7 @@ without anyone noticing until production.
 Note: A broader audit contract mentions 9 fields (adding ``approved_by``
 and ``approved_on``). Neither ``baseline_init`` nor ``aggregate.py``
 currently produces or consumes those fields; they're tracked separately
-outside the scanner's PCI baseline format. This test pins the *actual*
+outside the scanner's baseline format. This test pins the *actual*
 schema, not the aspirational one.
 """
 from __future__ import annotations
@@ -42,7 +43,8 @@ import yaml
 # conftest.py (in this directory) adds the project root to sys.path so
 # `from scanner.foo import ...` resolves cleanly.
 from scanner import baseline_init
-from scanner.aggregate import load_pci_baseline
+from scanner.aggregate import load_baseline
+from scanner.frameworks import SARIF_PROPERTY_ENV, SARIF_PROPERTY_PROJECT
 
 
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -67,8 +69,9 @@ def _write_combined_sarif(run_dir: Path, runs: list[dict]) -> Path:
     Args:
         run_dir: Root run directory (e.g. ``tmp_path``).
         runs: List of run objects to embed. Each run is a SARIF run
-            with optional ``properties`` (pci_project, pci_env) and
-            ``results`` (each result has ``ruleId`` and ``locations``).
+            with optional ``properties`` (project, env, both names
+            imported from ``scanner.frameworks``) and ``results``
+            (each result has ``ruleId`` and ``locations``).
 
     Returns:
         Path to the written combined.sarif.
@@ -86,10 +89,13 @@ def _write_combined_sarif(run_dir: Path, runs: list[dict]) -> Path:
 
 
 def _make_run(project: str, env: str, results: list[dict]) -> dict:
-    """Build a minimal SARIF run with pci_project/pci_env properties."""
+    """Build a minimal SARIF run with project/env properties."""
     return {
         "tool": {"driver": {"name": "checkov", "version": "3.0.0"}},
-        "properties": {"pci_project": project, "pci_env": env},
+        "properties": {
+            SARIF_PROPERTY_PROJECT: project,
+            SARIF_PROPERTY_ENV: env,
+        },
         "results": results,
     }
 
@@ -160,10 +166,10 @@ def baseline_path(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_baseline_init_yaml_loads_via_load_pci_baseline(
+def test_baseline_init_yaml_loads_via_load_baseline(
     run_dir_with_two_findings: Path, baseline_path: Path
 ) -> None:
-    """Round-trip: emitted YAML must be accepted by ``load_pci_baseline``.
+    """Round-trip: emitted YAML must be accepted by ``load_baseline``.
 
     This is the headline parity test. It runs the CLI against a
     synthetic SARIF and asserts that the resulting YAML parses back
@@ -179,7 +185,7 @@ def test_baseline_init_yaml_loads_via_load_pci_baseline(
     assert baseline_path.is_file(), "baseline file was not written"
 
     # The same loader the aggregator uses at scan time.
-    entries = load_pci_baseline(baseline_path)
+    entries = load_baseline(baseline_path)
     assert isinstance(entries, list)
     # Synthetic SARIF had 2 distinct (check_id, resource) pairs; the
     # duplicate was deduped.
@@ -192,7 +198,7 @@ def test_baseline_init_emits_all_required_fields(
     """Every stub entry must carry all 7 fields the round-trip contract requires.
 
     The producer (``baseline_init``) and the consumer
-    (``load_pci_baseline``) both honor the same field set. The
+    (``load_baseline``) both honor the same field set. The
     suppression rule is gated on owner + expires_on. If those drift
     to a different key name, the rule silently breaks. This test
     pins the field set so a producer-side regression is caught here
@@ -206,7 +212,7 @@ def test_baseline_init_emits_all_required_fields(
     )
     assert rc == 0
 
-    entries = load_pci_baseline(baseline_path)
+    entries = load_baseline(baseline_path)
     assert len(entries) == 2
 
     for entry in entries:
@@ -285,7 +291,7 @@ def test_baseline_init_append_merges_with_existing(
     )
     assert rc == 0, "baseline init --append exited non-zero"
 
-    entries = load_pci_baseline(baseline_path)
+    entries = load_baseline(baseline_path)
     check_ids = {e["check_id"] for e in entries}
     assert "CKV_AZURE_50" in check_ids, "promoted entry was lost on --append"
     assert "CKV_AZURE_206" in check_ids, "new stub was not added on --append"
@@ -337,7 +343,7 @@ def test_baseline_init_replaces_without_append(
     )
     assert rc == 0
 
-    entries = load_pci_baseline(baseline_path)
+    entries = load_baseline(baseline_path)
     check_ids = {e["check_id"] for e in entries}
     assert "CKV_AZURE_OLD" not in check_ids, (
         "pre-existing entry should have been replaced by default-init"

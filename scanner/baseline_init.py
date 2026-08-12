@@ -46,6 +46,10 @@ except ImportError:
     sys.exit(2)
 
 from scanner.paths import PathResolutionError
+from scanner.frameworks import (  # noqa: E402  (SARIF property name contract)
+    SARIF_PROPERTY_ENV,
+    SARIF_PROPERTY_PROJECT,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +105,13 @@ def _collect_stub_pairs(sarif_data: dict) -> dict[tuple[str, str], dict[str, set
     """Dedup SARIF results into ``(check_id, uri) -> {projects, envs}`` buckets.
 
     Walks every run/result in ``sarif_data`` and accumulates the
-    ``(pci_project, pci_env)`` tuples that produced each
+    ``(project, env)`` tuples that produced each
     ``(ruleId, physicalLocation.uri)`` pair. Pair with no project or env
     metadata still receives a bucket so the stub survives.
+
+    Property names are read from ``scanner.frameworks`` so the contract
+    is shared with ``aggregate.write_combined_sarif`` (single source of
+    truth).
     """
     seen: dict[tuple[str, str], dict[str, set]] = defaultdict(
         lambda: {"projects": set(), "envs": set()}
@@ -111,8 +119,8 @@ def _collect_stub_pairs(sarif_data: dict) -> dict[tuple[str, str], dict[str, set
 
     for run in sarif_data.get("runs", []) or []:
         props = run.get("properties", {}) or {}
-        project = props.get("pci_project", "") or ""
-        env = props.get("pci_env", "") or ""
+        project = props.get(SARIF_PROPERTY_PROJECT, "") or ""
+        env = props.get(SARIF_PROPERTY_ENV, "") or ""
 
         for result in run.get("results", []) or []:
             check_id = result.get("ruleId", "UNKNOWN") or "UNKNOWN"

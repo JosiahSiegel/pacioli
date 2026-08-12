@@ -8,6 +8,69 @@ framework_version: '4.0.1'
 pci_dss_version: 4.0.1  # legacy alias; kept for backward compat
 doc_anchor: https://listings.pcisecuritystandards.org/documents/PCI-DSS-v3-2-1-to-v4-0-Summary-of-Changes-r1.pdf
 doc_anchor_wayback_full_pdf: https://web.archive.org/web/20241231102554if_/https://docs-prv.pcisecuritystandards.org/PCI%20DSS/Standard/PCI-DSS-v4_0_1.pdf
+
+# Per-requirement chain-of-custody ledger. Each entry maps a requirement
+# id to a verification status emitted as the `chain_of_custody_complete`
+# column on the coverage_matrix.csv row and as the inline CoC badge on
+# the per-finding HTML block.
+# Values:
+#   "True"    -> source URL was live-verified (HEAD 200 + fingerprint match)
+#   "partial" -> historical verification; current run did not re-verify
+#   ""        -> no entry (treated identically to out-of-scope rows)
+chain_of_custody:
+  '1.2.1': 'True'
+  '1.3': 'True'
+  '1.3.1': 'True'
+  '1.3.2': 'True'
+  '1.3.3': 'True'
+  '2.2.4': 'True'
+  '2.2.6': 'True'
+  '3.4': 'True'
+  '3.5.1': 'True'
+  '3.5.1.1': 'True'
+  '4.2.1': 'True'
+  '6.4.2': 'True'
+  '6.4.3': 'True'
+  '7.2.1': 'True'
+  '8.3.1': 'True'
+  '8.3.10': 'True'
+  '8.6': 'True'
+  '8.6.1': 'True'
+  '8.6.2': 'True'
+  '8.6.3': 'True'
+  '10.2.1': 'True'
+  '10.7': 'True'
+  '11.4.5': 'True'
+  '11.6.1': 'True'
+
+# Audit-traceability metadata. Carried on every coverage_gaps.csv row so
+# the CSV is a self-contained reproducibility record. These are
+# PCI-SSC-URL-specific metadata (the librarian probes the live anchor
+# and records the fingerprint). For a SOC 2 / CIS / NIST pack, override
+# these in the new pack's YAML.
+librarian_verified_at: '2026-08-05'
+librarian_verified_fingerprint:
+  url: https://listings.pcisecuritystandards.org/documents/PCI-DSS-v3-2-1-to-v4-0-Summary-of-Changes-r1.pdf
+  byte_size: 477973
+  content_type: application/pdf
+  http_status: 200
+  fingerprint_match: true
+  past_90d_availability_pct: 99.0
+
+# Note-token allow-list. Some reqs have no working Checkov coverage; the
+# mapping author declares a symbolic `PACIOLI_NOTE_<id>` token in the
+# `checks:` list and pairs it with a human-readable `note:` field. The
+# aggregator treats any token in this list as expected_count=0 in
+# coverage_gaps and emits the corresponding `note:` text as triage_hint.
+# The prefix is generic (was `CKV_AZURE_PCI_NOTE_*` pre-T7) so SOC 2 /
+# CIS / NIST packs can use the same convention.
+note_tokens:
+  - PACIOLI_NOTE_10_7
+  - PACIOLI_NOTE_3_4
+  - PACIOLI_NOTE_3_5_1_1
+  - PACIOLI_NOTE_8_3_1
+  - PACIOLI_NOTE_8_3_10
+  - PACIOLI_NOTE_11_4_5
 requirements:
 - id: 1.2.1
   title: Configuration standards for NSCs are defined and implemented
@@ -89,7 +152,7 @@ requirements:
 - id: '3.4'
   title: Access to displays of full PAN and the ability to copy PAN is restricted
   checks:
-  - CKV_AZURE_PCI_NOTE_3_4
+  - PACIOLI_NOTE_3_4
   - CKV2_AZURE_38
   - CKV_AZURE_199
   - CKV_AZURE_226
@@ -165,7 +228,7 @@ requirements:
   title: All access to system components is authenticated via strong authentication
   checks:
   - CKV_AZURE_1
-  - CKV_AZURE_PCI_NOTE_8_3_1
+  - PACIOLI_NOTE_8_3_1
   - CKV2_AZURE_40
   - CKV2_AZURE_41
   - CKV_AZURE_13
@@ -210,18 +273,18 @@ requirements:
 - id: '10.7'
   title: Audit logs are retained for at least 12 months
   checks:
-  - CKV_AZURE_PCI_NOTE_10_7
+  - PACIOLI_NOTE_10_7
   - CKV_AZURE_24
   - CKV2_AZURE_38
   out_of_scope: false
   approach: defined
-  note: PCI 10.7 (audit log retention 12 months) has no working Checkov 3.3.9 coverage; CKV_AZURE_211 is App Service plan production-use, not retention. Tracked as a note token (CKV_AZURE_PCI_NOTE_10_7).
+  note: PCI 10.7 (audit log retention 12 months) has no working Checkov 3.3.9 coverage; CKV_AZURE_211 is App Service plan production-use, not retention. Tracked as a note token (PACIOLI_NOTE_10_7).
 - id: 11.6.1
   title: Change- and tamper-detection mechanism for payment-page HTTP headers and content
   checks: []
   out_of_scope: false
   approach: defined
-  note: 'IaC coverage is indirect: WAF policy (azurerm_application_gateway) and App Service site_config. Tracked as a note token (CKV_AZURE_PCI_NOTE_11_4_5).'
+  note: 'IaC coverage is indirect: WAF policy (azurerm_application_gateway) and App Service site_config. Tracked as a note token (PACIOLI_NOTE_11_4_5).'
 - id: 1.3.1
   title: Inbound traffic to the CDE is restricted
   checks:
@@ -245,14 +308,14 @@ requirements:
 - id: 3.5.1.1
   title: Hashes used to render PAN unreadable (when stored) are keyed cryptographic hashes
   checks:
-  - CKV_AZURE_PCI_NOTE_3_5_1_1
+  - PACIOLI_NOTE_3_5_1_1
   out_of_scope: false
   approach: defined
   note: Coverage via custom Checkov PaaC rule on azurerm_mssql_database TDE + key algorithm; scoped for follow-up PR.
 - id: 8.3.10
   title: All user accounts used by third parties (and any associated authentication factors) are authenticated using multi-factor authentication
   checks:
-  - CKV_AZURE_PCI_NOTE_8_3_10
+  - PACIOLI_NOTE_8_3_10
   out_of_scope: false
   approach: defined
   note: IaC coverage via custom RBAC/MFA check; process controls outside IaC scope for users.
@@ -290,7 +353,7 @@ requirements:
 - id: 11.4.5
   title: Failures of (and unauthorized changes to) critical security control systems (including audit log files) are detected and responded to
   checks:
-  - CKV_AZURE_PCI_NOTE_11_4_5
+  - PACIOLI_NOTE_11_4_5
   - CKV2_AZURE_2
   - CKV2_AZURE_3
   - CKV2_AZURE_4
@@ -432,3 +495,49 @@ out_of_scope_requirements:
   approved_on: '2026-08-05'
   expires_on: '2027-08-05'
   evidence_link: https://learn.microsoft.com/en-us/entra/standards/pci-requirement-10
+
+# Per-check severity overrides. The aggregator consults this table when
+# the SARIF producer (e.g. Checkov 3.3.9) does not emit
+# `properties.severity`. Values are upper-case: HIGH | MEDIUM | LOW |
+# CRITICAL. Any check_id not listed falls through to DEFAULT_SEVERITY.
+# Comments carry the PCI req that motivated the override so future
+# auditors can trace a finding back to a control without grepping code.
+#
+# Keys are Checkov rule IDs (`CKV_AZURE_<N>` / `CKV2_AZURE_<N>`).
+# Format MUST match the lookup table the code consumes:
+#   rule.properties.severity > severity_overrides[check_id] > DEFAULT_SEVERITY
+severity_overrides:
+  # Storage encryption / TLS / HTTPS (PCI 4.2.1, 3.5.1, 1.2.1)
+  CKV_AZURE_44: HIGH     # Storage Account TLS latest version (PCI 4.2.1)
+  CKV_AZURE_206: HIGH    # Storage Accounts use replication (ZRS/GRS) (PCI 1.3/2.2.4)
+  CKV_AZURE_3: HIGH      # Storage supportsHttpsTrafficOnly (PCI 4.2.1)
+  CKV_AZURE_41: HIGH     # Azure resource expiration date set on secrets (PCI 3.5.1)
+  CKV_AZURE_208: HIGH    # Azure Cognitive Search SLA for index updates (PCI 7.2.1)
+  CKV_AZURE_2: HIGH      # Managed disk have encryption enabled (PCI 3.5.1)
+  CKV_AZURE_110: HIGH    # Key Vault enables purge protection (PCI 3.6.5)
+  CKV_AZURE_111: HIGH    # Key Vault enables soft delete (PCI 3.6.5)
+  CKV_AZURE_109: HIGH    # Key Vault allows firewall rules (PCI 1.2.1)
+  CKV_AZURE_42: HIGH     # Key Vault is recoverable (PCI 3.6.5)
+  # Network segmentation / CDE access (PCI 1.2.1, 1.3)
+  CKV_AZURE_9: HIGH      # RDP access restricted from internet (PCI 1.3.4)
+  CKV_AZURE_10: HIGH     # SSH access restricted from internet (PCI 1.3.4)
+  CKV_AZURE_59: HIGH     # Storage disallow public access (PCI 1.2.1)
+  CKV_AZURE_113: HIGH    # SQL server disables public network access (PCI 1.3)
+  CKV_AZURE_117: HIGH    # AKS uses disk encryption set (PCI 1.3)
+  CKV_AZURE_212: HIGH    # App Service min instances for failover (PCI 1.2.1 / 10.2.1)
+  CKV_AZURE_214: HIGH    # App Service always on (PCI 1.2.1)
+  CKV2_AZURE_1: HIGH     # Storage critical data encrypted with CMK (PCI 3.5.1)
+  CKV2_AZURE_32: HIGH    # Key Vault private endpoint configured (PCI 7.2.1; tie-break with CKV2_AZURE_33)
+  # Access control (PCI 7, 8)
+  CKV_AZURE_1: HIGH      # VM basic auth (PCI 6.4.3 / 8.3.1)
+  # Logging (PCI 10)
+  CKV_AZURE_18: MEDIUM   # Web App http2_enabled (PCI 10.2.1)
+  CKV_AZURE_19: MEDIUM   # Web App standard pricing tier (NOT NSG flow logs)
+  CKV_AZURE_211: HIGH    # 10.7 has no working Checkov coverage as of Checkov 3.3.9; see note above
+  # App Service / Functions
+  CKV_AZURE_15: HIGH     # Web App TLS latest version (PCI 4.2.1)
+  CKV_AZURE_17: HIGH     # App Service client certificates (PCI 6.4.3)
+  CKV_AZURE_57: HIGH     # App Service CORS disallow-all (PCI 1.3 / 6.4.3)
+  CKV_AZURE_70: MEDIUM   # Function app HTTPS only (PCI 4.2.1)
+  # Default = MEDIUM for any check not listed here.
+

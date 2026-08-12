@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scanner import cli as scanner_cli  # noqa: E402
 from scanner import orchestrator as scanner_orchestrator  # noqa: E402
 from scanner import safety as scanner_safety  # noqa: E402
-from scanner.checkov_runner import _SARIF_BASENAME  # noqa: E402
+from scanner.checkov_runner import CheckovRunner, _SARIF_BASENAME  # noqa: E402
 from scanner.orchestrator import (  # noqa: E402
     Orchestrator,
     OrchestratorError,
@@ -194,6 +194,13 @@ def test_source_only_scan_produces_per_pair_sarifs(
     each env dir contains one SARIF per pass. We assert the per-pass
     filenames the orchestrator documents in
     ``scanner.orchestrator._scan_one_pair``.
+
+    Todo 10: the orchestrator now writes the generic SARIF names
+    (``results_source.sarif``, ``results_paac.sarif``,
+    ``results_secrets.sarif``) — shared with the aggregator's
+    ``walk_run_dir`` so write/read paths agree. Legacy
+    ``results_terraform_source.sarif`` filenames still aggregate via
+    :data:`scanner.aggregate.OLD_TO_NEW_FILENAME`.
     """
     _make_env_tree(
         tmp_path,
@@ -219,7 +226,7 @@ def test_source_only_scan_produces_per_pair_sarifs(
 
     expected_sarifs = {
         "results_paac.sarif",
-        "results_terraform_source.sarif",
+        "results_source.sarif",
         "results_secrets.sarif",
     }
     actual_sarifs = {p.name for p in pair_dir.iterdir() if p.suffix == ".sarif"}
@@ -2167,3 +2174,589 @@ def test_open_report_handles_webbrowser_failure(monkeypatch: pytest.MonkeyPatch)
 
     # Assertion: no exception propagates out of the helper.
     Orchestrator._open_report(Path("/tmp/report.html"), no_open=False)
+
+
+# ---------------------------------------------------------------------------
+# Todo 10 — framework-aware tier model and SARIF dispatch
+# ---------------------------------------------------------------------------
+# These tests pin the framework-awareness contract introduced in T10:
+#   * ``_validate_mode_and_tier(framework=...)`` raises OrchestratorError
+#     when a non-Terraform framework is paired with tier plan/state.
+#   * ``_scan_one_pair`` gates paac/plan/state passes behind
+#     :func:`scanner.frameworks.is_terraform_family` so non-Terraform
+#     scans never invoke terraform or az.blob_download.
+#   * The CLI ``pacioli scan --framework cloudformation --tier plan
+#     <dir>`` exits with OrchestratorError mentioning Terraform-family.
+#   * ``--framework`` appears in the orchestrator's help text.
+#   * PaaC runs for ``terraform`` AND ``terraform_plan`` but NOT for
+#     ``cloudformation`` / ``kubernetes``.
+# Each test is hermetic (tmp_path + monkeypatch) and asserts a single
+# observable contract.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_mode_and_tier_rejects_plan_with_cloudformation() -> None:
+    """--tier plan with --framework cloudformation raises OrchestratorError.
+
+    Todo 10 acceptance criteria: a non-Terraform framework paired
+    with tier ``plan`` produces a hard :class:`OrchestratorError` whose
+    message mentions ``Terraform-family`` — never a silent skip. The
+    ``_validate_mode_and_tier`` helper is the single boundary that
+    surfaces this misconfiguration to the user.
+    """
+    orch = Orchestrator(mode="report", tier="plan")
+    with pytest.raises(OrchestratorError) as exc_info:
+        orch._validate_mode_and_tier(framework="cloudformation")
+    msg = str(exc_info.value)
+    assert "Terraform-family" in msg, (
+        f"error must mention Terraform-family so the user understands "
+        f"the constraint; got: {msg!r}"
+    )
+    assert "cloudformation" in msg, (
+        f"error must name the offending framework; got: {msg!r}"
+    )
+
+
+def test_validate_mode_and_tier_rejects_state_with_kubernetes() -> None:
+    """--tier state with --framework kubernetes raises OrchestratorError.
+
+    Symmetric to the cloudformation case: tier ``state`` requires
+    terraform init/plan and Azure state-blob download, which are
+    Terraform-only. ``kubernetes`` (manifests + Helm) cannot satisfy
+    those preconditions.
+    """
+    orch = Orchestrator(mode="report", tier="state")
+    with pytest.raises(OrchestratorError) as exc_info:
+        orch._validate_mode_and_tier(framework="kubernetes")
+    assert "Terraform-family" in str(exc_info.value)
+
+
+def test_validate_mode_and_tier_accepts_plan_with_terraform_family() -> None:
+    """--tier plan with --framework terraform (or terraform_plan) is allowed.
+
+    Both ``terraform`` and ``terraform_plan`` are members of
+    :data:`scanner.frameworks.TERRAFORM_FAMILY_FRAMEWORKS`, so the
+    validation accepts them. This guards against an over-broad
+    rejection that would break the canonical Terraform flow.
+    """
+    for framework in ("terraform", "terraform_plan"):
+        orch = Orchestrator(mode="report", tier="plan")
+        # No raise.
+        orch._validate_mode_and_tier(framework=framework)
+        orch._validate_mode_and_tier(framework=framework)
+
+
+def test_validate_mode_and_tier_accepts_source_with_any_framework() -> None:
+    """--tier source is allowed for every framework (Terraform or not).
+
+    The source tier runs only framework-agnostic passes
+    (``checkov --framework <x>`` + ``secrets``), so it must remain
+    valid for CloudFormation, Kubernetes, Dockerfile, etc. The
+    validation must not silently reject any framework at tier source.
+    """
+    for framework in (
+        "terraform", "cloudformation", "kubernetes",
+        "dockerfile", "helm", "bicep",
+    ):
+        orch = Orchestrator(mode="report", tier="source")
+        # No raise.
+        orch._validate_mode_and_tier(framework=framework)
+
+
+def test_validate_mode_and_tier_no_framework_defers_to_per_pair_loop() -> None:
+    """``framework=None`` skips the tier/framework compatibility check.
+
+    When the operator doesn't pin a framework (defer to auto-detect),
+    the per-pair loop in :meth:`_scan_one_pair` resolves the
+    framework from the env dir and gates the heavy passes there. The
+    upfront validation must not block this deferred path.
+    """
+    orch = Orchestrator(mode="report", tier="plan")
+    # No raise — framework is None so the check is skipped.
+    orch._validate_mode_and_tier(framework=None)
+
+
+def test_scan_one_pair_skips_terraform_passes_for_cloudformation(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cloudformation scan never invokes terraform subprocess or paac.
+
+    Todo 10 QA scenario: mocks a CloudFormation-only repo and asserts
+    that no terraform subprocess is invoked and no Azure-specific
+    helper fires. The paac / plan / state / drift passes are gated
+    by :func:`scanner.frameworks.is_terraform_family` so they short-
+    circuit for ``framework='cloudformation'``.
+
+    Note: tier=source is used because tier=plan/state is rejected
+    upfront by :meth:`Orchestrator._validate_mode_and_tier` for
+    non-Terraform frameworks (covered separately by
+    ``test_validate_mode_and_tier_rejects_plan_with_cloudformation``).
+    This test exercises the per-pair pass-dispatch guard in
+    :meth:`_scan_one_pair` for source tier.
+    """
+    # Build a CloudFormation-only repo (no .tf files). The orchestrator
+    # auto-detects ``cloudformation`` from the file patterns in
+    # scanner.frameworks.FRAMEWORK_FILE_PATTERNS.
+    env_dir = tmp_path / "env" / "payments" / "prod"
+    env_dir.mkdir(parents=True)
+    (env_dir / "main.template.yaml").write_text(
+        "AWSTemplateFormatVersion: '2010-09-09'\n"
+        "Resources:\n"
+        "  Bucket:\n"
+        "    Type: AWS::S3::Bucket\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "runs"
+
+    # Record calls to every Terraform-only helper. None should fire.
+    terraform_helpers_called: list[str] = []
+
+    def record(name: str):
+        def fake(self, *args, **kwargs):  # noqa: ANN001 — test stub
+            terraform_helpers_called.append(name)
+            return 0
+        return fake
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_run_plan_tier",
+        record("run_plan_tier"),
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_alert_network_required",
+        record("alert_network_required"),
+    )
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_scan_state_blob",
+        record("scan_state_blob"),
+    )
+
+    # PaaC emit must NOT be called for non-TF framework.
+    paac_called: list[bool] = []
+
+    class _PaacSpy(CheckovRunner):
+        def run_paac(self, env_dir, out):  # noqa: ANN001 — test stub
+            paac_called.append(True)
+            return 0
+
+        def run_source(self, env_dir, out):  # noqa: ANN001 — test stub
+            (out.parent / "results_source.sarif").write_text("{}", encoding="utf-8")
+            return 0
+
+        def run_secrets(self, env_dir, out):  # noqa: ANN001 — test stub
+            (out.parent / "results_secrets.sarif").write_text("{}", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr("scanner.aggregate.main", lambda: 0, raising=False)
+
+    orch = Orchestrator(mode="report", tier="source")
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=None,
+        framework="cloudformation",
+    )
+
+    assert rc == 0, f"cloudformation scan should succeed; rc={rc}"
+    assert terraform_helpers_called == [], (
+        f"no Terraform-only helpers should fire for framework=cloudformation; "
+        f"got: {terraform_helpers_called}"
+    )
+    assert paac_called == [], (
+        f"PaaC must NOT run for non-TF framework; got: {paac_called}"
+    )
+
+
+def test_scan_one_pair_paac_runs_for_terraform_family(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+) -> None:
+    """PaaC runs for both ``framework='terraform'`` and ``framework='terraform_plan'``.
+
+    Todo 10 QA scenario: PaaC is gated by
+    :func:`scanner.frameworks.is_terraform_family`, which returns True
+    for both ``terraform`` AND ``terraform_plan``. This test pins the
+    explicit member test so a future refactor that drops
+    ``terraform_plan`` from the family set gets caught here.
+    """
+    # Both frameworks must satisfy the family check.
+    assert scanner_orchestrator.is_terraform_family("terraform")
+    assert scanner_orchestrator.is_terraform_family("terraform_plan")
+
+
+def test_orchestrator_help_documents_framework_flag() -> None:
+    """``--framework`` appears in the orchestrator's ``--help`` output.
+
+    The CLI surface (cli.py) and the orchestrator's standalone CLI
+    (``pacioli-scan``) both expose ``--framework`` so operators can
+    pin the Checkov framework. This guards against accidental removal
+    from either entry point.
+    """
+    parser = _build_arg_parser()
+    help_text = parser.format_help()
+    assert "--framework" in help_text, (
+        f"--framework must appear in --help output; got:\n{help_text}"
+    )
+
+
+def test_cli_help_documents_framework_flag() -> None:
+    """``pacioli scan --help`` surfaces ``--framework``.
+
+    The unified CLI (``pacioli scan`` / ``pacioli gate``) is the
+    operator-facing entry point. ``--framework`` must be in the help
+    text so operators can discover it.
+    """
+    from scanner.cli import _build_parser
+
+    parser = _build_parser()
+    # Find the subparsers action; its ``choices`` dict is the named
+    # subparsers (scan / gate / aggregate / ...). argparse stores the
+    # subparsers action under ``_subparsers`` but that's an internal;
+    # iterating ``_actions`` is portable.
+    scan_p = None
+    for action in parser._actions:  # noqa: SLF001 — argparse internals
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict) and "scan" in choices:
+            scan_p = choices["scan"]
+            break
+    assert scan_p is not None, "scan subparser not found in cli parser"
+    help_text = scan_p.format_help()
+    assert "--framework" in help_text, (
+        f"--framework must appear in `pacioli scan --help`; got:\n{help_text}"
+    )
+
+
+def test_emit_source_writes_generic_results_source_sarif(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_emit_source`` writes ``results_source.sarif`` (not terraform_source).
+
+    Todo 10: ONE naming contract shared between the orchestrator (write
+    side) and the aggregator's ``walk_run_dir`` (read side). The
+    legacy ``results_terraform_source.sarif`` filename is still
+    recognized by the aggregator via
+    :data:`scanner.aggregate.OLD_TO_NEW_FILENAME` for backward
+    compatibility, but the orchestrator always emits the generic
+    name.
+    """
+    env_run_dir = tmp_path / "pair"
+    env_run_dir.mkdir()
+    state = scanner_orchestrator._PairState(
+        project="p",
+        env="e",
+        env_run_dir=env_run_dir,
+        env_dir=tmp_path,
+    )
+
+    class _StubRunner:
+        def __init__(self):
+            self.calls = []
+
+        def run_source(self, env_dir, out, framework="terraform"):  # noqa: ANN001
+            self.calls.append({"framework": framework})
+            out.write_text("{}", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_record_checkov_rc",
+        lambda self, rc, state, name: None,
+    )
+    orch = Orchestrator()
+    runner = _StubRunner()
+    orch._emit_source(runner, state)
+
+    produced = list(env_run_dir.glob("*.sarif"))
+    assert any(p.name == "results_source.sarif" for p in produced), (
+        f"orchestrator must write results_source.sarif; got: "
+        f"{[p.name for p in produced]}"
+    )
+    assert not any(
+        p.name == "results_terraform_source.sarif" for p in produced
+    ), "orchestrator must NOT emit legacy terraform_source filename"
+
+
+def test_emit_plan_pass_writes_generic_results_plan_sarif(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_emit_plan_pass`` writes ``results_plan.sarif`` (not terraform_plan).
+
+    Symmetric to the source-pass filename test: the plan pass writes
+    the generic SARIF name. The legacy alias is handled on the
+    aggregator's read side.
+    """
+    env_run_dir = tmp_path / "pair"
+    env_run_dir.mkdir()
+    plan_json = env_run_dir / "plan.json"
+    plan_json.write_text(
+        json.dumps({"format_version": "1.2", "resource_changes": []}),
+        encoding="utf-8",
+    )
+    state = scanner_orchestrator._PairState(
+        project="p",
+        env="e",
+        env_run_dir=env_run_dir,
+        env_dir=tmp_path,
+        plan_json=plan_json,
+    )
+
+    class _StubRunner:
+        def run_plan(self, plan_json, out, env_dir=None):  # noqa: ANN001
+            out.write_text("{}", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_record_checkov_rc",
+        lambda self, rc, state, name: None,
+    )
+    orch = Orchestrator()
+    rc = orch._emit_plan_pass(_StubRunner(), state)
+    assert rc == 0
+
+    produced = list(env_run_dir.glob("*.sarif"))
+    assert any(p.name == "results_plan.sarif" for p in produced), (
+        f"orchestrator must write results_plan.sarif; got: "
+        f"{[p.name for p in produced]}"
+    )
+    assert not any(
+        p.name == "results_terraform_plan.sarif" for p in produced
+    )
+
+
+def test_scan_with_framework_cloudformation_tier_plan_orchestrator_error(
+    tmp_path: Path,
+) -> None:
+    """``pacioli scan --framework cloudformation --tier plan <dir>`` exits with OrchestratorError.
+
+    Todo 10 acceptance criteria: invoking the CLI with a non-Terraform
+    framework and tier ``plan`` (or ``state``) must fail with an
+    :class:`OrchestratorError` whose message contains
+    ``Terraform-family`` — never a silent skip. We exercise the
+    validation directly (the CLI dispatch adds parser plumbing but
+    the validation is what surfaces the error).
+    """
+    orch = Orchestrator(mode="report", tier="plan")
+    with pytest.raises(OrchestratorError) as exc_info:
+        orch._validate_mode_and_tier(framework="cloudformation")
+    assert "Terraform-family" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Framework propagation through _emit_source (T11 — F3 acceptance fix)
+# ---------------------------------------------------------------------------
+# The bug: ``_emit_source`` previously called ``runner.run_source(env_dir,
+# out)`` with no framework argument, so CheckovRunner defaulted to
+# ``"terraform"``. A CFN-only stack therefore ran the wrong Checkov
+# framework (returning 0 findings) and the legacy terraform_remediation
+# path emitted 89 azurerm remediation blocks. The fix routes
+# ``self._framework`` (set from ``--framework``) through to
+# ``run_source(..., framework=<x>)``. The tests below pin all three
+# resolution paths: explicit framework, auto-detect, and the empty-
+# detection fallback.
+
+
+def test_emit_source_passes_explicit_framework_to_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--framework cloudformation`` flows through to ``run_source``.
+
+    F3 acceptance: when the operator pins the framework via the CLI,
+    the source pass MUST execute Checkov with the named framework —
+    no implicit fallback to ``"terraform"``.
+    """
+    env_run_dir = tmp_path / "pair"
+    env_run_dir.mkdir()
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    state = scanner_orchestrator._PairState(
+        project="p",
+        env="e",
+        env_run_dir=env_run_dir,
+        env_dir=env_dir,
+    )
+
+    class _StubRunner:
+        def __init__(self):
+            self.captured_framework: str | None = None
+
+        def run_source(self, env_dir, out, framework="terraform"):  # noqa: ANN001
+            self.captured_framework = framework
+            out.write_text("{}", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_record_checkov_rc",
+        lambda self, rc, state, name: None,
+    )
+    orch = Orchestrator()
+    orch._framework = "cloudformation"
+    runner = _StubRunner()
+    orch._emit_source(runner, state)
+
+    assert runner.captured_framework == "cloudformation", (
+        f"run_source must be called with framework='cloudformation'; "
+        f"got {runner.captured_framework!r}"
+    )
+
+
+def test_emit_source_auto_detects_framework_when_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``--framework`` is absent, the helper auto-detects from env_dir.
+
+    Mirrors the banner's "auto-detect (deferred to per-pair loop)" line:
+    the actual framework per pair is resolved at scan time, not at parse
+    time. Detection picks the first detected framework in sorted order
+    for determinism.
+    """
+    env_run_dir = tmp_path / "pair"
+    env_run_dir.mkdir()
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    # Plant a CFN template so detect_frameworks yields {"cloudformation"}.
+    # Name MUST end in .template.yaml to match FRAMEWORK_FILE_PATTERNS glob.
+    (env_dir / "bucket.template.yaml").write_text(
+        "AWSTemplateFormatVersion: '2010-09-09'\n"
+        "Resources:\n"
+        "  Bucket:\n"
+        "    Type: AWS::S3::Bucket\n",
+        encoding="utf-8",
+    )
+    state = scanner_orchestrator._PairState(
+        project="p",
+        env="e",
+        env_run_dir=env_run_dir,
+        env_dir=env_dir,
+    )
+
+    class _StubRunner:
+        def __init__(self):
+            self.captured_framework: str | None = None
+
+        def run_source(self, env_dir, out, framework="terraform"):  # noqa: ANN001
+            self.captured_framework = framework
+            out.write_text("{}", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_record_checkov_rc",
+        lambda self, rc, state, name: None,
+    )
+    orch = Orchestrator()
+    orch._framework = None
+    runner = _StubRunner()
+    orch._emit_source(runner, state)
+
+    assert runner.captured_framework == "cloudformation", (
+        f"auto-detect should pick 'cloudformation' for a CFN-only env; "
+        f"got {runner.captured_framework!r}"
+    )
+
+
+def test_emit_source_falls_back_to_terraform_when_nothing_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty/unknown env trees fall back to ``"terraform"`` (legacy contract)."""
+    env_run_dir = tmp_path / "pair"
+    env_run_dir.mkdir()
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    # No IaC files at all — detect_frameworks returns set().
+    state = scanner_orchestrator._PairState(
+        project="p",
+        env="e",
+        env_run_dir=env_run_dir,
+        env_dir=env_dir,
+    )
+
+    class _StubRunner:
+        def __init__(self):
+            self.captured_framework: str | None = None
+
+        def run_source(self, env_dir, out, framework="terraform"):  # noqa: ANN001
+            self.captured_framework = framework
+            out.write_text("{}", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_record_checkov_rc",
+        lambda self, rc, state, name: None,
+    )
+    orch = Orchestrator()
+    orch._framework = None
+    runner = _StubRunner()
+    orch._emit_source(runner, state)
+
+    assert runner.captured_framework == "terraform", (
+        f"empty env_dir must fall back to 'terraform'; "
+        f"got {runner.captured_framework!r}"
+    )
+
+
+def test_emit_source_default_orchestrator_uses_auto_detect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A freshly-constructed Orchestrator (no explicit framework) auto-detects.
+
+    The orchestrator's ``__init__`` does NOT set ``_framework`` (only
+    :meth:`scan` does, from the CLI kwarg). The helper must therefore
+    consult ``getattr(self, "_framework", None)`` (not raise AttributeError)
+    when invoked outside ``scan()``. This pins that contract.
+    """
+    env_run_dir = tmp_path / "pair"
+    env_run_dir.mkdir()
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "main.tf").write_text(
+        'resource "null_resource" "x" {}\n', encoding="utf-8"
+    )
+    state = scanner_orchestrator._PairState(
+        project="p",
+        env="e",
+        env_run_dir=env_run_dir,
+        env_dir=env_dir,
+    )
+
+    class _StubRunner:
+        def __init__(self):
+            self.captured_framework: str | None = None
+
+        def run_source(self, env_dir, out, framework="terraform"):  # noqa: ANN001
+            self.captured_framework = framework
+            out.write_text("{}", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr(
+        scanner_orchestrator.Orchestrator,
+        "_record_checkov_rc",
+        lambda self, rc, state, name: None,
+    )
+    orch = Orchestrator()
+    assert not hasattr(orch, "_framework"), (
+        "fresh Orchestrator must NOT pre-populate _framework"
+    )
+    runner = _StubRunner()
+    orch._emit_source(runner, state)
+
+    assert runner.captured_framework == "terraform", (
+        f"detected terraform from .tf fixture; got {runner.captured_framework!r}"
+    )

@@ -1,10 +1,14 @@
-"""scanner/safety.py — Hard refusals for any operation that mutates Azure.
+"""scanner/safety.py — Hard refusals for any operation that mutates your cloud provider.
 
 Python port of lib/safety.sh. Enforces the scanner's READ-ONLY invariant
-against Azure. The ONLY Azure access permitted is the read-only state
-blob download used by the state tier (``az storage blob download``).
-The storage firewall IP whitelist mutations formerly done by tf_init.sh
-were removed: the scanner never modifies the Azure storage firewall.
+against the cloud provider. The ONLY provider access permitted today is
+the read-only state blob download used by the state tier
+(``az storage blob download``); the refusal matrix itself is shaped
+around Terraform + Azure because that is what the state tier invokes
+(equivalent AWS / GCP / Kubernetes refusal patterns will be added in
+the same shape as those tiers land). The storage firewall IP whitelist
+mutations formerly done by tf_init.sh were removed: the scanner never
+modifies the cloud-provider storage firewall.
 
 To extend: add a new forbidden pattern to REFUSE_PATTERN (regex) and a
 human-readable reason to REFUSE_REASON (dict entry).
@@ -126,12 +130,15 @@ _ALLOWED_COMPILED: Final[tuple[re.Pattern[str], ...]] = tuple(
 
 
 class SafetyGuard:
-    """Enforces the scanner's READ-ONLY invariant against Azure.
+    """Enforces the scanner's READ-ONLY invariant against your cloud provider.
 
     A refusal matrix ported from lib/safety.sh — every mutating Terraform,
     Azure CLI, and Checkov command is refused unless it matches an
     explicit ALLOWED_EXCEPTION (state blob download only — the firewall
-    network-rule mutation is no longer permitted and was removed).
+    network-rule mutation is no longer permitted and was removed). The
+    matrix is currently Azure-flavored because the state tier invokes
+    `az storage blob download`; the structure is designed to grow to
+    cover AWS / GCP / Kubernetes refusal patterns as their tiers land.
     """
 
     def refuse_if_mutating(self, cmd: str) -> None:

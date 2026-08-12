@@ -53,6 +53,29 @@ from checkov_url_overrides import (  # noqa: E402
     RULE_SOURCE_URLS as CHECKOV_RULE_SOURCE_URLS,
 )
 
+# Single source of truth for SARIF run-level property names. The
+# aggregator writes these tags on each run in combined.sarif;
+# baseline_init reads them back. Generic names (no PCI prefix) so any
+# framework pack can reuse the same contract.
+# NOTE on the requirement-filter constants: ``REQUIREMENT_DATA_ATTR`` and
+# ``REQUIREMENT_FILTER_ID`` are consumed in the Python code (one
+# interpolates into an HTML attribute, the other is referenced as the
+# single source of truth for the in-page filter id). The JS-side
+# counterparts (``REQUIREMENT_GLOBAL_FILTER_ID``,
+# ``REQUIREMENT_FILTER_STATE_KEY``, ``REQUIREMENT_FILTER_COOKIE_KEY``)
+# are defined in ``scanner.frameworks`` for the same single-source-of-
+# truth reason but the JS string is currently literal-named to match
+# the existing CSS. aggregate.py re-exports them so importers find the
+# contract in one place.
+from scanner.frameworks import (  # noqa: E402
+    REQUIREMENT_DATA_ATTR,
+    REQUIREMENT_FILTER_ID,
+    SARIF_PROPERTY_ENV,
+    SARIF_PROPERTY_PROJECT,
+    SARIF_PROPERTY_SOURCE_SARIF,
+    is_terraform_family,
+)
+
 # ---------------------------------------------------------------------------
 # Force UTF-8 I/O across the board.
 #
@@ -98,7 +121,7 @@ class Finding:
     line: int
     message: str
     framework: str  # terraform_plan | secrets
-    pci_requirements: list[str] = field(default_factory=list)
+    requirements: list[str] = field(default_factory=list)
     suppressed: bool = False
     # SARIF 2.1.0 helpUri from runs[].tool.driver.rules[]. Carry-through
     # so the HTML report can render an "Azure doc" link without having
@@ -168,184 +191,279 @@ class EnvResult:
 
 
 SEVERITY_OVERRIDE: dict[str, str] = {
-    # Storage encryption / TLS / HTTPS (PCI 4.2.1, 3.5.1, 1.2.1)
-    "CKV_AZURE_44": "HIGH",   # Storage Account TLS latest version (PCI 4.2.1)
-    "CKV_AZURE_206": "HIGH",  # Storage Accounts use replication (ZRS/GRS) (PCI 1.3/2.2.4)
-    "CKV_AZURE_3": "HIGH",    # Storage supportsHttpsTrafficOnly (PCI 4.2.1)
-    "CKV_AZURE_41": "HIGH",   # Azure resource expiration date set on secrets (PCI 3.5.1)
-    "CKV_AZURE_208": "HIGH",  # Azure Cognitive Search SLA for index updates (PCI 7.2.1)
-    "CKV_AZURE_2": "HIGH",    # Managed disk have encryption enabled (PCI 3.5.1)
-    "CKV_AZURE_110": "HIGH",  # Key Vault enables purge protection (PCI 3.6.5)
-    "CKV_AZURE_111": "HIGH",  # Key Vault enables soft delete (PCI 3.6.5)
-    "CKV_AZURE_109": "HIGH",  # Key Vault allows firewall rules (PCI 1.2.1)
-    "CKV_AZURE_42": "HIGH",   # Key Vault is recoverable (PCI 3.6.5)
-    # Network segmentation / CDE access (PCI 1.2.1, 1.3)
-    "CKV_AZURE_9": "HIGH",    # RDP access restricted from internet (PCI 1.3.4)
-    "CKV_AZURE_10": "HIGH",   # SSH access restricted from internet (PCI 1.3.4)
-    "CKV_AZURE_59": "HIGH",   # Storage disallow public access (PCI 1.2.1)
-    "CKV_AZURE_113": "HIGH",  # SQL server disables public network access (PCI 1.3)
-    "CKV_AZURE_117": "HIGH",  # AKS uses disk encryption set (PCI 1.3)
-    "CKV_AZURE_212": "HIGH",  # App Service min instances for failover (PCI 1.2.1 / 10.2.1)
-    "CKV_AZURE_214": "HIGH",  # App Service always on (PCI 1.2.1)
-    "CKV2_AZURE_1": "HIGH",   # Storage critical data encrypted with CMK (PCI 3.5.1)
-    "CKV2_AZURE_32": "HIGH",  # Key Vault private endpoint configured (PCI 7.2.1; tie-break with CKV2_AZURE_33)
-    # Access control (PCI 7, 8)
-    "CKV_AZURE_1": "HIGH",    # VM basic auth (PCI 6.4.3 / 8.3.1)
-    # Logging (PCI 10)
-    "CKV_AZURE_18": "MEDIUM", # Web App http2_enabled (PCI 10.2.1)
-    "CKV_AZURE_19": "MEDIUM", # Web App standard pricing tier (NOT NSG flow logs)
-    "CKV_AZURE_211": "HIGH",  # 10.7 has no working Checkov coverage as of Checkov 3.3.9; see pci_mapping.yaml note
-    # App Service / Functions
-    "CKV_AZURE_15": "HIGH",   # Web App TLS latest version (PCI 4.2.1)
-    "CKV_AZURE_17": "HIGH",   # App Service client certificates (PCI 6.4.3)
-    "CKV_AZURE_57": "HIGH",   # App Service CORS disallow-all (PCI 1.3 / 6.4.3)
-    "CKV_AZURE_70": "MEDIUM", # Function app HTTPS only (PCI 4.2.1)
-    # Watch for "diagnostic settings" pattern (CKV2_AZURE_21 = storage diag).
-    # Default = MEDIUM for unknown.
+    # Thin alias kept for back-compat with any external callers that
+    # import ``SEVERITY_OVERRIDE`` directly. The authoritative table
+    # now lives at ``mappings/pci_dss_4.0.1.yaml`` under the
+    # top-level ``severity_overrides`` key, and is consumed via
+    # ``resolve_severity(check_id, mapping_pack)`` so each framework
+    # pack can carry its own severity policy.
+    #
+    # The dict is populated lazily on first access by
+    # ``_load_pci_severity_overrides()`` so unit tests and CLI tools
+    # that import the module without a mapping pack still get a
+    # usable (empty-by-default) override table.
 }
 
 # Default severity for any check not in the override table.
 DEFAULT_SEVERITY = "MEDIUM"
 
+# Default mapping-pack path used by ``_load_pci_severity_overrides``
+# when no pack is supplied (e.g. legacy callers that touch
+# ``SEVERITY_OVERRIDE`` without going through ``resolve_severity``).
+_DEFAULT_SEVERITY_OVERRIDES_PATH = (
+    Path(__file__).resolve().parent / "mappings" / "pci_dss_4.0.1.yaml"
+)
+
+
+def _load_pci_severity_overrides(
+    mapping_pack: dict | None = None,
+) -> dict[str, str]:
+    """Return the ``severity_overrides`` table from a mapping pack.
+
+    Lookup contract (multi-cloud generalization):
+
+    1. If ``mapping_pack`` is supplied and declares a non-empty
+       ``severity_overrides`` dict, return THAT table and nothing
+       else. We never silently mix per-pack overrides with the
+       install-bundled PCI overrides -- a SOC 2 / CIS / NIST pack
+       that omits a check_id wants the lookup to MISS so the call
+       falls through to ``DEFAULT_SEVERITY``.
+    2. If ``mapping_pack`` is ``None`` (legacy callers, CLI tools
+       that import the module without a pack), fall back to:
+
+       a. The legacy module-level ``SEVERITY_OVERRIDE`` dict
+          (kept for any external caller that populates it
+          directly).
+       b. The install-bundled ``mappings/pci_dss_4.0.1.yaml`` if
+          the legacy dict is empty.
+
+    Returns an empty dict in degraded mode (no mapping pack
+    reachable, malformed YAML, missing file). Never raises -- the
+    SARIF loader must keep going even if the severity table is
+    missing.
+    """
+    # Fast path: pack supplied + declares overrides. This is the
+    # ONLY path that consults the pack's own table -- once a pack
+    # is in play, we trust its overrides (or its absence) and
+    # refuse to backfill from the PCI pack.
+    if isinstance(mapping_pack, dict):
+        so = mapping_pack.get("severity_overrides")
+        if isinstance(so, dict) and so:
+            return {str(k): str(v) for k, v in so.items()}
+        # Pack supplied but no overrides key (or empty value).
+        # Return empty so the caller falls through to
+        # DEFAULT_SEVERITY for every check -- we do NOT silently
+        # substitute the PCI pack (that would be a framework
+        # mismatch bug for a SOC 2 / CIS pack).
+        return {}
+
+    # Back-compat path: legacy SEVERITY_OVERRIDE dict (kept for any
+    # external callers that populate it directly).
+    if SEVERITY_OVERRIDE:
+        return SEVERITY_OVERRIDE
+
+    # Final fallback: load install-bundled pack (only when no
+    # mapping_pack was supplied at all).
+    try:
+        data = yaml.safe_load(_DEFAULT_SEVERITY_OVERRIDES_PATH.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    so = data.get("severity_overrides")
+    if not isinstance(so, dict) or not so:
+        return {}
+    return {str(k): str(v) for k, v in so.items()}
+
+
+def resolve_severity(
+    check_id: str,
+    mapping_pack: dict | None = None,
+    *,
+    rule_severity: str | None = None,
+) -> str:
+    """Resolve the canonical severity for a finding.
+
+    Precedence (highest first):
+
+    1. ``rule_severity`` -- the SARIF rule's ``properties.severity``
+       (when the producer emits it). Upper-cased before comparison.
+    2. ``mapping_pack["severity_overrides"][check_id]`` -- the
+       per-pack override table. Lookup is pack-scoped: a brand-new
+       SOC 2 / CIS pack that omits ``severity_overrides`` (or
+       declares an empty table) sees MISS for every check and
+       falls through to ``DEFAULT_SEVERITY``. The function does
+       NOT silently substitute the install-bundled PCI pack -- that
+       would be a framework-mismatch bug.
+    3. ``DEFAULT_SEVERITY`` (``"MEDIUM"``).
+
+    Parameters
+    ----------
+    check_id:
+        The Checkov / SARIF rule ID (e.g. ``"CKV_AZURE_44"``).
+    mapping_pack:
+        The parsed mapping YAML (the ``mapping_data`` dict ``main()``
+        loads). Optional -- if omitted, the install-bundled PCI pack
+        is consulted (legacy behavior).
+    rule_severity:
+        Optional SARIF ``properties.severity`` string. May be
+        ``None`` or empty (Checkov 3.3.9 does not emit it).
+
+    Returns
+    -------
+    str
+        Upper-case severity tag: ``HIGH`` | ``MEDIUM`` | ``LOW`` |
+        ``CRITICAL``. Always non-empty.
+    """
+    if rule_severity:
+        upper = str(rule_severity).strip().upper()
+        if upper:
+            return upper
+    overrides = _load_pci_severity_overrides(mapping_pack)
+    if check_id in overrides:
+        v = str(overrides[check_id]).strip().upper()
+        if v:
+            return v
+    return DEFAULT_SEVERITY
+
+
 # ---------------------------------------------------------------------------
-# PCI_NOTE_TOKENS allow-list (see PCI_NOTE_TOKENS docstring)
+# NOTE_TOKENS allow-list (generic, framework-agnostic)
 # ---------------------------------------------------------------------------
-# Some PCI reqs in pci_mapping.yaml have no working Checkov 3.3.9 coverage.
-# Rather than map a Checkov rule that does not actually evaluate the control
-# (which produces a misleading coverage_gaps row that says "expected" but
-# never fires correctly), the mapping author can declare a symbolic
-# `CKV_AZURE_PCI_NOTE_<id>` token in the `checks:` list and pair it with a
-# human-readable `note:` field. The aggregator treats any token in this
-# allow-list as `expected_count=0` in coverage_gaps and emits the
-# corresponding `note:` text as the row's `triage_hint`. This achieves the
-# same audit effect as an empty `checks: []` row (the 11.6.1 precedent,
-# pci_mapping.yaml lines 152-178) but keeps a token in the list so the
-# auditor can tell at a glance which reqs carry a note vs. a Checkov rule.
+# Some reqs in the mapping pack have no working Checkov coverage.
+# Rather than map a Checkov rule that does not actually evaluate the
+# control (which produces a misleading coverage_gaps row that says
+# "expected" but never fires correctly), the mapping author can declare
+# a symbolic `PACIOLI_NOTE_<id>` token in the `checks:` list and pair
+# it with a human-readable `note:` field. The aggregator treats any
+# token in this allow-list as `expected_count=0` in coverage_gaps and
+# emits the corresponding `note:` text as the row's `triage_hint`.
 #
-# Schema in pci_mapping.yaml:
-#   - id: "10.7"
-#     checks: [CKV_AZURE_PCI_NOTE_10_7]
-#     note: "PCI 10.7 (audit log retention 12 months) has no working ..."
+# Schema in the mapping pack YAML:
+#   note_tokens:
+#     - PACIOLI_NOTE_10_7
+#   requirements:
+#     - id: "10.7"
+#       checks: [PACIOLI_NOTE_10_7]
+#       note: "..."
 #
-# The token is opaque to the SARIF engine -- Checkov never sees it, so it
-# cannot fire -- and opaque to the coverage matrix in the sense that
-# `expected_by_req` skips the token before computing
+# The token is opaque to the SARIF engine -- Checkov never sees it, so
+# it cannot fire -- and opaque to the coverage matrix in the sense
+# that `expected_by_req` skips the token before computing
 # `expected_count` / `missing_count` (see build_coverage_matrix and
 # compute_coverage_gaps).
 #
-# Add new entries ONLY via a follow-up commit that ALSO updates the
-# corresponding pci_mapping.yaml row + `note:`. T5 added
-# CKV_AZURE_PCI_NOTE_3_4; T6 added CKV_AZURE_PCI_NOTE_8_3_1.
-PCI_NOTE_TOKENS: set[str] = {
-    "CKV_AZURE_PCI_NOTE_10_7",
-    "CKV_AZURE_PCI_NOTE_3_4",
-    "CKV_AZURE_PCI_NOTE_3_5_1_1",
-    "CKV_AZURE_PCI_NOTE_8_3_1",
-    "CKV_AZURE_PCI_NOTE_8_3_10",
-    "CKV_AZURE_PCI_NOTE_11_4_5",
-}
+# The Python default is an empty set. The mapping pack provides its
+# own list via ``note_tokens`` at the top level. ``resolve_note_tokens``
+# returns the pack's list (or the empty default).
+NOTE_TOKENS_DEFAULT: set[str] = set()
+
+
+def _resolve_note_tokens(mapping_pack: dict | None) -> set[str]:
+    """Return the active ``note_tokens`` allow-list for a mapping pack.
+
+    Graceful degradation: a pack without ``note_tokens`` (or with a
+    non-list value) returns the empty set. The renderers treat the
+    empty set as "no notes; behave like a normal SARIF row".
+    """
+    if not isinstance(mapping_pack, dict):
+        return NOTE_TOKENS_DEFAULT
+    tokens = mapping_pack.get("note_tokens")
+    if not isinstance(tokens, list):
+        return NOTE_TOKENS_DEFAULT
+    return {str(t) for t in tokens if isinstance(t, str)}
+
 
 # ---------------------------------------------------------------------------
 # Chain-of-custody ledger
 # ---------------------------------------------------------------------------
-# Every PCI req row in coverage_matrix.csv carries an explicit
+# Every req row in coverage_matrix.csv carries an explicit
 # `chain_of_custody_complete` cell so an auditor can verify each
 # framework citation is live. The cell value semantics:
 #
-#   "True"   -> pci_source_url slot live-verified at write time:
+#   "True"   -> source URL slot live-verified at write time:
 #              HEAD 2xx, fingerprint match, retrieval date documented.
 #   "partial"-> historical verification present but current run did not
 #              re-verify (e.g. URL not currently reachable, or
 #              fingerprint not parsed). Operator must re-run
 #              manually re-verify and confirm the link is live.
-#   ""       -> out-of-scope row (no pci_source_url slot; the OOS row's
+#   ""       -> out-of-scope row (no doc_anchor slot; the OOS row's
 #              evidence_link is a separate slot).
 #
-# Live-verified anchor (verified 2026-08-04): the PCI SSC
-# Summary-of-Changes v3.2.1->v4.0 PDF returns HEAD 200,
-# application/pdf, 477973 bytes. The full standard PDF is mirrored
-# at the Wayback Machine URL stored in pci_mapping.yaml's
-# `doc_anchor_wayback_full_pdf`. Every in-scope PCI req shares this
-# single PCI SSC anchor; no per-req sub-anchor is required for
-# v4.0.1 because the document is a single PDF.
-#
-# Truth table below MUST match the in-scope ids in pci_mapping.yaml.
-# If a new PCI req row is added to pci_mapping.yaml without extending
-# this dict, the operator will see an empty cell in
-# coverage_matrix.csv. See docs/OPERATOR_GUIDE.md -> "Quarterly
-# review" for the re-validation cadence.
-PCI_SOURCE_VERIFIED_AT = "2026-08-05"
-PCI_REQ_CHAIN_OF_CUSTODY: dict[str, str] = {
-    # Req 1 (network segmentation) -- live anchor verified
-    "1.2.1":  "True",
-    "1.3":    "True",
-    "1.3.1":  "True",
-    "1.3.2":  "True",
-    "1.3.3":  "True",
-    # Req 2 (secure configurations)
-    "2.2.4":  "True",
-    "2.2.6":  "True",
-    # Req 3 (stored account data)
-    "3.4":    "True",
-    "3.5.1":  "True",
-    "3.5.1.1":"True",
-    # Req 4 (transmission cryptography)
-    "4.2.1":  "True",
-    # Req 6.4 (public-facing app attack prevention; was 6.2.4 prior)
-    "6.4.2":  "True",
-    "6.4.3":  "True",
-    # Req 7 (access control model)
-    "7.2.1":  "True",
-    # Req 8 (auth)
-    "8.3.1":  "True",
-    "8.3.10": "True",
-    "8.6":    "True",
-    "8.6.1":  "True",
-    "8.6.2":  "True",
-    "8.6.3":  "True",
-    # Req 10 (log + monitor)
-    "10.2.1": "True",
-    "10.7":   "True",
-    # Req 11.4.5 / 11.6.1 -- v4.0.1 future-dated mandatory
-    "11.4.5": "True",
-    "11.6.1": "True",
-}
+# The previous PCI-specific Python constant (``PCI_REQ_CHAIN_OF_CUSTODY``)
+# moved into the mapping pack YAML under the top-level ``chain_of_custody``
+# key. The Python default is an empty dict; the value comes from the
+# pack. ``resolve_chain_of_custody`` returns the per-pack dict.
+CHAIN_OF_CUSTODY_DEFAULT: dict[str, str] = {}
+
+
+def _resolve_chain_of_custody(mapping_pack: dict | None) -> dict[str, str]:
+    """Return the per-requirement chain-of-custody ledger for a pack.
+
+    A pack without ``chain_of_custody`` (or with a non-dict value)
+    returns the empty dict. The mapping pack YAML in
+    ``mappings/pci_dss_4.0.1.yaml`` carries the PCI-specific ledger.
+    """
+    if not isinstance(mapping_pack, dict):
+        return CHAIN_OF_CUSTODY_DEFAULT
+    coc = mapping_pack.get("chain_of_custody")
+    if not isinstance(coc, dict):
+        return CHAIN_OF_CUSTODY_DEFAULT
+    return {str(k): str(v) for k, v in coc.items()}
+
 
 # ---------------------------------------------------------------------------
-# Audit-traceability ledger
+# Audit-traceability ledger (librarian probe metadata)
 # ---------------------------------------------------------------------------
 # The coverage_gaps.csv report must let a compliance auditor
-# REPRODUCE the "no findings" verdict for each missing check_id.
-# The probe below was a HEAD/GET against the PCI SSC anchor; the
-# captured observation is:
+# REPRODUCE the "no findings" verdict for each missing check_id. The
+# mapping pack (PCI-SSC URL specific) carries the librarian probe
+# metadata under the top-level ``librarian_verified_at`` and
+# ``librarian_verified_fingerprint`` keys. For other frameworks
+# (SOC 2, CIS, NIST), the mapping pack author overrides these keys.
 #
-#   fingerprint            : 477973-byte body, application/pdf
-#   url                    : PCI SSC v3.2.1->v4.0 Summary-of-Changes PDF
-#   wayback mirror         : pci_mapping.yaml `doc_anchor_wayback_full_pdf`
-#   retry-policy           : HEAD -> GET on redirect; --max-time 30s; pause
-#                            1.5s between probes; max 2 retries on 5xx
-#   past-90d-availability  : >= 99% (one operator-reported incident on
-#                            2025-03-04; document in your team's
-#                            incident log)
-#
-# These constants are emitted on EVERY coverage_gaps row so that the
-# CSV is self-describing even when the operator has no access to the
-# run directory's intermediate files.
+# Defaults are empty so a pack without librarian metadata emits
+# empty cells in coverage_gaps.csv (acceptable for non-PCI packs).
 # ---------------------------------------------------------------------------
-LIBRARIAN_VERIFIED_AT = "2026-08-05"
-LIBRARIAN_VERIFIED_FINGERPRINT = {
-    "url": "https://listings.pcisecuritystandards.org/documents/PCI-DSS-v3-2-1-to-v4-0-Summary-of-Changes-r1.pdf",
-    "byte_size": 477973,
-    "content_type": "application/pdf",
-    "http_status": 200,
-    "fingerprint_match": True,
-    # Past-90d availability estimate. Replace with your team's
-    # monitoring data when you re-verify.
-    "past_90d_availability_pct": 99.0,
+LIBRARIAN_VERIFIED_AT_DEFAULT: str = ""
+LIBRARIAN_VERIFIED_FINGERPRINT_DEFAULT: dict = {
+    "url": "",
+    "byte_size": 0,
+    "content_type": "",
+    "http_status": 0,
+    "fingerprint_match": False,
+    "past_90d_availability_pct": 0.0,
 }
 
 
-def parse_sarif(sarif_path: Path, project: str, env: str, framework: str) -> list[Finding]:
+def _resolve_librarian_metadata(
+    mapping_pack: dict | None,
+) -> tuple[str, dict]:
+    """Return ``(librarian_verified_at, librarian_verified_fingerprint)``.
+
+    Empty defaults when the pack omits the keys. The fingerprint is
+    copied (not aliased) so a caller mutating the result cannot
+    corrupt the pack.
+    """
+    if not isinstance(mapping_pack, dict):
+        return LIBRARIAN_VERIFIED_AT_DEFAULT, dict(
+            LIBRARIAN_VERIFIED_FINGERPRINT_DEFAULT
+        )
+    at = mapping_pack.get("librarian_verified_at", "")
+    at = str(at) if isinstance(at, str) else ""
+    fp = mapping_pack.get("librarian_verified_fingerprint")
+    if not isinstance(fp, dict):
+        return at, dict(LIBRARIAN_VERIFIED_FINGERPRINT_DEFAULT)
+    return at, {str(k): v for k, v in fp.items()}
+
+
+def parse_sarif(
+    sarif_path: Path,
+    project: str,
+    env: str,
+    framework: str,
+    mapping_pack: dict | None = None,
+) -> list[Finding]:
     """Read a SARIF and yield Finding objects.
 
     SARIF 2.1.0 results MAY carry an integer `ruleIndex` that indexes
@@ -362,7 +480,20 @@ def parse_sarif(sarif_path: Path, project: str, env: str, framework: str) -> lis
     The rendered per-finding `helpUri` is propagated to
     combined.sarif via `write_combined_sarif` (see also the
     SARIF rewriter at scanner/rewrite_sarif_help.py).
+
+    ``mapping_pack`` is the parsed mapping YAML (the ``mapping_data``
+    dict ``main()`` loads). When supplied, per-check severity
+    overrides are read from ``mapping_pack["severity_overrides"]``.
+    When ``None`` (the default for back-compat with existing call
+    sites), ``resolve_severity`` falls back to the install-bundled
+    PCI pack so the behavior matches the pre-extraction code path.
     """
+    findings = []
+    try:
+        data = json.loads(sarif_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"WARN: failed to read {sarif_path}: {e}", file=sys.stderr)
+        return []
     findings = []
     try:
         data = json.loads(sarif_path.read_text(encoding="utf-8"))
@@ -402,12 +533,12 @@ def parse_sarif(sarif_path: Path, project: str, env: str, framework: str) -> lis
                 rule_entry.get("properties", {}).get("severity")
                 if rule_entry else None
             )
-            # Checkov OSS SARIF does NOT emit `properties.severity` (verified 2026-08-05 on Checkov 3.3.9 -- 0 of 21 inspected rules had any properties key). The SEVERITY_OVERRIDE dict is the de-facto severity source. Future: switch to Checkov JSON output when SARIF adds severity.
-            # Resolve severity: rule.properties.severity > SEVERITY_OVERRIDE > DEFAULT
-            severity = (
-                (sev.upper() if sev else None)
-                or SEVERITY_OVERRIDE.get(rule_id)
-                or DEFAULT_SEVERITY
+            # Checkov OSS SARIF does NOT emit `properties.severity` (verified 2026-08-05 on Checkov 3.3.9 -- 0 of 21 inspected rules had any properties key). The mapping pack's ``severity_overrides`` table is the de-facto severity source. Future: switch to Checkov JSON output when SARIF adds severity.
+            # Resolve severity: rule.properties.severity > mapping_pack.severity_overrides[check_id] > DEFAULT
+            severity = resolve_severity(
+                rule_id,
+                mapping_pack,
+                rule_severity=sev,
             )
             upstream_help_uri = rule_entry.get("helpUri", "") if rule_entry else ""
             help_uri = CHECKOV_RULE_SOURCE_URLS.get(rule_id, upstream_help_uri)
@@ -483,26 +614,38 @@ def parse_sarif(sarif_path: Path, project: str, env: str, framework: str) -> lis
 
 
 # ---------------------------------------------------------------------------
-# PCI mapping + baseline
+# Mapping + baseline loading (generic, framework-agnostic)
 # ---------------------------------------------------------------------------
-def load_pci_mapping(path: Path) -> dict[str, list[str]]:
-    """Return {check_id: [pci_req_id, ...]}."""
+# Pre-T7 the loaders were named ``load_pci_mapping`` and
+# ``load_pci_baseline``. The names are kept as thin deprecated aliases
+# at the bottom of this block so external callers (CLI tools, tests,
+# CI scripts) continue to work. The new generic names are the source
+# of truth.
+def load_mapping(path: Path) -> dict[str, list[str]]:
+    """Return {check_id: [req_id, ...]} from a mapping pack's ``requirements``."""
     if not path.exists():
         return {}
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    out = {}
+    out: dict[str, list[str]] = {}
     for req in data.get("requirements", []):
         for cid in req.get("checks", []):
             out.setdefault(cid, []).append(req["id"])
     return out
 
 
-def load_pci_baseline(path: Path) -> list[dict]:
-    """Return list of suppression entries."""
+def load_baseline(path: Path) -> list[dict]:
+    """Return list of suppression entries from a baseline YAML."""
     if not path.exists():
         return []
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return data.get("suppressions", []) or []
+
+
+# Deprecated thin aliases kept for backward compatibility with external
+# callers that import the PCI-prefixed names. These MUST NOT be re-
+# implemented; they only delegate to the generic implementations above.
+load_pci_mapping = load_mapping
+load_pci_baseline = load_baseline
 
 
 # ---------------------------------------------------------------------------
@@ -527,16 +670,42 @@ def load_pci_baseline(path: Path) -> list[dict]:
 # and return an empty dict so the report still renders (just without the
 # Remediation block). The audit-grade contract is that the report MUST
 # still be produced; the remediation render is additive.
+#
+# Framework gating (T8): the YAML is azurerm 4.x Terraform-specific. For
+# non-Terraform-family frameworks (cloudformation, kubernetes, bicep,
+# arm, secrets, ...), is_terraform_family() returns False and we return
+# {} early so no azurerm-specific guidance leaks into a CFN/K8s/etc.
+# report. The constant REMEDIATION_YAML_PATH stays declared so the
+# diagnostic path remains intact; only its loading is gated.
 REMEDIATION_YAML_PATH = Path(__file__).resolve().parent / "terraform_remediation.yaml"
 
 
-def load_remediation_map(yaml_path: Path | None = None) -> dict[str, list[dict]]:
+def load_remediation_map(
+    yaml_path: Path | None = None,
+    *,
+    framework: str = "terraform",
+) -> dict[str, list[dict]]:
     """Build {check_id: [remediation_block, ...]} from terraform_remediation.yaml.
+
+    Gated by framework family: when ``framework`` is not in the
+    terraform family (``is_terraform_family(framework) is False``),
+    returns ``{}`` immediately and does NOT touch the YAML. The
+    terraform_remediation.yaml artifact is azurerm 4.x-specific and has
+    no analog for cloudformation/kubernetes/bicep/etc., so loading it
+    for those frameworks would emit incorrect remediation guidance.
 
     Returns an empty dict if the YAML is missing or malformed; warns to
     stderr in either case so the operator knows the Remediation render
     is suppressed for this run.
+
+    ``yaml_path`` is keyword-positional (kept for backward compatibility
+    with existing positional callers); ``framework`` is keyword-only and
+    defaults to ``"terraform"`` so legacy call sites that omit it
+    continue to receive the azurerm remediation map unchanged.
     """
+    # Single function, gated at the top. No parallel implementation.
+    if not is_terraform_family(framework):
+        return {}
     path = yaml_path or REMEDIATION_YAML_PATH
     if not path.exists():
         print(
@@ -688,9 +857,14 @@ def is_inline_suppressed(
     return False
 
 
-def attach_pci_reqs(findings: list[Finding], mapping: dict[str, list[str]]) -> None:
+def attach_reqs(findings: list[Finding], mapping: dict[str, list[str]]) -> None:
+    """Mutate findings in place: populate ``requirements`` from the mapping."""
     for f in findings:
-        f.pci_requirements = mapping.get(f.check_id, [])
+        f.requirements = mapping.get(f.check_id, [])
+
+
+# Deprecated thin alias for backward compatibility with external callers.
+attach_pci_reqs = attach_reqs
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +1015,12 @@ def build_coverage_matrix(
     """
     requirements = pci_mapping_data.get("requirements", [])
     out_of_scope_raw = pci_mapping_data.get("out_of_scope_requirements", [])
+    # NOTE_TOKENS: prefix allow-list (formerly hardcoded
+    # ``CKV_AZURE_PCI_NOTE_*``) is now driven by the mapping pack so
+    # SOC 2 / CIS / NIST packs can reuse the same convention. The
+    # empty default is fine — a pack without ``note_tokens`` simply
+    # has no symbolic placeholders to filter.
+    note_tokens = _resolve_note_tokens(pci_mapping_data)
 
     # Validate out-of-scope entries up-front.
     from datetime import date as _date
@@ -854,16 +1034,16 @@ def build_coverage_matrix(
     # Out-of-scope rows are emitted AFTER in-scope rows in the coverage matrix.
     req_ids = [r["id"] for r in requirements] + oos_ids
 
-    # Universe of checks mapped per in-scope req (from pci_mapping.yaml),
+    # Universe of checks mapped per in-scope req (from the mapping pack),
     # independent of whether they fired. Used for coverage gaps.
-    # Note tokens (CKV_AZURE_PCI_NOTE_*) are NOT included here: they are
+    # Note tokens (PACIOLI_NOTE_*) are NOT included here: they are
     # symbolic placeholders that the mapping author uses to flag a req
-    # with no working Checkov 3.3.9 coverage (see PCI_NOTE_TOKENS docstring). They
+    # with no working Checkov coverage (see NOTE_TOKENS docstring). They
     # are filtered out so `expected_count` and `missing_count` in
     # coverage_gaps.csv stay zero for note-only reqs, which is the
     # documented semantics in the plan.
     expected_by_req: dict[str, set[str]] = {
-        r["id"]: {c for c in r.get("checks", []) if c not in PCI_NOTE_TOKENS}
+        r["id"]: {c for c in r.get("checks", []) if c not in note_tokens}
         for r in requirements
     }
     # Per-req note text (only populated when a note token is present).
@@ -873,7 +1053,7 @@ def build_coverage_matrix(
     note_by_req: dict[str, str] = {  # noqa: F841  (dead-code, kept for parity with downstream consumers)
         r["id"]: r["note"]
         for r in requirements
-        if any(c in PCI_NOTE_TOKENS for c in r.get("checks", []))
+        if any(c in note_tokens for c in r.get("checks", []))
         and r.get("note")
     }
 
@@ -972,7 +1152,7 @@ def compute_coverage_gaps(
     or non-covered. The data here is a starting point for the
     investigation, not a verdict.
 
-    PCI_NOTE_TOKENS integration (see PCI_NOTE_TOKENS docstring): a req whose
+    NOTE_TOKENS integration (see NOTE_TOKENS docstring): a req whose
     `checks:` list contains a note token is filtered out of
     `expected_by_req` upstream (see build_coverage_matrix), so the
     record's `expected_count`, `fired_count`, and `missing_count` are
@@ -994,7 +1174,7 @@ def compute_coverage_gaps(
             "missing_check_ids": sorted(missing),
         }
         if note_by_req and rid in note_by_req:
-            # Note-token req (see PCI_NOTE_TOKENS docstring): expected/fired/missing
+            # Note-token req (see NOTE_TOKENS docstring): expected/fired/missing
             # are all zero by construction (tokens were filtered out of
             # `expected_by_req` in build_coverage_matrix). Carry the
             # `note:` text in the record so write_coverage_gaps_csv can
@@ -1010,23 +1190,23 @@ def write_coverage_gaps_csv(
     gap_records: list[dict],
     pci_mapping_data: dict,
 ) -> None:
-    """Emit coverage_gaps.csv: one row per in-scope PCI req.
+    """Emit coverage_gaps.csv: one row per in-scope req.
 
-    Columns:
-      pci_requirement       requirement id from pci_mapping.yaml
-      title                 requirement title (for human triage context)
-      expected_count        count of check_ids mapped to this req
-      fired_count           count that appeared in any SARIF
-      missing_count         expected - fired
-      missing_check_ids     space-separated missing IDs (the triage list)
-      triage_hint           suggested next step depending on the pattern
+    Columns (generic, framework-agnostic):
+      requirement          requirement id from the mapping pack
+      title                requirement title (for human triage context)
+      expected_count       count of check_ids mapped to this req
+      fired_count          count that appeared in any SARIF
+      missing_count        expected - fired
+      missing_check_ids    space-separated missing IDs (the triage list)
+      triage_hint          suggested next step depending on the pattern
       librarian_verified_at when the per-row librarian probe ran
-                            (LIBRARIAN_VERIFIED_AT constant)
-      pci_anchor_url        URL the librarian fetched (single PCI SSC
-                            anchor for v4.0.1)
-      evidence_byte_size    HTTP response body bytes observed
+                           (pack's librarian_verified_at key)
+      doc_anchor_url       URL the librarian fetched (pack's
+                           doc_anchor top-level key)
+      evidence_byte_size   HTTP response body bytes observed
       evidence_content_type HTTP response Content-Type
-      link_pass             "True" if fingerprint match; "False" otherwise
+      link_pass            "True" if fingerprint match; "False" otherwise
 
     Triage hint heuristic:
       - 1 missing + 1 expected + 0 fired     → likely stale check id (verify with
@@ -1035,21 +1215,23 @@ def write_coverage_gaps_csv(
                                               env has no resource of that type
       - some fired, some missing            → mixed; investigate each missing id
 
-    Audit-traceability columns (librarian_verified_at, pci_anchor_url,
+    Audit-traceability columns (librarian_verified_at, doc_anchor_url,
     evidence_byte_size, evidence_content_type, link_pass) are emitted
     on EVERY row so the CSV is a self-contained reproducibility record.
-    See PCI_REQ_CHAIN_OF_CUSTODY + LIBRARIAN_VERIFIED_FINGERPRINT above.
+    The metadata is read from the mapping pack via
+    ``_resolve_librarian_metadata`` so SOC 2 / CIS / NIST packs each
+    carry their own anchor evidence.
     """
     title_by_req = {
         r["id"]: r.get("title", "")
         for r in pci_mapping_data.get("requirements", [])
     }
-    anchor = LIBRARIAN_VERIFIED_FINGERPRINT
+    librarian_at, anchor = _resolve_librarian_metadata(pci_mapping_data)
     with out.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(
             [
-                "pci_requirement",
+                "requirement",
                 "title",
                 "expected_count",
                 "fired_count",
@@ -1057,7 +1239,7 @@ def write_coverage_gaps_csv(
                 "missing_check_ids",
                 "triage_hint",
                 "librarian_verified_at",
-                "pci_anchor_url",
+                "doc_anchor_url",
                 "evidence_byte_size",
                 "evidence_content_type",
                 "link_pass",
@@ -1067,8 +1249,8 @@ def write_coverage_gaps_csv(
             fired = r["fired_count"]
             expected = r["expected_count"]
             missing = r["missing_count"]
-            # Note-token req (see PCI_NOTE_TOKENS docstring): the caller passed
-            # a precomputed `triage_hint` carrying the pci_mapping.yaml
+            # Note-token req (see NOTE_TOKENS docstring): the caller passed
+            # a precomputed `triage_hint` carrying the mapping pack's
             # `note:` text. Use it verbatim so the auditor sees the
             # rationale instead of a generic "complete" / "1 check
             # expected, 0 fired" string.
@@ -1105,7 +1287,7 @@ def write_coverage_gaps_csv(
                     missing,
                     " ".join(r["missing_check_ids"]),
                     hint,
-                    LIBRARIAN_VERIFIED_AT,
+                    librarian_at,
                     anchor["url"],
                     anchor["byte_size"],
                     anchor["content_type"],
@@ -1125,13 +1307,14 @@ def write_coverage_csv(
     out_of_scope: list[dict],
     expected_by_req: dict[str, set[str]] | None = None,
     fired_check_ids: set[str] | None = None,
+    pci_mapping_data: dict | None = None,
 ) -> None:
     """Write the per-(req, check) coverage matrix.
 
     For each out-of-scope row, emits the full audit metadata in a
     side-table so the CSV is a sufficient evidence record by itself.
     Columns for in-scope rows remain:
-        pci_requirement, check_id, status
+        requirement, check_id, status
 
     For in-scope rows, when ``expected_by_req`` and ``fired_check_ids``
     are passed, an additional column ``missing_for_req`` is populated
@@ -1141,9 +1324,15 @@ def write_coverage_csv(
     repetition.
 
     Out-of-scope rows are emitted with:
-        pci_requirement=*, status="out_of_scope",
+        requirement=*, status="out_of_scope",
         control_owner, rationale, approved_on, expires_on,
         evidence_link, stale, days_to_expiry
+
+    ``pci_mapping_data`` is the parsed mapping pack -- the chain-of-
+    custody ledger is read from ``mapping_pack["chain_of_custody"]``
+    so SOC 2 / CIS / NIST packs can carry their own per-requirement
+    verification metadata. Backward compat: when omitted, the chain
+    of custody column is empty for every row.
     """
     oos_by_id = {e["id"]: e for e in out_of_scope}
     # Pre-compute missing-per-req for the new column. Each entry is the
@@ -1155,6 +1344,7 @@ def write_coverage_csv(
             rid: sorted(expected_by_req[rid] - fired_check_ids)
             for rid in expected_by_req
         }
+    chain_of_custody = _resolve_chain_of_custody(pci_mapping_data)
 
     with out.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -1163,7 +1353,7 @@ def write_coverage_csv(
         # matrix can filter by status.
         w.writerow(
             [
-                "pci_requirement",
+                "requirement",
                 "check_id",
                 "status",
                 "missing_for_req",
@@ -1176,21 +1366,20 @@ def write_coverage_csv(
                 "evidence_link",
                 "stale",
                 "days_to_expiry",
-                # chain_of_custody_complete records whether the PCI
-                # source URL in pci_mapping.yaml was live-verified at
-                # PCI_SOURCE_VERIFIED_AT. False would mean the URL has
-                # been taken down or redirected since the mapping was
-                # frozen. Empty for OOS rows (no pci_source_url).
+                # chain_of_custody_complete records whether the
+                # source URL in the mapping pack was live-verified at
+                # the recorded librarian_verified_at. Empty for OOS
+                # rows (no doc_anchor slot).
                 "chain_of_custody_complete",
             ]
         )
         for rid in req_ids:
             # chain_of_custody_complete is a per-requirement attribute
-            # (declared in pci_mapping.yaml, verified at
-            # PCI_SOURCE_VERIFIED_AT timestamp). Empty for any req
-            # whose pci_source_url slot could not be live-verified at
-            # the recorded timestamp; "True" otherwise.
-            chain_custody = PCI_REQ_CHAIN_OF_CUSTODY.get(rid, "")
+            # (declared in the mapping pack's ``chain_of_custody`` key
+            # under the pack's ``librarian_verified_at`` timestamp).
+            # Empty for any req whose doc_anchor slot could not be
+            # live-verified at the recorded timestamp; "True" otherwise.
+            chain_custody_val = chain_of_custody.get(rid, "")
             if rid in oos_by_id:
                 e = oos_by_id[rid]
                 # Out-of-scope rows: missing_for_req is empty (by
@@ -1238,7 +1427,7 @@ def write_coverage_csv(
                         "",
                         "",
                         "",
-                        chain_custody,
+                        chain_custody_val,
                     ]
                 )
                 continue
@@ -1260,7 +1449,7 @@ def write_coverage_csv(
                             "",
                             "",
                             "",
-                            chain_custody,
+                            chain_custody_val,
                         ]
                     )
                     first = False
@@ -1334,28 +1523,29 @@ def write_combined_sarif(
     runs = []
     # Iterate in a deterministic order so consecutive runs produce
     # diffs only when findings change, not when SARIF discovery order
-    # changes.
-    sarif_attrs = (
-        "sarif_terraform_plan",
-        "sarif_terraform_source",
-        "sarif_paac",
-        "sarif_secrets",
-        "sarif_state",
-    )
+    # changes. The pass-name → SARIF-path mapping lives on each
+    # EnvResultFull.sarif_files; the writer iterates THAT, not the
+    # dataclass fields, so non-Terraform frameworks automatically
+    # contribute the SARIFs they actually wrote.
+    sarif_iter_order = ("plan", "source", "paac", "secrets", "state")
     for er in env_results:
-        for attr in sarif_attrs:
-            sarif_path = getattr(er, attr, None)
+        for pass_name in sarif_iter_order:
+            sarif_path = er.sarif_files.get(pass_name)
             if sarif_path is None or not sarif_path.exists():
                 continue
             try:
                 data = json.loads(sarif_path.read_text(encoding="utf-8"))
                 for r in data.get("runs", []):
-                    # Tag the run with env/project for downstream tooling
+                    # Tag the run with env/project for downstream tooling.
+                    # Names are imported from scanner.frameworks so the
+                    # contract is defined ONCE (single source of truth)
+                    # and shared with baseline_init._collect_stub_pairs
+                    # plus any other downstream consumer.
                     if "properties" not in r:
                         r["properties"] = {}
-                    r["properties"]["pci_project"] = er.project
-                    r["properties"]["pci_env"] = er.env
-                    r["properties"]["pci_source_sarif"] = Path(sarif_path).name
+                    r["properties"][SARIF_PROPERTY_PROJECT] = er.project
+                    r["properties"][SARIF_PROPERTY_ENV] = er.env
+                    r["properties"][SARIF_PROPERTY_SOURCE_SARIF] = Path(sarif_path).name
                     # Inject result-level helpUri for SIEM / GitHub
                     # code-scanning dashboards.
                     # half: without this, the SARIF 2.1.0 result-level
@@ -1608,7 +1798,7 @@ def write_html_report(
     out: Path,
     env_results: list[EnvResult],
     pci_mapping_path: Path,
-    pci_data: dict,
+    mapping_data: dict,
     cells: dict,
     out_of_scope: list[dict],
     suppressed_count: int,
@@ -1618,6 +1808,7 @@ def write_html_report(
     drift_findings: list[dict] | None = None,
     framework_name: str | None = None,
     framework_version: str | None = None,
+    remediation_framework_label: str = "terraform",
 ) -> None:
     """Render a single-page HTML report with degraded-mode banner.
 
@@ -1628,8 +1819,13 @@ def write_html_report(
 
     The optional `remediation_by_check_id` map adds
     the canonical azurerm 4.x fix block inline below the chain-of-custody
-    badge for every finding. When empty (YAML missing), the report still
-    renders cleanly -- the per-finding remediation block is skipped.
+    badge for every finding. When empty (YAML missing OR the run's
+    framework is not in the terraform family per
+    :func:`load_remediation_map`), the report still renders cleanly --
+    the per-finding remediation block is skipped. The
+    ``remediation_framework_label`` kwarg carries the framework label
+    forwarded from the call site (already in scope -- NOT re-derived
+    here) so the empty-state stub can name it accurately.
 
     `framework_name` and `framework_version` are read from the mapping YAML
     if not supplied. Falls back to ("PCI DSS", "4.0.1") for backward
@@ -1645,26 +1841,37 @@ def write_html_report(
         drift_findings = []
     failed_envs = [er for er in env_results if er.scan_status != "ok"]
     # Per-req URL lookups .
-    # PCI v4.0.1 has a single shared PCI SSC anchor across all in-scope
-    # requirements (the v3.2.1->v4.0 Summary-of-Changes PDF returning
-    # HEAD 200/application/pdf/477973 bytes on 2026-08-04). The URL is
-    # stored at the TOP level of pci_mapping.yaml as `doc_anchor` --
-    # there is no per-requirement pci_source_url field. We populate
-    # pci_source_url_by_req with that anchor for every req id so the
-    # per-finding renderer can resolve the right URL in O(1).
-    # The chain-of-custody lookup (the render relies on this
+    # The framework (PCI v4.0.1, SOC 2, ...) may have a single shared
+    # anchor across all in-scope requirements (PCI SSC's
+    # v3.2.1->v4.0 Summary-of-Changes PDF returning HEAD 200 /
+    # application/pdf / 477973 bytes on 2026-08-04) OR a per-req
+    # anchor. The URL is stored at the TOP level of the mapping pack
+    # as ``doc_anchor`` -- there is no per-requirement doc_anchor_url
+    # field. We populate source_url_by_req with that anchor for every
+    # req id so the per-finding renderer can resolve the right URL in
+    # O(1). The chain-of-custody lookup (the render relies on this
     # too) is read-only here so both renders share one dict build.
-    pci_anchor = str(pci_data.get("doc_anchor", "") or "")
-    pci_source_url_by_req: dict[str, str] = {}
-    pci_approach_by_req: dict[str, str] = {}
-    pci_chain_of_custody_by_req: dict[str, str] = {}
-    for _r in pci_data.get("requirements", []):
+    pci_anchor = str(mapping_data.get("doc_anchor", "") or "")
+    source_url_by_req: dict[str, str] = {}
+    approach_by_req: dict[str, str] = {}
+    chain_of_custody_by_req: dict[str, str] = {}
+    # Resolve chain-of-custody ONCE from the pack so per-finding render
+    # and the per-row CSV writer share the same lookup.
+    chain_of_custody_table = _resolve_chain_of_custody(mapping_data)
+    for _r in mapping_data.get("requirements", []):
         _rid = _r.get("id", "")
         if not _rid:
             continue
-        pci_source_url_by_req[_rid] = pci_anchor
-        pci_approach_by_req[_rid] = str(_r.get("approach", "") or "")
-        pci_chain_of_custody_by_req[_rid] = PCI_REQ_CHAIN_OF_CUSTODY.get(_rid, "")
+        source_url_by_req[_rid] = pci_anchor
+        approach_by_req[_rid] = str(_r.get("approach", "") or "")
+        chain_of_custody_by_req[_rid] = chain_of_custody_table.get(_rid, "")
+    # Pre-resolve librarian metadata once (the per-finding chain-of-custody
+    # block reads the display string for the verified-at timestamp).
+    librarian_at, _librarian_fingerprint = _resolve_librarian_metadata(mapping_data)
+    # Note-token allow-list (driven by the mapping pack). Same lookup
+    # as build_coverage_matrix so the heatmap + per-row filter agree
+    # on what counts as a "note req".
+    note_tokens_html = _resolve_note_tokens(mapping_data)
     total_findings = sum(len(er.findings) for er in env_results)
     high_critical = sum(
         1 for er in env_results for f in er.findings
@@ -1684,9 +1891,9 @@ def write_html_report(
     # via the `framework_name` and `framework_version` top-level keys in
     # the mapping file. Falls back to PCI DSS v4.0.1 for backward compat.
     if framework_name is None:
-        framework_name = pci_data.get("framework_name", "PCI DSS")
+        framework_name = mapping_data.get("framework_name", "PCI DSS")
     if framework_version is None:
-        framework_version = pci_data.get("framework_version") or pci_data.get("pci_dss_version", "4.0.1")
+        framework_version = mapping_data.get("framework_version") or mapping_data.get("pci_dss_version", "4.0.1")
     framework_full = f"{framework_name} v{framework_version}"
 
     banner = ""
@@ -2164,9 +2371,13 @@ def write_html_report(
     body += "<section id=\"route-remediation\" class=\"route\">\n"
     body += "  <div class=\"route-header\"><h1>Remediation Library</h1>"
     body += f"<div class=\"meta\">{len(_unique_rems)} unique fix pattern{'' if len(_unique_rems)==1 else 's'} · azurerm 4.x HCL</div></div>\n"
-    body += "  <p>Canonical Terraform remediation patterns pulled from <code>scanner/terraform_remediation.yaml</code>. "
-    body += "Click any check_id to copy the resource_type. Apply the patterns in your <code>env/&lt;project&gt;/&lt;env&gt;</code> directory, then re-run <code>make scan-pci-report</code> to confirm.</p>\n"
     if _unique_rems:
+        # Terraform-family run with canonical remediation map loaded.
+        # Preserve the historical "Canonical Terraform remediation patterns"
+        # header so existing acceptance criteria for terraform scans still
+        # match (the 68 azurerm 4.x blocks render unchanged).
+        body += "  <p>Canonical Terraform remediation patterns pulled from <code>scanner/terraform_remediation.yaml</code>. "
+        body += "Click any check_id to copy the resource_type. Apply the patterns in your <code>env/&lt;project&gt;/&lt;env&gt;</code> directory, then re-run <code>make scan-pci-report</code> to confirm.</p>\n"
         body += "  <table>\n"
         body += "    <tr><th>Check ID</th><th>Resource</th><th>Issue</th><th>Fix</th></tr>\n"
         for cid in sorted(_unique_rems.keys()):
@@ -2177,15 +2388,35 @@ def write_html_report(
             body += f"<td><details><summary>Show HCL</summary><pre class=\"remediation-hcl\">{html.escape(str(block.get('remediation_hcl', '')))}</pre></details></td></tr>\n"
         body += "  </table>\n"
     else:
-        body += "  <p><em>No remediation data loaded -- check <code>terraform_remediation.yaml</code> exists.</em></p>\n"
+        # Empty remediation map. Two cases fold into one render:
+        #   1. terraform_remediation.yaml missing/malformed (legacy degraded mode)
+        #   2. non-Terraform-family framework (CFN/K8s/bicep/...); the
+        #      loader returned {} so no azurerm blocks surface here.
+        # The framework label was derived once in main() and forwarded
+        # as ``remediation_framework_label`` -- we use it as-is.
+        body += f"  <p><em>Remediation guidance for {html.escape(remediation_framework_label)} is not yet available.</em></p>\n"
     body += "</section>  <!-- /route-remediation -->\n"
 
     body += "<section id=\"route-coverage\" class=\"route\">\n"
     body += "  <div class=\"route-header\">\n"
-    body += "    <h1>PCI Requirement Coverage</h1>\n"
-    body += "    <div class=\"meta\">v4.0.1 &middot; <a href=\"https://listings.pcisecuritystandards.org/documents/PCI-DSS-v3-2-1-to-v4-0-Summary-of-Changes-r1.pdf\" target=\"_blank\" rel=\"noopener noreferrer\">PCI SSC anchor</a></div>\n"
+    # Use the framework name from the mapping pack so the H1 reflects
+    # whatever framework is loaded (PCI DSS, SOC 2, CIS, NIST, ...).
+    body += f"    <h1>{html.escape(framework_full)} Requirement Coverage</h1>\n"
+    # The anchor link's destination (and label) is read from the
+    # mapping pack. PCI pack points at the PCI SSC summary PDF; SOC 2
+    # / CIS / NIST packs point at their own anchor. When the pack
+    # omits ``doc_anchor`` the meta block is suppressed so the report
+    # still renders cleanly.
+    if pci_anchor:
+        body += (
+            f"    <div class=\"meta\">"
+            f"<a href=\"{html.escape(pci_anchor)}\" target=\"_blank\" "
+            f"rel=\"noopener noreferrer\">{html.escape(framework_name)} anchor</a></div>\n"
+        )
+    else:
+        body += "    <div class=\"meta\">&nbsp;</div>\n"
     body += "  </div>\n"
-    body += "  <h3>Coverage Heatmap <small style=\"font-weight:400;color:#5a6878;font-size:0.7em;\">— click any cell to filter to that PCI req</small></h3>\n"
+    body += f"  <h3>Coverage Heatmap <small style=\"font-weight:400;color:#5a6878;font-size:0.7em;\">— click any cell to filter to that {html.escape(framework_name)} req</small></h3>\n"
     body += "  <div id=\"heatmap-active-filter\" style=\"display:none;margin:0.4em 0 0.8em;padding:8px 12px;background:#eaf3ff;border:1px solid #4f9eff;border-radius:4px;font-size:0.9em;\">\n"
     body += "    <strong>Filtered:</strong> <span id=\"heatmap-active-req\"></span>\n"
     body += "    <button id=\"heatmap-clear-btn\" style=\"margin-left:8px;padding:2px 8px;background:#fff;border:1px solid #4f9eff;color:#0050b3;border-radius:3px;cursor:pointer;font-size:0.85em;\">Clear</button>\n"
@@ -2193,7 +2424,7 @@ def write_html_report(
     body += "  </div>\n"
     body += "  <div class=\"heatmap\">\n"
     # Build heatmap cells -- one per in-scope req
-    for req in pci_data.get("requirements", []):
+    for req in mapping_data.get("requirements", []):
         rid = req["id"]
         title = req.get("title", "")
         req_checks = req.get("checks", [])
@@ -2202,7 +2433,7 @@ def write_html_report(
         any_not_scanned = any(cells.get((rid, c)) == "not_scanned" for c in req_checks)
         any_data = any((rid, c) in cells for c in req_checks)
         missing_ids = (missing_per_req or {}).get(rid, [])
-        finding_count = sum(1 for er in env_results for f in er.findings if rid in (f.pci_requirements or []))
+        finding_count = sum(1 for er in env_results for f in er.findings if rid in (f.requirements or []))
         if any_non_compliant:
             klass = "kpi-high"; label = "FAIL"  # noqa: E702  (intentional one-liner pair)
         elif any_not_scanned:
@@ -2214,13 +2445,13 @@ def write_html_report(
         else:
             klass = "kpi-warn"; label = "GAP"  # noqa: E702
         body += f'    <div class="heatmap-cell {klass}" title="{html.escape(title)}"><div class="req-id">{html.escape(rid)}</div><div class="req-count">{finding_count} finding{"" if finding_count == 1 else "s"} · {label}</div></div>\n'
-    body += """  </div>
-  <h3>PCI Requirement Status</h3>
+    body += f"""  </div>
+  <h3>{html.escape(framework_name)} Requirement Status</h3>
   <table>
-    <tr><th>PCI Requirement</th><th>Status</th></tr>
+    <tr><th>{html.escape(framework_name)} Requirement</th><th>Status</th></tr>
 """
 
-    for req in pci_data.get("requirements", []):
+    for req in mapping_data.get("requirements", []):
         rid = req["id"]
         title = req.get("title", "")
         req_checks = req.get("checks", [])
@@ -2240,12 +2471,12 @@ def write_html_report(
         # Coverage-gap data: which mapped check_ids never fired.
         missing_ids = (missing_per_req or {}).get(rid, [])
         missing_count = len(missing_ids)
-        # PCI_NOTE_TOKENS (see PCI_NOTE_TOKENS docstring) are filtered from
+        # NOTE_TOKENS (see NOTE_TOKENS docstring) are filtered from
         # expected_by_req in build_coverage_matrix so the gap record's
         # expected_count is 0; mirror that here so the HTML tooltip
         # and tip pick the right branch.
         expected_count = len(
-            {c for c in req_checks if c not in PCI_NOTE_TOKENS}
+            {c for c in req_checks if c not in note_tokens_html}
         )
         if any_non_compliant:
             status = '<span class="count-high">NON-COMPLIANT</span>'
@@ -2262,10 +2493,10 @@ def write_html_report(
                 #   resource of that type, or rule ran clean (Checkov
                 #   SARIF omits passes). Operator triages via the
                 #   tooltip + coverage_gaps.csv.
-                # - missing == 0 but expected == 0: PCI_NOTE_TOKENS
-                #   req (see PCI_NOTE_TOKENS docstring). The mapping author
+                # - missing == 0 but expected == 0: NOTE_TOKENS
+                #   req (see NOTE_TOKENS docstring). The mapping author
                 #   declared a symbolic note token + `note:` text to
-                #   flag a req with no working Checkov 3.3.9 coverage.
+                #   flag a req with no working Checkov coverage.
                 #   Show the note inline + as the tooltip so the
                 #   auditor sees the rationale directly in the matrix.
                 # - missing == 0 but expected > 0: every mapped check
@@ -2280,14 +2511,14 @@ def write_html_report(
                         "</span>"
                     )
                 elif missing_count == 0 and expected_count == 0:
-                    # PCI_NOTE_TOKENS req -- surface the `note:` text
+                    # NOTE_TOKENS req -- surface the `note:` text
                     # both inline (visually) and as the tooltip. The
-                    # html-render path receives pci_data; look up the
+                    # html-render path receives mapping_data; look up the
                     # note from the requirements list.
                     note_text = ""
-                    for r in pci_data.get("requirements", []):
+                    for r in mapping_data.get("requirements", []):
                         if r["id"] == rid and any(
-                            c in PCI_NOTE_TOKENS for c in r.get("checks", [])
+                            c in note_tokens_html for c in r.get("checks", [])
                         ):
                             note_text = r.get("note", "")
                             break
@@ -2459,9 +2690,9 @@ def write_html_report(
         '  <button data-severity-filter="HIGH">HIGH</button>\n'
         '  <button data-severity-filter="MEDIUM">MEDIUM</button>\n'
         '  <button data-severity-filter="LOW">LOW</button>\n'
-        '  <select id="pci-req-filter">\n'
-        '    <option value="">All PCI reqs</option>\n'
-        '  </select>\n'
+        f'  <select id="{REQUIREMENT_FILTER_ID}">\n'
+        f'    <option value="">All {html.escape(framework_name)} reqs</option>\n'
+        f'  </select>\n'
         '  <span id="finding-count">Showing 0 of 0</span>\n'
         '</div>\n'
     )
@@ -2477,15 +2708,15 @@ def write_html_report(
             if f.suppressed:
                 classes += " suppressed"
             req_str = (
-                ", ".join(f.pci_requirements) if f.pci_requirements else "(no PCI mapping)"
+                ", ".join(f.requirements) if f.requirements else f"(no {framework_name} mapping)"
             )
-            # Resolve the PCI source URL for the finding's first mapped
-            # req. Findings mapped to multiple PCI reqs use the first
-            # (deterministic via pci_data requirements order).
+            # Resolve the framework source URL for the finding's first mapped
+            # req. Findings mapped to multiple reqs use the first
+            # (deterministic via the mapping pack's requirements order).
             primary_req = (
-                f.pci_requirements[0] if f.pci_requirements else ""
+                f.requirements[0] if f.requirements else ""
             )
-            pci_src_url = pci_source_url_by_req.get(primary_req, "")
+            src_url = source_url_by_req.get(primary_req, "")
             # Wrap each finding in an outer
             # `.finding-row` div carrying the data-attributes the JS
             # filter needs. The inner `.finding-body` keeps the original
@@ -2498,11 +2729,14 @@ def write_html_report(
             # doesn't blow up the HTML when Checkov emits a multi-line
             # block (full text is still rendered in the body below).
             msg_attr = (f.message or "")[:200]
+            # REQUIREMENT_DATA_ATTR (defined in scanner.frameworks) is the
+            # single source of truth for the data-attribute name. The
+            # JS uses it as the join key for the requirement filter.
             row_attrs = (
                 f'class="finding-row" '
                 f'data-severity="{html.escape(f.severity, quote=True)}" '
                 f'data-check-id="{html.escape(f.check_id, quote=True)}" '
-                f'data-pci-req="{html.escape(primary_req, quote=True)}" '
+                f'{REQUIREMENT_DATA_ATTR}="{html.escape(primary_req, quote=True)}" '
                 f'data-resource="{html.escape(f.resource or "", quote=True)}" '
                 f'data-file-path="{html.escape(f.file_path or "", quote=True)}" '
                 f'data-project="{html.escape(f.project or "", quote=True)}" '
@@ -2537,16 +2771,16 @@ def write_html_report(
                 )
             elif file_loc:
                 body += f"<small>at <code>{html.escape(file_loc)}</code></small><br>"
-            body += f"<small>PCI: {html.escape(req_str)} | {f.framework}</small><br>"
+            body += f"<small>{html.escape(framework_name)}: {html.escape(req_str)} | {f.framework}</small><br>"
             if f.suppressed:
                 body += '<em>(suppressed by baseline)</em><br>'
             body += f"<small>{html.escape(f.message)}</small>"
-            # Per-finding links: PCI source and Checkov policy helpUri.
+            # Per-finding links: framework source and Checkov policy helpUri.
             links: list[str] = []
-            if pci_src_url:
+            if src_url:
                 links.append(
-                    f'<a href="{html.escape(pci_src_url)}" target="_blank" '
-                    f'rel="noopener noreferrer">PCI source</a>'
+                    f'<a href="{html.escape(src_url)}" target="_blank" '
+                    f'rel="noopener noreferrer">{html.escape(framework_name)} source</a>'
                 )
             if f.help_uri:
                 links.append(
@@ -2556,26 +2790,46 @@ def write_html_report(
             if links:
                 body += "<div>" + " | ".join(links) + "</div>"
             # Chain-of-custody badge. Render only
-            # for findings with a PCI mapping. The cell value
-            # "True" means the pci_source_url was live-verified at
-            # PCI_SOURCE_VERIFIED_AT; "partial" means historical
+            # for findings with a framework mapping. The cell value
+            # "True" means the source URL was live-verified at
+            # ``librarian_verified_at``; "partial" means historical
             # verification present but not re-confirmed at write
-            # time (operator must manually re-verify the PCI source).
-            # Empty cell -> no badge line at all (no PCI mapping).
-            coc = pci_chain_of_custody_by_req.get(primary_req, "")
+            # time (operator must manually re-verify the source).
+            # Empty cell -> no badge line at all (no mapping).
+            # The fingerprint fields only render when the pack ships
+            # them (librarian block is empty for SOC 2 / CIS / NIST
+            # packs that don't probe a single anchor).
+            coc = chain_of_custody_by_req.get(primary_req, "")
             if primary_req and coc:
                 coc_class = (
                     "coc-true" if coc == "True" else "coc-partial"
                 )
+                # Build the fingerprint trailer conditionally. When
+                # the pack omits fingerprint metadata, emit only the
+                # verified-at timestamp (or none at all when both are
+                # empty).
+                fp = _librarian_fingerprint
+                fp_parts: list[str] = []
+                if fp.get("byte_size"):
+                    fp_parts.append(f"byte_size={fp['byte_size']}")
+                if fp.get("content_type"):
+                    fp_parts.append(f"content_type={html.escape(str(fp['content_type']))}")
+                if fp.get("past_90d_availability_pct"):
+                    fp_parts.append(f"availability={fp['past_90d_availability_pct']:.0f}%/90d")
+                fp_str = "; ".join(fp_parts)
+                trailer = (
+                    f" &mdash; verified against {html.escape(framework_name)} anchor "
+                    f"on {html.escape(librarian_at)}"
+                )
+                if fp_str:
+                    trailer += f" ({fp_str})."
+                else:
+                    trailer += "."
                 body += (
                     f'<div class="chain-of-custody">'
-                    f'Chain of custody (PCI {html.escape(primary_req)}): '
+                    f'Chain of custody ({html.escape(framework_name)} {html.escape(primary_req)}): '
                     f'<span class="{coc_class}">{html.escape(coc)}</span>'
-                    f' &mdash; verified against PCI SSC v4.0.1 anchor '
-                    f'on {html.escape(PCI_SOURCE_VERIFIED_AT)} '
-                    f'(byte_size={LIBRARIAN_VERIFIED_FINGERPRINT["byte_size"]}, '
-                    f'content_type={html.escape(LIBRARIAN_VERIFIED_FINGERPRINT["content_type"])}, '
-                    f'availability={LIBRARIAN_VERIFIED_FINGERPRINT["past_90d_availability_pct"]:.0f}%/90d).'
+                    f'{trailer}'
                     f'</div>'
                 )
             # Inline remediation block. Renders the
@@ -2589,7 +2843,7 @@ def write_html_report(
             if primary_req:
                 body += '<div class="remediation">'
                 body += (
-                    f'<h4>Fix for PCI {html.escape(primary_req)} '
+                    f'<h4>Fix for {html.escape(framework_name)} {html.escape(primary_req)} '
                     f'(check {html.escape(f.check_id)}, '
                     f'severity {html.escape(f.severity)})</h4>'
                 )
@@ -2621,11 +2875,14 @@ def write_html_report(
 
     # Client-side filter logic. Vanilla JS,
     # no dependencies. Reads data-attributes from each `.finding-row`,
-    # applies search/severity/PCI-req/fix-only filters, hides non-matching
+    # applies search/severity/requirement/fix-only filters, hides non-matching
     # rows, and updates the live count badge. Held as a plain string
     # (NOT inside an f-string) because the JS contains literal `{` `}`
     # braces that conflict with f-string parsing in Python 3.12+.
-    FILTER_JS = """\
+    # Two placeholders are interpolated after the closing `"""` so the
+    # remaining JS keeps its literal braces: ``__FRAMEWORK_NAME__`` and
+    # ``__FRAMEWORK_NAME__ reqs``.
+    FILTER_JS = ("""\
 <script>
 /* ============================================================
    Pacioli SPA router + findings filter + chart (vanilla JS)
@@ -2757,19 +3014,23 @@ def write_html_report(
   })();
 
   // ----- Cross-filtering: ONE global filter state, all routes read it -----
-  // Filter shape: { q: string, sev: 'ALL'|'HIGH'|'MEDIUM'|'LOW', pci: string, env: string }
-  // Every input (search, severity buttons, PCI dropdown, env cards, heatmap
+  // Filter shape: { q: string, sev: 'ALL'|'HIGH'|'MEDIUM'|'LOW', req: string, env: string }
+  // Every input (search, severity buttons, requirement dropdown, env cards, heatmap
   // cells) updates the global state and triggers applyAll(). Every output
   // (findings, heatmap highlight, env-bar highlight, KPI counts, count badge)
   // reads the same state. This is true cross-filtering: switching severity on
   // the dashboard also dims unrelated heatmap cells, narrows env-bar tallies,
-  // and filters findings.
-  const FILTER = window.__pacioliFilter = { q: '', sev: 'ALL', pci: '', env: '__all__' };
+  // and filters findings. The "req" key is the framework-agnostic
+  // requirement-id filter (formerly ``pci`` -- see scanner.frameworks
+  // ``REQUIREMENT_FILTER_STATE_KEY``). The data-attribute name on each
+  // finding row is the framework-agnostic ``data-req`` (former
+  // ``data-pci-req`` -- see ``REQUIREMENT_DATA_ATTR``).
+  const FILTER = window.__pacioliFilter = { q: '', sev: 'ALL', req: '', env: '__all__' };
   const rows = document.querySelectorAll('.finding-row');
   const totalCount = rows.length;
   const search = document.getElementById('finding-search');
   const sevBtns = document.querySelectorAll('[data-severity-filter]');
-  const pciFilter = document.getElementById('pci-req-filter');
+  const reqFilter = document.getElementById('req-filter');
   const countBadge = document.getElementById('finding-count');
   const heatmapCells = document.querySelectorAll('.heatmap-cell');
   const envBars = document.querySelectorAll('[data-env-bar]');
@@ -2797,8 +3058,8 @@ def write_html_report(
       <button data-sev="MEDIUM" class="gsev-btn">Med</button>
       <button data-sev="LOW"   class="gsev-btn">Low</button>
     </div>
-    <select id="global-pci" style="width:100%;padding:4px;margin-top:6px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:3px;">
-      <option value="">All PCI reqs</option>
+    <select id="global-req" style="width:100%;padding:4px;margin-top:6px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:3px;">
+      <option value="">__FRAMEWORK_NAME__ reqs</option>
     </select>
     <button id="reset-filter" style="width:100%;margin-top:6px;padding:4px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:3px;cursor:pointer;">Reset filter</button>
     <div id="filter-summary" style="margin-top:8px;color:#a8c0e0;font-size:0.8em;"></div>
@@ -2840,20 +3101,20 @@ def write_html_report(
   // Wire the global inputs to the same handlers
   const globalSearch = document.getElementById('global-search');
   const globalSevBtns = sidebarFilter.querySelectorAll('.gsev-btn');
-  const globalPci = document.getElementById('global-pci');
+  const globalReq = document.getElementById('global-req');
   const resetBtn = document.getElementById('reset-filter');
 
   // Restore from cookie
   const saved = (function() {
-    try { return JSON.parse(cookieGet('pacioli_filter') || '{}'); } catch(e) { return {}; }
+    try { return JSON.parse(cookieGet('pacioli_req') || '{}'); } catch(e) { return {}; }
   })();
   if (saved.q) FILTER.q = saved.q;
   if (saved.sev) FILTER.sev = saved.sev;
-  if (saved.pci) FILTER.pci = saved.pci;
+  if (saved.req) FILTER.req = saved.req;
   if (saved.env) FILTER.env = saved.env;
   globalSearch.value = FILTER.q;
   globalSevBtns.forEach(b => b.classList.toggle('active', b.dataset.sev === FILTER.sev));
-  globalPci.value = FILTER.pci;
+  globalReq.value = FILTER.req;
 
   // ---- Core: apply filter to everything ----
   function applyAll() {
@@ -2866,9 +3127,9 @@ def write_html_report(
                    r.dataset.filePath + ' ' + r.dataset.message).toLowerCase();
       const matchQ = !FILTER.q || hay.includes(FILTER.q);
       const matchSev = FILTER.sev === 'ALL' || sev === FILTER.sev;
-      const matchPci = !FILTER.pci || r.dataset.pciReq === FILTER.pci;
+      const matchReq = !FILTER.req || r.dataset.req === FILTER.req;
       const matchEnv = FILTER.env === '__all__' || env === FILTER.env;
-      const visible = matchQ && matchSev && matchPci && matchEnv;
+      const visible = matchQ && matchSev && matchReq && matchEnv;
       r.style.display = visible ? '' : 'none';
       if (visible) shown++;
     });
@@ -2877,9 +3138,9 @@ def write_html_report(
     // 2. Heatmap: dim cells that don't match, highlight the filter target
     heatmapCells.forEach(cell => {
       const reqId = cell.querySelector('.req-id').textContent;
-      const matchPci = !FILTER.pci || reqId === FILTER.pci;
-      cell.classList.toggle('dimmed', FILTER.pci && !matchPci);
-      cell.classList.toggle('filtered', FILTER.pci === reqId);
+      const matchReq = !FILTER.req || reqId === FILTER.req;
+      cell.classList.toggle('dimmed', FILTER.req && !matchReq);
+      cell.classList.toggle('filtered', FILTER.req === reqId);
     });
 
     // 3. Env health bars: dim envs that don't match the env filter
@@ -2899,13 +3160,13 @@ def write_html_report(
     const parts = [];
     if (FILTER.q) parts.push('q=' + JSON.stringify(FILTER.q));
     if (FILTER.sev !== 'ALL') parts.push('sev=' + FILTER.sev);
-    if (FILTER.pci) parts.push('pci=' + FILTER.pci);
+    if (FILTER.req) parts.push('req=' + FILTER.req);
     if (FILTER.env !== '__all__') parts.push('env=' + FILTER.env);
     document.getElementById('filter-summary').textContent =
       parts.length ? 'Active: ' + parts.join(' · ') : 'No filter active';
 
     // 6. Persist
-    cookieSet('pacioli_filter', JSON.stringify(FILTER));
+    cookieSet('pacioli_req', JSON.stringify(FILTER));
 
     // 7. Heatmap active-filter banner
     if (typeof updateHeatmapBanner === 'function') updateHeatmapBanner();
@@ -2937,11 +3198,11 @@ def write_html_report(
       b.classList.toggle('active', b.dataset.severityFilter === FILTER.sev);
     });
 
-    // PCI dropdown: both sidebar (#global-pci) and in-page (#pci-req-filter).
+    // Requirement dropdown: both sidebar (#global-req) and in-page (#req-filter).
     // Use the property setter so the visible value reflects FILTER
     // even when the option was just added dynamically.
-    if (globalPci) globalPci.value = FILTER.pci;
-    if (pciFilter) pciFilter.value = FILTER.pci;
+    if (globalReq) globalReq.value = FILTER.req;
+    if (reqFilter) reqFilter.value = FILTER.req;
 
     // Sidebar "filter summary" text is updated by applyAll() too, but
     // we re-set it here so a cookie-restore on initial load also shows
@@ -2949,7 +3210,7 @@ def write_html_report(
     const parts = [];
     if (FILTER.q) parts.push('q=' + JSON.stringify(FILTER.q));
     if (FILTER.sev !== 'ALL') parts.push('sev=' + FILTER.sev);
-    if (FILTER.pci) parts.push('pci=' + FILTER.pci);
+    if (FILTER.req) parts.push('req=' + FILTER.req);
     if (FILTER.env !== '__all__') parts.push('env=' + FILTER.env);
     const fs = document.getElementById('filter-summary');
     if (fs) fs.textContent = parts.length ? 'Active: ' + parts.join(' · ') : 'No filter active';
@@ -2970,7 +3231,7 @@ def write_html_report(
     const active = [];
     if (FILTER.q) active.push({ dim: 'q', label: 'search: ' + FILTER.q });
     if (FILTER.sev !== 'ALL') active.push({ dim: 'sev', label: 'severity: ' + FILTER.sev });
-    if (FILTER.pci) active.push({ dim: 'pci', label: 'PCI: ' + FILTER.pci });
+    if (FILTER.req) active.push({ dim: 'req', label: '__FRAMEWORK_NAME__: ' + FILTER.req });
     if (FILTER.env !== '__all__') active.push({ dim: 'env', label: 'env: ' + FILTER.env });
     if (active.length === 0) {
       banner.style.display = 'none';
@@ -2990,7 +3251,7 @@ def write_html_report(
       x.addEventListener('click', () => {
         if (c.dim === 'q') FILTER.q = '';
         else if (c.dim === 'sev') FILTER.sev = 'ALL';
-        else if (c.dim === 'pci') FILTER.pci = '';
+        else if (c.dim === 'req') FILTER.req = '';
         else if (c.dim === 'env') FILTER.env = '__all__';
         applyAll();
       });
@@ -3014,18 +3275,18 @@ def write_html_report(
     sevBtns.forEach(x => x.classList.toggle('active', x.dataset.severityFilter === FILTER.sev));
     applyAll();
   }));
-  globalPci.addEventListener('change', () => {
-    FILTER.pci = globalPci.value;
-    if (pciFilter) pciFilter.value = FILTER.pci;
+  globalReq.addEventListener('change', () => {
+    FILTER.req = globalReq.value;
+    if (reqFilter) reqFilter.value = FILTER.req;
     applyAll();
   });
   resetBtn.addEventListener('click', () => {
-    FILTER.q = ''; FILTER.sev = 'ALL'; FILTER.pci = ''; FILTER.env = '__all__';
+    FILTER.q = ''; FILTER.sev = 'ALL'; FILTER.req = ''; FILTER.env = '__all__';
     globalSearch.value = '';
     globalSevBtns.forEach(b => b.classList.toggle('active', b.dataset.sev === 'ALL'));
-    globalPci.value = '';
+    globalReq.value = '';
     if (search) search.value = '';
-    if (pciFilter) pciFilter.value = '';
+    if (reqFilter) reqFilter.value = '';
     sevBtns.forEach(x => x.classList.toggle('active', x.dataset.severityFilter === 'ALL'));
     document.querySelectorAll('#env-summary-cards button').forEach(b => b.style.border = '');
     applyAll();
@@ -3044,15 +3305,15 @@ def write_html_report(
     globalSevBtns.forEach(x => x.classList.toggle('active', x.dataset.sev === FILTER.sev));
     applyAll();
   }));
-  if (pciFilter) pciFilter.addEventListener('change', () => {
-    FILTER.pci = pciFilter.value;
-    globalPci.value = FILTER.pci;
+  if (reqFilter) reqFilter.addEventListener('change', () => {
+    FILTER.req = reqFilter.value;
+    globalReq.value = FILTER.req;
     applyAll();
   });
 
-  // ---- Heatmap cells: click sets PCI filter and navigates to Findings ----
+  // ---- Heatmap cells: click sets requirement filter and navigates to Findings ----
   // The filter is the single source of truth: clicking a cell sets
-  // FILTER.pci, syncs both dropdowns (sidebar + in-page), navigates to
+  // FILTER.req, syncs both dropdowns (sidebar + in-page), navigates to
   // the Findings route so the operator sees the filtered list, and
   // persists to the cookie. Clicking the same cell again clears the
   // filter and stays on the Findings route.
@@ -3060,7 +3321,7 @@ def write_html_report(
     cell.addEventListener('click', () => {
       const reqId = cell.querySelector('.req-id').textContent;
       // Toggle: if same reqId, clear; otherwise set
-      FILTER.pci = (FILTER.pci === reqId) ? '' : reqId;
+      FILTER.req = (FILTER.req === reqId) ? '' : reqId;
       // Navigate to findings so the operator sees the filtered list with
       // the in-page dropdown aligned to the active filter.
       showRoute('findings');
@@ -3075,9 +3336,9 @@ def write_html_report(
   const heatmapViewBtn = document.getElementById('heatmap-view-findings');
   if (heatmapClearBtn) {
     heatmapClearBtn.addEventListener('click', () => {
-      FILTER.pci = '';
-      globalPci.value = '';
-      if (pciFilter) pciFilter.value = '';
+      FILTER.req = '';
+      globalReq.value = '';
+      if (reqFilter) reqFilter.value = '';
       applyAll();
     });
   }
@@ -3086,12 +3347,12 @@ def write_html_report(
       showRoute('findings');
     });
   }
-  // Show the active-filter banner when a PCI filter is active
+  // Show the active-filter banner when a requirement filter is active
   function updateHeatmapBanner() {
     if (!heatmapActiveFilter) return;
-    if (FILTER.pci) {
+    if (FILTER.req) {
       heatmapActiveFilter.style.display = 'block';
-      heatmapActiveReq.textContent = FILTER.pci;
+      heatmapActiveReq.textContent = FILTER.req;
     } else {
       heatmapActiveFilter.style.display = 'none';
     }
@@ -3128,21 +3389,21 @@ def write_html_report(
     });
   });
 
-  // ---- Populate the global PCI dropdown from the data ----
+  // ---- Populate the global requirement dropdown from the data ----
   const reqs = new Set();
-  rows.forEach(r => { if (r.dataset.pciReq) reqs.add(r.dataset.pciReq); });
+  rows.forEach(r => { if (r.dataset.req) reqs.add(r.dataset.req); });
   Array.from(reqs).sort().forEach(req => {
     const o = document.createElement('option');
     o.value = req; o.textContent = req;
-    globalPci.appendChild(o);
-    if (pciFilter) {
+    globalReq.appendChild(o);
+    if (reqFilter) {
       const o2 = document.createElement('option');
       o2.value = req; o2.textContent = req;
-      pciFilter.appendChild(o2);
+      reqFilter.appendChild(o2);
     }
   });
-  globalPci.value = FILTER.pci;
-  if (pciFilter) pciFilter.value = FILTER.pci;
+  globalReq.value = FILTER.req;
+  if (reqFilter) reqFilter.value = FILTER.req;
 
   // ---- Inject the top-of-page filter banner into <main> ----
   // The banner is visible on every route, positioned at the top of the
@@ -3157,12 +3418,12 @@ def write_html_report(
   const bannerClear = document.getElementById('filter-banner-clear');
   if (bannerClear) {
     bannerClear.addEventListener('click', () => {
-      FILTER.q = ''; FILTER.sev = 'ALL'; FILTER.pci = ''; FILTER.env = '__all__';
+      FILTER.q = ''; FILTER.sev = 'ALL'; FILTER.req = ''; FILTER.env = '__all__';
       globalSearch.value = '';
       globalSevBtns.forEach(b => b.classList.toggle('active', b.dataset.sev === 'ALL'));
-      globalPci.value = '';
+      globalReq.value = '';
       if (search) search.value = '';
-      if (pciFilter) pciFilter.value = '';
+      if (reqFilter) reqFilter.value = '';
       if (sevBtns) sevBtns.forEach(x => x.classList.toggle('active', x.dataset.severityFilter === 'ALL'));
       applyAll();
     });
@@ -3181,7 +3442,9 @@ def write_html_report(
   });
 })();
 </script>
-"""
+""").replace("__FRAMEWORK_NAME__ reqs", framework_name + " reqs").replace(
+        "__FRAMEWORK_NAME__: ", framework_name + ": "
+    ).replace("__FRAMEWORK_NAME__", framework_name)
     body += FILTER_JS
     body += "</main></div></body></html>\n"
     out.write_text(body, encoding="utf-8")
@@ -3206,7 +3469,7 @@ SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 def write_fix_list_md(
     out: Path,
     env_results: list[EnvResult],
-    pci_data: dict,
+    mapping_data: dict,
     remediation_by_check_id: dict[str, list[dict]],
     run_id: str,
 ) -> None:
@@ -3216,14 +3479,14 @@ def write_fix_list_md(
     ----------
     out           : output path (e.g. <run-dir>/fix_list.md)
     env_results   : list[EnvResult] -- same set fed to write_html_report
-    pci_data      : parsed pci_mapping.yaml top-level dict; used only to
+    mapping_data  : parsed mapping pack top-level dict; used only to
                     resolve the per-requirement title for the bullet list
     remediation_by_check_id : {check_id: [block, ...]} from load_remediation_map
     run_id        : the run dir name (e.g. 'all-prod-2026-08-05') for the header
     """
     title_by_req: dict[str, str] = {
         r["id"]: r.get("title", "")
-        for r in pci_data.get("requirements", [])
+        for r in mapping_data.get("requirements", [])
         if r.get("id")
     }
     utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -3245,12 +3508,12 @@ def write_fix_list_md(
         buckets[bucket].append((er, f))
 
     lines: list[str] = []
-    lines.append(f"# PCI Fix List \u2014 {run_id} \u2014 {utc_date}")
+    lines.append(f"# Pacioli Fix List \u2014 {run_id} \u2014 {utc_date}")
     lines.append("")
     lines.append(
         "Generated by `make scan-pci-fix-list RUN_DIR=<run_id>`. "
-        "Severity-sorted (HIGH first). One section per finding. PCI "
-        "req id, canonical remediation, verification command all inline."
+        "Severity-sorted (HIGH first). One section per finding. "
+        "Req id, canonical remediation, verification command all inline."
     )
     lines.append("")
     total_emit = 0
@@ -3261,7 +3524,7 @@ def write_fix_list_md(
         lines.append(f"## {sev}")
         lines.append("")
         for er, f in bucket:
-            primary_req = f.pci_requirements[0] if f.pci_requirements else ""
+            primary_req = f.requirements[0] if f.requirements else ""
             req_title = title_by_req.get(primary_req, "")
             blocks = remediation_by_check_id.get(f.check_id, [])
             # Use the first block as the canonical remediation. If a
@@ -3273,11 +3536,11 @@ def write_fix_list_md(
             lines.append("")
             if primary_req:
                 if req_title:
-                    lines.append(f"- **PCI**: {primary_req} ({req_title})")
+                    lines.append(f"- **Req**: {primary_req} ({req_title})")
                 else:
-                    lines.append(f"- **PCI**: {primary_req}")
+                    lines.append(f"- **Req**: {primary_req}")
             else:
-                lines.append("- **PCI**: (no PCI mapping)")
+                lines.append("- **Req**: (no mapping)")
             file_loc = f.file_path or ""
             if file_loc and f.line:
                 lines.append(f"- **File**: `{file_loc}:{f.line}`")
@@ -3290,7 +3553,7 @@ def write_fix_list_md(
             lines.append(f"- **Severity**: {sev}")
             lines.append(f"- **Message**: {f.message}")
             if f.suppressed:
-                lines.append("- **Suppressed**: yes (pci_baseline or inline skip)")
+                lines.append("- **Suppressed**: yes (baseline or inline skip)")
             lines.append("- **Remediation**:")
             if blocks:
                 for block in blocks:
@@ -3345,18 +3608,32 @@ class EnvResultFull(EnvResult):
     results_terraform_source.sarif + results_secrets.sarif. Tier 2/3
     additionally write results_terraform_plan.sarif (and tier 3 a
     results_state.sarif for the state-drift layer).
+
+    The SARIF files are stored in ``sarif_files`` keyed by generic
+    pass name (``"source"``, ``"paac"``, ``"secrets"``, ``"plan"``,
+    ``"state"``) so the same dataclass works for any IaC framework.
+    Non-Terraform frameworks can populate only the keys their scan
+    tier produces (typically just ``"source"``).
     """
 
     plan_dir: Path | None = None
-    sarif_terraform_plan: Path | None = None
-    sarif_terraform_source: Path | None = None
-    sarif_paac: Path | None = None
-    sarif_secrets: Path | None = None
-    sarif_state: Path | None = None
+    sarif_files: dict[str, Path | None] = field(default_factory=dict)
 
 
 def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
-    """Walk a run dir and produce EnvResultFull per project/env."""
+    """Walk a run dir and produce EnvResultFull per project/env.
+
+    Discovers ``results_*.sarif`` files generically — the pass name
+    is inferred from the filename prefix (e.g.,
+    ``results_source.sarif`` → ``"source"``). This is the same
+    naming contract the orchestrator uses when it writes SARIFs,
+    so read and write paths agree.
+
+    Backward compatibility: legacy ``results_terraform_*`` filenames
+    are mapped to the generic keys via ``OLD_TO_NEW_FILENAME``. Old
+    run-dirs continue to aggregate without the orchestrator needing
+    to rewrite them.
+    """
     results = []
     for entry in run_dir.iterdir():
         if not entry.is_dir():
@@ -3366,38 +3643,98 @@ def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
             if not env_dir.is_dir():
                 continue
             env = env_dir.name
-            s_plan = env_dir / "results_terraform_plan.sarif"
-            s_source = env_dir / "results_terraform_source.sarif"
-            s_paac = env_dir / "results_paac.sarif"
-            s_secrets = env_dir / "results_secrets.sarif"
-            s_state = env_dir / "results_state.sarif"
+            sarif_files: dict[str, Path | None] = {}
+            for sarif_path in env_dir.glob("results_*.sarif"):
+                pass_name = _sarif_filename_to_pass(sarif_path.name)
+                if pass_name is None:
+                    continue
+                # First writer wins — if both the legacy and new
+                # filename exist for the same pass, prefer the new
+                # (generic) one so freshly produced run-dirs reflect
+                # the orchestrator's contract.
+                if (
+                    pass_name not in sarif_files
+                    or sarif_files[pass_name] is None
+                ):
+                    sarif_files[pass_name] = sarif_path
             r = EnvResultFull(
                 project=project,
                 env=env,
                 scan_status="ok",
                 plan_dir=env_dir,
-                sarif_terraform_plan=s_plan if s_plan.exists() else None,
-                sarif_terraform_source=s_source if s_source.exists() else None,
-                sarif_paac=s_paac if s_paac.exists() else None,
-                sarif_secrets=s_secrets if s_secrets.exists() else None,
-                sarif_state=s_state if s_state.exists() else None,
+                sarif_files=sarif_files,
             )
             # Mark the env failed only if literally no SARIF files were
             # written -- a missing plan+secrets pair is normal for tier 1.
-            if (
-                r.sarif_terraform_plan is None
-                and r.sarif_secrets is None
-                and r.sarif_terraform_source is None
-                and r.sarif_paac is None
-                and r.sarif_state is None
-            ):
+            if not any(r.sarif_files.values()):
                 r.scan_status = "no_sarif"
                 r.error = "no SARIF files written"
             results.append(r)
     return results
 
 
-def load_findings(results: list[EnvResultFull]) -> None:
+# Mapping of legacy SARIF filenames → generic pass-name keys. Single
+# source of truth used by both SARIF detection (walk_run_dir) and any
+# orchestrator-side writer that still produces the old names. Add new
+# aliases here when retiring another legacy filename.
+OLD_TO_NEW_FILENAME: dict[str, str] = {
+    "results_terraform_plan.sarif": "plan",
+    "results_terraform_source.sarif": "source",
+    "results_paac.sarif": "paac",
+    "results_secrets.sarif": "secrets",
+    "results_state.sarif": "state",
+}
+
+
+def _sarif_filename_to_pass(filename: str) -> str | None:
+    """Map a SARIF filename to its pass name key.
+
+    Strips the ``results_`` prefix and ``.sarif`` suffix, then
+    applies the ``OLD_TO_NEW_FILENAME`` backward-compat mapping.
+    Returns ``None`` for filenames that don't match the contract
+    (e.g., ``combined.sarif`` from earlier aggregator runs — those
+    are out-of-scope for per-env aggregation).
+    """
+    if not filename.startswith("results_") or not filename.endswith(".sarif"):
+        return None
+    # Apply legacy alias first; fall back to the literal prefix.
+    legacy_key = OLD_TO_NEW_FILENAME.get(filename)
+    if legacy_key is not None:
+        return legacy_key
+    # Generic shape: results_<pass>.sarif → "<pass>".
+    stem = filename[len("results_") : -len(".sarif")]
+    if not stem:
+        return None
+    return stem
+
+
+# Pass-name → Checkov framework label for the NON-source passes.
+# Stored on each Finding by ``parse_sarif`` and used downstream for
+# framework-family detection (``is_terraform_family``), the HTML
+# report's framework label, and the remediation HCL gate. The
+# ``source`` pass is intentionally NOT in this dict — its label is
+# derived from ``--source-framework`` (or the default ``"terraform"``)
+# so non-Terraform scans (cloudformation, kubernetes, …) get the
+# correct framework tag on their source findings. Preserves the
+# historical ``"plan" -> "terraform_plan"`` alias so the
+# pre-existing ``Finding.framework == "terraform_plan"`` contract holds
+# for Terraform plan scans. Non-Terraform frameworks fall through to
+# the pass name itself, which downstream consumers interpret via
+# ``scanner.frameworks``.
+PASS_TO_FRAMEWORK: dict[str, str] = {
+    "plan": "terraform_plan",
+    "paac": "paac",
+    "secrets": "secrets",
+    "state": "state",
+}
+
+
+def load_findings(
+    results: list[EnvResultFull],
+    mapping_pack: dict | None = None,
+    *,
+    source_framework: str = "terraform",
+) -> None:
     """Mutate results in place: populate findings lists from SARIFs.
 
     NOTE: the aggregator MUST load every SARIF the scanner produces,
@@ -3408,32 +3745,51 @@ def load_findings(results: list[EnvResultFull]) -> None:
     vast majority of what a tier 1 (source-only) operator scan
     produces, so dropping them made the coverage matrix under-report
     by 90%+. See docs/MAPPING_SCHEMA.md for the field schema.
+
+    ``mapping_pack`` is threaded through to ``parse_sarif`` so per-check
+    severity overrides declared in the mapping YAML take effect for
+    every SARIF. When ``None`` (the legacy default), severity falls
+    through to the install-bundled PCI pack.
+
+    ``source_framework`` (F3 fix — second stage): the framework label
+    applied to findings produced by the ``source`` pass only. Defaults
+    to ``"terraform"`` for backward compatibility with every caller
+    that omits it. The orchestrator passes the active ``--framework``
+    flag value here when it differs from the historical default, so a
+    ``--framework cloudformation`` scan tags its source findings with
+    ``framework="cloudformation"`` instead of the bogus
+    ``framework="terraform"`` the previous version emitted. This
+    change is what unblocks :func:`is_terraform_family` (and therefore
+    :func:`load_remediation_map`) from correctly classifying a CFN
+    scan as non-terraform-family and skipping the azurerm remediation
+    YAML. Other passes (``plan``/``paac``/``secrets``/``state``) keep
+    their fixed labels from :data:`PASS_TO_FRAMEWORK` regardless of
+    ``source_framework`` — the paac / plan / state passes are
+    Terraform-family only and are not invoked for non-Terraform scans.
     """
     for r in results:
         if r.scan_status != "ok":
             continue
-        if r.sarif_terraform_plan:
-            r.findings.extend(
-                parse_sarif(r.sarif_terraform_plan, r.project, r.env, "terraform_plan")
-            )
-        if r.sarif_terraform_source:
+        # Iterate the dict generically — one loop, no per-key branches.
+        # The "source" pass is the only one whose framework label comes
+        # from the orchestrator-supplied ``source_framework``; every
+        # other pass keeps its fixed label from PASS_TO_FRAMEWORK.
+        # Unknown passes fall through to the pass name itself.
+        for pass_name, sarif_path in r.sarif_files.items():
+            if sarif_path is None:
+                continue
+            if pass_name == "source":
+                framework_label = source_framework
+            else:
+                framework_label = PASS_TO_FRAMEWORK.get(pass_name, pass_name)
             r.findings.extend(
                 parse_sarif(
-                    r.sarif_terraform_source, r.project, r.env, "terraform"
+                    sarif_path,
+                    r.project,
+                    r.env,
+                    framework_label,
+                    mapping_pack,
                 )
-            )
-        if r.sarif_paac:
-            # PAAC = policy-as-code = our custom scanner/checks
-            r.findings.extend(
-                parse_sarif(r.sarif_paac, r.project, r.env, "paac")
-            )
-        if r.sarif_secrets:
-            r.findings.extend(
-                parse_sarif(r.sarif_secrets, r.project, r.env, "secrets")
-            )
-        if r.sarif_state:
-            r.findings.extend(
-                parse_sarif(r.sarif_state, r.project, r.env, "state")
             )
 
 
@@ -3459,6 +3815,21 @@ def main() -> int:
     ap.add_argument("--scope", default="pci_scope.yaml", help="Scope manifest")
     ap.add_argument("--mapping", default="pci_mapping.yaml", help="PCI mapping")
     ap.add_argument("--baseline", default="pci_baseline.yaml", help="Baseline suppressions")
+    ap.add_argument(
+        "--source-framework",
+        default="terraform",
+        help=(
+            "Framework label applied to the 'source' pass findings "
+            "(F3 fix — second stage). The orchestrator passes the active "
+            "--framework value here so non-Terraform scans tag their "
+            "source findings with the correct framework (e.g. "
+            "'cloudformation', 'kubernetes') instead of the historical "
+            "default 'terraform'. Only affects the 'source' pass; the "
+            "plan/paac/secrets/state passes keep their fixed labels. "
+            "Default 'terraform' preserves backward compatibility for "
+            "callers that omit this flag."
+        ),
+    )
     ap.add_argument(
         "--emit-fix-list",
         action="store_true",
@@ -3540,18 +3911,9 @@ def main() -> int:
         )
         return 2
 
-    pci_mapping = load_pci_mapping(mapping_path)
-    pci_data = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
-    baseline = load_pci_baseline(baseline_path)
-
-    # Load canonical remediation HCL map once at startup.
-    # Used by the per-finding HTML render and by write_fix_list_md().
-    # Returns {} on missing/malformed YAML (degraded mode -- see loader).
-    remediation_by_check_id = load_remediation_map()
-    print(
-        f"remediation map: {sum(len(v) for v in remediation_by_check_id.values())} "
-        f"blocks across {len(remediation_by_check_id)} check_ids"
-    )
+    requirements_map = load_mapping(mapping_path)
+    mapping_data = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
+    baseline = load_baseline(baseline_path)
 
     if not run_dir.iterdir():
         print(f"ERROR: run dir is empty: {run_dir}", file=sys.stderr)
@@ -3563,8 +3925,45 @@ def main() -> int:
         print(f"ERROR: no project/env subdirs found in {run_dir}", file=sys.stderr)
         return 3
 
-    # Load findings
-    load_findings(results)
+    # Load findings (threading the mapping pack so per-check severity
+    # overrides declared in the YAML apply to every SARIF tier).
+    load_findings(results, mapping_pack=mapping_data, source_framework=args.source_framework)
+
+    # Detect the run's framework family from per-finding framework tags
+    # (Finding.framework is set per finding by parse_sarif). If any
+    # finding carries a non-Terraform-family framework, we skip the
+    # azurerm remediation loader entirely so no azurerm-specific HCL
+    # leaks into a CloudFormation/Kubernetes/etc. report. ``results``
+    # is the SAME variable we walk below -- no re-derivation in the
+    # renderer.
+    run_frameworks: set[str] = set()
+    for _r in results:
+        for _f in _r.findings:
+            if _f.framework:
+                run_frameworks.add(_f.framework)
+    is_tf_family = all(is_terraform_family(fw) for fw in run_frameworks)
+
+    # Pick a single representative framework label for the HTML stub.
+    # Sort for stability: a single-framework run shows that framework;
+    # mixed runs show a sorted, comma-joined list. An empty set (no
+    # findings) renders as "the current run" so the stub stays useful.
+    if run_frameworks:
+        rem_html_framework_label = ", ".join(sorted(run_frameworks))
+    else:
+        rem_html_framework_label = "the current run"
+
+    # Load canonical remediation HCL map once at startup.
+    # Used by the per-finding HTML render and by write_fix_list_md().
+    # Gated by framework family: returns {} early for non-Terraform
+    # runs so the azurerm-specific YAML doesn't pollute a CFN report.
+    remediation_by_check_id = load_remediation_map(
+        framework="terraform" if is_tf_family else "non-terraform"
+    )
+    print(
+        f"remediation map: {sum(len(v) for v in remediation_by_check_id.values())} "
+        f"blocks across {len(remediation_by_check_id)} check_ids "
+        f"(frameworks seen: {sorted(run_frameworks) if run_frameworks else '<none>'})"
+    )
 
     # Load inline skips from .tf files
     env_dirs = [r.plan_dir for r in results if r.plan_dir is not None]
@@ -3573,7 +3972,7 @@ def main() -> int:
     if inline_count > 0:
         print(f"inline skips parsed: {inline_count} entries across {len(inline_skips)} check_ids")
 
-    # Apply baseline + inline-skip + PCI mapping
+    # Apply baseline + inline-skip + mapping
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     suppressed_count = 0
     for r in results:
@@ -3584,7 +3983,7 @@ def main() -> int:
             elif is_inline_suppressed(f, inline_skips, today):
                 f.suppressed = True
                 suppressed_count += 1
-        attach_pci_reqs(r.findings, pci_mapping)
+        attach_reqs(r.findings, requirements_map)
 
     # Build coverage matrix
     (
@@ -3595,7 +3994,7 @@ def main() -> int:
         oos_errors,
         expected_by_req,
         fired_check_ids,
-    ) = build_coverage_matrix(results, mapping_path, pci_data)
+    ) = build_coverage_matrix(results, mapping_path, mapping_data)
 
     # Enforce out-of-scope audit metadata. Compliance reporters can NOT
     # ship a report where an exclusion is missing rationale, owner, an
@@ -3623,12 +4022,13 @@ def main() -> int:
     # Compute coverage gaps so the operator can tell "no relevant
     # resources" from "we didn't evaluate this at all" for any req
     # whose status ends up as not_applicable or "No matching resources in scope".
-    # Thread `note_by_req` so PCI_NOTE_TOKENS reqs (see PCI_NOTE_TOKENS docstring)
-    # carry the pci_mapping.yaml `note:` text as their triage_hint.
+    # Thread `note_by_req` so NOTE_TOKENS reqs (see NOTE_TOKENS docstring)
+    # carry the mapping pack's `note:` text as their triage_hint.
+    note_tokens_main = _resolve_note_tokens(mapping_data)
     note_by_req: dict[str, str] = {
         r["id"]: r["note"]
-        for r in pci_data.get("requirements", [])
-        if any(c in PCI_NOTE_TOKENS for c in r.get("checks", [])) and r.get("note")
+        for r in mapping_data.get("requirements", [])
+        if any(c in note_tokens_main for c in r.get("checks", [])) and r.get("note")
     }
     gap_records = compute_coverage_gaps(
         expected_by_req, fired_check_ids, note_by_req
@@ -3644,9 +4044,10 @@ def main() -> int:
         out_of_scope,
         expected_by_req,
         fired_check_ids,
+        mapping_data,
     )
     write_coverage_gaps_csv(
-        out_dir / "coverage_gaps.csv", gap_records, pci_data
+        out_dir / "coverage_gaps.csv", gap_records, mapping_data
     )
     write_combined_sarif(out_dir / "combined.sarif", results)
     fail_count = write_junit(out_dir / "junit.xml", results, [])
@@ -3668,7 +4069,7 @@ def main() -> int:
         out_dir / "report.html",
         results,
         mapping_path,
-        pci_data,
+        mapping_data,
         cells,
         out_of_scope,
         suppressed_count,
@@ -3676,6 +4077,7 @@ def main() -> int:
         gap_records,
         remediation_by_check_id,
         drift_findings,
+        remediation_framework_label=rem_html_framework_label,
     )
 
     # Emit the developer-facing fix_list.md on
@@ -3688,7 +4090,7 @@ def main() -> int:
         write_fix_list_md(
             fix_list_path,
             results,
-            pci_data,
+            mapping_data,
             remediation_by_check_id,
             run_id=run_dir.name,
         )

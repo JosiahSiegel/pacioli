@@ -82,6 +82,86 @@ def test_sed_filter_rewrites_prismacloud():
     assert filter_expr.startswith("s|")  # sed substitution syntax
 
 
+def test_sed_filter_for_aws_cloud_uses_aws_directory():
+    """Generalized filter: AWS prefix must route to the aws/ directory,
+    NOT the azure/ directory (the pre-T11 hard-coded fallback)."""
+    filter_expr = build_sed_filter(cloud_prefix="AWS")
+    assert "/checks/resource/aws/" in filter_expr
+    assert "/checks/resource/azure/" not in filter_expr
+
+
+def test_sed_filter_for_gcp_cloud_uses_gcp_directory():
+    """Generalized filter: GCP prefix must route to the gcp/ directory."""
+    filter_expr = build_sed_filter(cloud_prefix="GCP")
+    assert "/checks/resource/gcp/" in filter_expr
+    assert "/checks/resource/azure/" not in filter_expr
+
+
+def test_sed_filter_for_kubernetes_cloud_uses_kubernetes_directory():
+    """Generalized filter: K8S prefix must route to the kubernetes/ directory."""
+    filter_expr = build_sed_filter(cloud_prefix="K8S")
+    assert "/checks/resource/kubernetes/" in filter_expr
+    assert "/checks/resource/azure/" not in filter_expr
+
+
+def test_sed_filter_for_unknown_cloud_falls_back_to_repo_root():
+    """Unknown cloud prefix: fall back to the Checkov GitHub repo root
+    (no directory), NOT to the Azure directory."""
+    filter_expr = build_sed_filter(cloud_prefix="ZZZ")
+    # Repo root path: just the org/repo tree URL, no /checks/resource/<cloud>/
+    assert "/checks/resource/" not in filter_expr
+    assert "github.com/bridgecrewio/checkov/tree/main" in filter_expr
+
+
+def test_sed_filter_without_cloud_prefix_still_renders():
+    """Backward compat: build_sed_filter() with no args must still return
+    a valid sed expression (the call sites in scan.sh / tests pass nothing)."""
+    filter_expr = build_sed_filter()
+    assert filter_expr.startswith("s|")
+    assert filter_expr.endswith("|g")
+    # Default (no cloud) -> falls through to repo root, not azure dir.
+    assert "/checks/resource/" not in filter_expr or "azure" not in filter_expr
+
+
+def test_sed_filter_preserves_prismacloud_anchor_for_all_clouds():
+    """The upstream-host anchor (docs.prismacloud.io) must be present in
+    the filter regardless of cloud prefix - that is the whole point of
+    the rewrite."""
+    for cloud in ("AWS", "AZURE", "GCP", "K8S", "ZZZ"):
+        filter_expr = build_sed_filter(cloud_prefix=cloud)
+        assert "prismacloud" in filter_expr, f"missing prisma anchor for {cloud}"
+
+
+@pytest.mark.parametrize("cloud,expected_dir", [
+    ("AWS", "aws"),
+    ("AZURE", "azure"),
+    ("GCP", "gcp"),
+    ("K8S", "kubernetes"),
+    ("LIN", "linode"),
+    ("OPENSTACK", "openstack"),
+])
+def test_cloud_to_dir_mapping(cloud, expected_dir):
+    """The CLOUD_TO_DIR dict must map the known Checkov cloud prefixes to
+    their canonical directory names. The single dict is the single source
+    of truth - no parallel string lists anywhere."""
+    from checkov_url_overrides import CLOUD_TO_DIR
+    assert CLOUD_TO_DIR[cloud] == expected_dir
+
+
+def test_sed_filter_uses_id_parts_pattern_regex():
+    r"""The ID_PARTS_PATTERN imported into checkov_url_overrides must be the
+    SAME regex Checkov uses (r'([^_]*)_([^_]*)_(\d+)'). Redefining a local
+    copy of the regex is forbidden by the plan - DRY/LIGHTWEIGHT rule (d)."""
+    import re
+    from checkov_url_overrides import ID_PARTS_PATTERN
+    assert isinstance(ID_PARTS_PATTERN, re.Pattern)
+    m = ID_PARTS_PATTERN.match("CKV_AZURE_13")
+    assert m is not None
+    assert m.group(1) == "CKV"
+    assert m.group(2) == "AZURE"
+    assert m.group(3) == "13"
+
+
 @pytest.mark.parametrize("rule_id", [
     "CKV_AZURE_13", "CKV_AZURE_212", "CKV_AZURE_71",
     "CKV2_AZURE_21", "CKV_SECRET_3", "CKV_TF_1",

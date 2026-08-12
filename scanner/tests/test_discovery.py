@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from discovery import (  # noqa: E402
     DiscoveredPair,
+    NoIaCFoundError,
     NoTerraformFoundError,
     ScanPathEntry,
     ScanPathsCollisionError,
@@ -832,3 +833,106 @@ def test_discovered_pair_unpacks_like_tuple(tmp_path: Path) -> None:
     p = DiscoveredPair(project="a", env="b")
     proj, env = p
     assert (proj, env) == ("a", "b")
+
+
+# ---------------------------------------------------------------------------
+# 12. Framework-aware detection (T5 acceptance)
+# ---------------------------------------------------------------------------
+
+
+def test_env_tree_with_kubernetes_yaml_only_is_detected(tmp_path: Path) -> None:
+    """An env dir containing only Kubernetes ``*.yaml`` manifests is detected.
+
+    Acceptance for T5: previously ``_has_real_tf_files`` would reject
+    this directory (no ``*.tf`` files), causing ``NoIaCFoundError`` to
+    be raised. Now that ``_has_iac_files`` delegates to
+    :func:`scanner.frameworks.detect_frameworks` (which sniffs the
+    ``apiVersion:`` / ``kind:`` header), the env dir is recognized as
+    a Kubernetes stack root.
+    """
+    _make_env_tree(
+        tmp_path,
+        {
+            "payments": {
+                "prod": ["deployment.yaml"],
+            },
+        },
+    )
+    # Override the empty default with a valid K8s manifest so the
+    # sniff helper in scanner/frameworks.py can match it.
+    env_dir = tmp_path / "env" / "payments" / "prod"
+    (env_dir / "deployment.yaml").write_text(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: x\n",
+        encoding="utf-8",
+    )
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == [("payments", "prod")]
+
+
+def test_flat_repo_with_dockerfile_only_is_detected(tmp_path: Path) -> None:
+    """A flat repo with only a Dockerfile (no ``*.tf``, no env/) is detected.
+
+    Acceptance for T5: previously the flat-repo fallback hard-coded
+    ``*.tf`` scanning, so a repo containing only a Dockerfile would
+    raise :class:`NoIaCFoundError`. Now ``detect_frameworks`` matches
+    the ``Dockerfile*`` glob and the repo yields ``[("default", "default")]``.
+    """
+    (tmp_path / "Dockerfile").write_text("FROM alpine:3\nRUN true\n", encoding="utf-8")
+    # Noise: a non-IaC file should not crash detection either.
+    (tmp_path / "README.md").write_text("", encoding="utf-8")
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == [("default", "default")]
+
+
+def test_no_iac_found_error_is_alias_of_no_terraform_found_error() -> None:
+    """``NoTerraformFoundError`` is a thin alias for ``NoIaCFoundError``.
+
+    They MUST be the same class object (not a subclass) so that
+    ``except NoTerraformFoundError`` catches raises of
+    ``NoIaCFoundError`` and vice versa. This guards the backward-compat
+    contract promised in the module docstring.
+    """
+    assert NoTerraformFoundError is NoIaCFoundError
+    # FileNotFoundError inheritance is preserved.
+    assert issubclass(NoIaCFoundError, FileNotFoundError)
+    assert issubclass(NoTerraformFoundError, FileNotFoundError)
+
+
+def test_empty_repo_raises_no_iac_found_error(tmp_path: Path) -> None:
+    """A repo with no IaC files (no env/, no pci_scope.yaml, no frameworks at root)
+    raises :class:`NoIaCFoundError` (and therefore the deprecated alias
+    :class:`NoTerraformFoundError`).
+    """
+    (tmp_path / "README.md").write_text("nothing here", encoding="utf-8")
+
+    # New name catches the raise.
+    with pytest.raises(NoIaCFoundError):
+        discover_pairs(tmp_path)
+    # Deprecated alias also catches it (same class object).
+    with pytest.raises(NoTerraformFoundError):
+        discover_pairs(tmp_path)
+
+
+def test_env_tree_with_bicep_file_only_is_detected(tmp_path: Path) -> None:
+    """An env dir containing only ``*.bicep`` files is detected.
+
+    Mirrors the Kubernetes / Dockerfile tests above — ``_has_iac_files``
+    should accept any framework ``detect_frameworks`` recognizes.
+    """
+    _make_env_tree(
+        tmp_path,
+        {"infra": {"prod": ["main.bicep"]}},
+    )
+    env_dir = tmp_path / "env" / "infra" / "prod"
+    (env_dir / "main.bicep").write_text(
+        "resource x 'x@2020-06-01' = {\n  name: 'foo'\n}\n",
+        encoding="utf-8",
+    )
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == [("infra", "prod")]

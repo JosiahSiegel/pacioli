@@ -1,0 +1,52 @@
+# Variant of public_bucket.template.yaml that exercises the
+# ``# checkov:skip=...`` inline-suppression path against a non-Terraform
+# file type (CloudFormation / YAML). Lives next to the base fixture in
+# ``scanner/tests/fixtures/cfn-sample/`` so the shared fixture directory
+# remains the single source of CFN test data (no parallel fixture
+# directories anywhere else in the tree).
+#
+# Properties set here so ONLY the intentionally-skipped check fires:
+#
+#   * CKV_AWS_20 ("S3 bucket does not allow READ to everyone") is the
+#     only AWS::S3::Bucket finding a static-hosting bucket intentionally
+#     violates; the inline ``# checkov:skip=CKV_AWS_20: …`` comment
+#     attaches the justification right at the bucket declaration.
+#   * CKV_AWS_53/54/55/56 (block public ACL/policy/ignore/Restrict) are
+#     explicitly enabled so they PASS (no failure).
+#   * CKV_AWS_18 (access logging), CKV_AWS_19 (encryption), CKV_AWS_21
+#     (versioning) are explicitly enabled via their respective nested
+#     configuration blocks so they PASS.
+#
+# Verification of the round trip:
+#
+#   checkov -f skipped_public_bucket.template.yaml \\
+#     --framework cloudformation --output sarif
+#
+# emits SARIF with CKV_AWS_20 carrying ``suppressions: [{kind: inSource,
+# justification: …}]``; the other rules are absent from the failed-checks
+# set because the resource already satisfies them.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Variant E2E fixture — same bucket as public_bucket.template.yaml, but
+  with the deliberately-failing CKV_AWS_20 check suppressed via the
+  inline ``# checkov:skip=...`` comment, and the other rules explicitly
+  satisfied so only the intentional finding remains.
+Resources:
+  StaticSiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # checkov:skip=CKV_AWS_20: read access is intentional for a public static site
+      AccessControl: PublicRead
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: access-logs-target

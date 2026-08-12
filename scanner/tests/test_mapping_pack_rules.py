@@ -34,12 +34,16 @@ INTENTIONALLY_ABSENT_FROM_RULE_SOURCE_URLS: Final[set[str]] = {
     "CKV_AZURE_PCI_003",  # Custom PaaC check; no canonical Checkov source.
     "CKV_AZURE_PCI_004",  # Custom PaaC check; no canonical Checkov source.
     "CKV_AZURE_PCI_005",  # Custom PaaC check; no canonical Checkov source.
-    "CKV_AZURE_PCI_NOTE_3_4",  # Procedural PAN-display control; note token only.
-    "CKV_AZURE_PCI_NOTE_3_5_1_1",  # Follow-up custom PaaC control; note token only.
-    "CKV_AZURE_PCI_NOTE_8_3_1",  # Procedural strong-authentication control.
-    "CKV_AZURE_PCI_NOTE_8_3_10",  # Custom MFA control; note token only.
-    "CKV_AZURE_PCI_NOTE_10_7",  # Audit-retention note token; no working Checkov rule.
-    "CKV_AZURE_PCI_NOTE_11_4_5",  # Follow-up custom PaaC control; note token only.
+    # NOTE tokens (renamed CKV_AZURE_PCI_NOTE_* -> PACIOLI_NOTE_* in T7) are
+    # symbolic placeholders with no canonical Checkov source URL. Each one
+    # is a documented exception; the mapping pack declares them in the
+    # top-level ``note_tokens`` allow-list.
+    "PACIOLI_NOTE_3_4",  # Procedural PAN-display control; note token only.
+    "PACIOLI_NOTE_3_5_1_1",  # Follow-up custom PaaC control; note token only.
+    "PACIOLI_NOTE_8_3_1",  # Procedural strong-authentication control.
+    "PACIOLI_NOTE_8_3_10",  # Custom MFA control; note token only.
+    "PACIOLI_NOTE_10_7",  # Audit-retention note token; no working Checkov rule.
+    "PACIOLI_NOTE_11_4_5",  # Follow-up custom PaaC control; note token only.
 }
 
 
