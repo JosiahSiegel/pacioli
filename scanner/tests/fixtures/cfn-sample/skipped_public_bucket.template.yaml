@@ -25,6 +25,16 @@
 # emits SARIF with CKV_AWS_20 carrying ``suppressions: [{kind: inSource,
 # justification: …}]``; the other rules are absent from the failed-checks
 # set because the resource already satisfies them.
+#
+# SonarCloud exclusions
+# ---------------------
+# The line-level NOSONAR markers below suppress the "intentional
+# vulnerability" findings on the ``AccessControl`` / ``BlockPublicAcls``
+# properties. These two knobs MUST stay permissive — the whole point
+# of this fixture is to prove the inline ``# checkov:skip=...`` comment
+# suppresses the resulting CKV_AWS_20 finding. Without the NOSONAR
+# markers, SonarCloud flags the same vulnerabilities the test is
+# trying to verify.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Variant E2E fixture — same bucket as public_bucket.template.yaml, but
@@ -36,13 +46,13 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       # checkov:skip=CKV_AWS_20: read access is intentional for a public static site
-      AccessControl: PublicRead
+      AccessControl: PublicRead  # NOSONAR — intentional CKV_AWS_20 trigger (must be permissive)
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: false
+        BlockPublicAcls: false  # NOSONAR — companion to the AccessControl=PublicRead above
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true

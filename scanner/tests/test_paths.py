@@ -20,16 +20,47 @@ from pathlib import Path
 
 import pytest
 
-import paths as paths_mod
-from paths import (
-    PathResolutionError,
-    TargetRepo,
-    resolve_baseline,
-    resolve_mapping,
-    resolve_paths,
-    resolve_run_dir,
-    resolve_target_repo,
-)
+# Mirror the pattern in scanner/tests/test_aggregate_html.py:38-51: insert
+# the repo root into sys.path so ``import scanner.paths`` resolves
+# correctly when this file is invoked from a non-default cwd (e.g. inside
+# an editor's test runner, or when the wheel install puts the package on
+# sys.path under a different name). The legacy flat-system import
+# (``import paths as paths_mod``) is kept as a fallback so the test
+# itself runs in either layout.
+import sys
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT_STR = str(_REPO_ROOT)
+if _REPO_ROOT_STR not in sys.path:
+    sys.path.insert(0, _REPO_ROOT_STR)
+
+try:
+    # Preferred: import via the scanner package (works with both
+    # editable install and wheel install).
+    from scanner.paths import (
+        PathResolutionError,
+        TargetRepo,
+        resolve_baseline,
+        resolve_mapping,
+        resolve_paths,
+        resolve_run_dir,
+        resolve_target_repo,
+    )
+    import scanner.paths as paths_mod
+except ModuleNotFoundError:
+    # Fallback: legacy flat-system import (works only when this file is
+    # run with PYTHONPATH=scanner, e.g. via ``make test`` from the repo
+    # root in an editable install).
+    import paths as paths_mod  # type: ignore[no-redef]
+    from paths import (  # type: ignore[no-redef]
+        PathResolutionError,
+        TargetRepo,
+        resolve_baseline,
+        resolve_mapping,
+        resolve_paths,
+        resolve_run_dir,
+        resolve_target_repo,
+    )
 
 
 # ---------------------------------------------------------------------------

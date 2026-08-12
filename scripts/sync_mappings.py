@@ -110,6 +110,39 @@ def _delete_stale(stale: list[str], *, verbose: bool, dry_run: bool) -> int:
     return removed
 
 
+def _sync_one_source(
+    name: str, *, verbose: bool, dry_run: bool
+) -> bool:
+    """Reconcile one source YAML into the destination. Returns True iff
+    the destination drifted (new file, byte-different content, or a
+    would-change event under --dry-run). Returns False for the
+    identical-content path.
+
+    Extracted from :func:`sync` so the parent function reads as a
+    straight-line pipeline and the per-file decision logic stays
+    testable in isolation.
+    """
+    dst = DEST_DIR / name
+    if not dst.exists():
+        if dry_run:
+            if verbose:
+                print(f"  would copy: {name}")
+            return True
+        _copy_one(name, verbose=verbose)
+        return True
+    # File exists — check for byte equality.
+    if (SOURCE_DIR / name).read_bytes() != dst.read_bytes():
+        if dry_run:
+            if verbose:
+                print(f"  would update: {name}")
+            return True
+        _copy_one(name, verbose=verbose)
+        return True
+    if verbose:
+        print(f"  identical: {name}")
+    return False
+
+
 def sync(*, check: bool, verbose: bool, dry_run: bool) -> int:
     """Run the sync. Returns the number of files that drifted (caller maps to exit code)."""
     DEST_DIR.mkdir(parents=True, exist_ok=True)
@@ -123,28 +156,8 @@ def sync(*, check: bool, verbose: bool, dry_run: bool) -> int:
 
     # 1. Copy / update sources into destination.
     for name in sorted(sources):
-        dst = DEST_DIR / name
-        if not dst.exists():
-            if dry_run:
-                if verbose:
-                    print(f"  would copy: {name}")
-                drifted += 1
-                continue
-            _copy_one(name, verbose=verbose)
+        if _sync_one_source(name, verbose=verbose, dry_run=dry_run):
             drifted += 1
-            continue
-        # File exists — check for byte equality.
-        if (SOURCE_DIR / name).read_bytes() != dst.read_bytes():
-            if dry_run:
-                if verbose:
-                    print(f"  would update: {name}")
-                drifted += 1
-                continue
-            _copy_one(name, verbose=verbose)
-            drifted += 1
-        else:
-            if verbose:
-                print(f"  identical: {name}")
 
     # 2. Delete stale destinations (e.g. mapping pack was renamed/removed).
     if stale_in_dest:

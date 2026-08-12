@@ -10,6 +10,15 @@ from pathlib import Path
 
 from scanner.frameworks import scan_mapping_packs
 
+# Filename suffixes treated as mapping-pack YAML. Bundled-directory scans
+# in :func:`_probe_bundled_pack_filenames` and the editable-install
+# :func:`scan_mapping_packs` helper both consult this set so the
+# "what counts as a pack" rule lives in one place. A ``frozenset`` is
+# not used here because :func:`scan_mapping_packs` already accepts a
+# plain glob; the tuple is the smallest contract that both call sites
+# can share.
+YAML_SUFFIXES: tuple[str, ...] = (".yaml", ".yml")
+
 
 class PathResolutionError(ValueError):
     """Raised when a required path cannot be resolved."""
@@ -136,44 +145,76 @@ def resolve_target_repo(args: argparse.Namespace) -> TargetRepo:
     return TargetRepo(path=path, exists=path.is_dir())
 
 
+def _resolve_bundled_mapping_pack() -> Path | None:
+    """Wheel-install fallback for the default mapping pack.
+
+    Returns the first usable mapping pack from ``scanner/mappings/``
+    inside the installed package (picked via ``_pick_default_pack``
+    priority so a ``pci_dss_*`` pack wins when present). Returns
+    ``None`` when no bundled pack is reachable -- callers translate
+    that to a ``PathResolutionError``.
+
+    Extracted from :func:`resolve_mapping` so the parent function
+    stays focused on the precedence story and the fallback logic
+    is independently testable.
+    """
+    for chosen_filename in _probe_bundled_pack_filenames():
+        bundled = _bundled_mapping_pack(chosen_filename)
+        if bundled is not None and bundled.is_file():
+            return _canonical(bundled)
+    return None
+
+
+def _resolve_editable_mapping_pack(default_dir: Path) -> Path | None:
+    """Editable-install lookup for the default mapping pack.
+
+    Scans ``<install_root>/mappings/`` (the source-checkout layout)
+    via :func:`scan_mapping_packs` and returns the canonical path
+    of the picker-selected default. Returns ``None`` when the
+    directory is absent, empty, or the selected file is missing.
+    """
+    if not default_dir.is_dir():
+        return None
+    packs = scan_mapping_packs(default_dir)
+    chosen = _pick_default_pack(packs)
+    if chosen is None:
+        return None
+    candidate = default_dir / chosen["filename"]
+    if not candidate.is_file():
+        return None
+    return _canonical(candidate)
+
+
 def resolve_mapping(args: argparse.Namespace) -> MappingPack:
+    """Resolve the mapping pack (CLI > env > installed default).
+
+    Precedence (highest first):
+
+    1. ``--mapping`` CLI flag / ``PACIOLI_MAPPING`` (or legacy
+       ``PCI_MAPPING``) env var. When supplied, the path MUST exist
+       — explicit user input is never silently swapped to a bundled
+       default. This contract is exercised by
+       ``test_explicit_missing_mapping_does_not_silently_swap_to_bundled``.
+    2. Shipped default, editable-install layout — ``<install_root>/mappings/``.
+    3. Shipped default, wheel-install layout — ``scanner/mappings/`` via
+       :func:`importlib.resources`.
+
+    The shipped default lives in two places (editable + wheel). We probe
+    both because the Python process cannot reliably tell which layout
+    it's running under without a sys.path inspection that would be
+    brittle across packaging variants.
+    """
     raw_value = _cli_value(args, "mapping") or _env_value("PACIOLI_MAPPING", "PCI_MAPPING")
-    explicit = raw_value is not None
-    if explicit:
+    if raw_value is not None:
         path = _canonical(raw_value)
         if not path.is_file():
             raise PathResolutionError(f"Mapping pack does not exist: {path}")
         return MappingPack(path=path, framework=_framework(path))
 
-    # Default resolution: ask the SHARED scanner.frameworks.scan_mapping_packs
-    # helper to enumerate shipped mapping packs at the editable-install
-    # location (<install_root>/mappings). If that directory is empty or
-    # missing — the wheel-install layout — try each candidate filename
-    # via importlib.resources to find one that ships inside the package.
-    #
-    # The first non-empty scan wins. Picking the default pack honors the
-    # legacy preference (pci_dss_* over alphabetical first).
-    path: Path | None = None
     default_dir = _default_mapping_dir()
-    if default_dir.is_dir():
-        packs = scan_mapping_packs(default_dir)
-        chosen = _pick_default_pack(packs)
-        if chosen is not None:
-            candidate = default_dir / chosen["filename"]
-            if candidate.is_file():
-                path = _canonical(candidate)
-
+    path = _resolve_editable_mapping_pack(default_dir)
     if path is None:
-        # Try the wheel-install fallback. Use a real scan of the bundled
-        # pack names — we know the file stem from the editable-install
-        # scan, OR from a probe of the package itself. We re-run the scan
-        # against the importlib Traversable to keep the enumeration logic
-        # in one place (scanner.frameworks.scan_mapping_packs).
-        for chosen_filename in _probe_bundled_pack_filenames():
-            bundled = _bundled_mapping_pack(chosen_filename)
-            if bundled is not None and bundled.is_file():
-                path = _canonical(bundled)
-                break
+        path = _resolve_bundled_mapping_pack()
 
     if path is None or not path.is_file():
         raise PathResolutionError(
@@ -211,7 +252,7 @@ def _probe_bundled_pack_filenames() -> list[str]:
             # ``name`` is the base filename for both real filesystem
             # entries and Traversable entries (Python 3.9+).
             name = getattr(entry, "name", None) or str(entry).rsplit("/", 1)[-1]
-            if name.endswith(".yaml") or name.endswith(".yml"):
+            if name.endswith(YAML_SUFFIXES):
                 names.append(name)
     except (AttributeError, OSError):
         return []
@@ -253,6 +294,7 @@ __all__ = [
     "PathResolutionError",
     "RunDir",
     "TargetRepo",
+    "YAML_SUFFIXES",
     "resolve_baseline",
     "resolve_mapping",
     "resolve_paths",

@@ -107,7 +107,10 @@ def _sniff_cloudformation(path: Path) -> bool:
 
 def _sniff_kubernetes(path: Path) -> bool:
     """K8s heuristic: top-level ``apiVersion:`` or ``kind:``."""
-    return _scan_head(path, lambda ln: ln.startswith("apiVersion:") or ln.startswith("kind:"))
+    return _scan_head(
+        path,
+        lambda ln: ln.startswith(("apiVersion:", "kind:")),
+    )
 
 
 def _sniff_argo(path: Path) -> bool:
@@ -119,6 +122,14 @@ def _sniff_argo(path: Path) -> bool:
         return False
 
 
+#: Generic YAML file globs. Reused in :data:`FRAMEWORK_FILE_PATTERNS`
+#: (kubernetes + argo_workflows both match arbitrary ``*.yaml``/``*.yml``
+#: files because the disambiguation comes from the sniffer, not the
+#: extension) and in :func:`scan_mapping_packs` (the mapping-pack
+#: directory only ships ``.yaml`` files; ``.yml`` is kept for symmetry
+#: with the framework pattern set).
+_YAML_GLOBS: tuple[str, ...] = ("*.yaml", "*.yml")
+
 #: Per-framework ``(glob_patterns, sniff_callable_or_None)``. Sniff resolves
 #: ambiguous extensions (e.g. ``.yaml`` is used by both Kubernetes and CFN).
 #: Read-only contract — do not mutate at runtime.
@@ -126,7 +137,7 @@ FRAMEWORK_FILE_PATTERNS: dict[str, tuple[tuple[str, ...], Callable[[Path], bool]
     "terraform": (("*.tf", "*.tf.json", "*.tfvars"), None),
     "terraform_plan": (("*.tfplan", "tfplan.json"), None),
     "cloudformation": (("*.template.json", "*.template.yaml", "*.template.yml"), _sniff_cloudformation),
-    "kubernetes": (("*.yaml", "*.yml"), _sniff_kubernetes),
+    "kubernetes": (_YAML_GLOBS, _sniff_kubernetes),
     "dockerfile": (("Dockerfile*", "*.dockerfile", "Dockerfile.*"), None),
     "arm": (("azuredeploy*.json", "azuredeploy.*.json", "arm*.json"), None),
     "bicep": (("*.bicep",), None),
@@ -143,7 +154,7 @@ FRAMEWORK_FILE_PATTERNS: dict[str, tuple[tuple[str, ...], Callable[[Path], bool]
     "bitbucket_pipelines": (("bitbucket-pipelines.yml", "bitbucket-pipelines.yaml"), None),
     "circleci_pipelines": ((".circleci/config.yml", ".circleci/config.yaml"), None),
     "azure_pipelines": (("azure-pipelines.yml", "azure-pipelines.yaml"), None),
-    "argo_workflows": (("*.yaml", "*.yml"), _sniff_argo),
+    "argo_workflows": (_YAML_GLOBS, _sniff_argo),
     "ansible": (("playbook.yml", "playbook.yaml"), None),
 }
 
@@ -199,7 +210,7 @@ def scan_mapping_packs(mappings_dir: Path) -> list[dict[str, str]]:
     if not mappings_dir.is_dir():
         return []
     packs: list[dict[str, str]] = []
-    for yaml_path in sorted(mappings_dir.glob("*.yaml")):
+    for yaml_path in sorted(mappings_dir.glob(_YAML_GLOBS[0])):
         try:
             with yaml_path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh) or {}

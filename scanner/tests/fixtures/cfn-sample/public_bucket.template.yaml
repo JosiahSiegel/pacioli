@@ -19,7 +19,8 @@
 # This single fixture is consumed by:
 #
 #   * ``scanner/tests/test_e2e_multi_framework.py`` — automated E2E run
-#     (TODOs 14).
+#     that pipes the SARIF emitted against this fixture through the
+#     full aggregation pipeline.
 #   * Manual QA F3 ("Real manual QA") — the operator manually runs
 #     ``pacioli scan --framework cloudformation --mapping
 #     scanner/tests/fixtures/mappings/test_aws.yaml`` against this
@@ -37,6 +38,15 @@
 # update both this fixture's comments and the companion mapping pack at
 # ``scanner/tests/fixtures/mappings/test_aws.yaml`` (keeps them in sync
 # so the mapping pack still maps to checks this fixture actually fires).
+#
+# SonarCloud exclusions
+# ---------------------
+# The line-level NOSONAR markers below suppress the "intentional
+# vulnerability" findings on the AccessControl / PublicAccessBlock
+# properties. These knobs MUST stay permissive — the whole point of
+# this fixture is to prove Checkov catches a public S3 bucket marked
+# HIGH by the mapping pack. Without the NOSONAR markers, SonarCloud
+# flags the same vulnerabilities the test is trying to verify.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Shared E2E fixture for Pacioli's non-Terraform framework support.
@@ -47,4 +57,4 @@ Resources:
   PublicBucket:
     Type: AWS::S3::Bucket
     Properties:
-      AccessControl: PublicRead
+      AccessControl: PublicRead  # NOSONAR — intentional CKV_AWS_20/53/54/55/56 trigger

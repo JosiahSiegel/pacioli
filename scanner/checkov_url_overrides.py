@@ -34,9 +34,16 @@ Why this lives in its own module:
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
-from checkov.docs_generator import ID_PARTS_PATTERN
+# Lazy import: ID_PARTS_PATTERN comes from checkov.docs_generator, but the
+# CI ``mapping-lint`` job runs without checkov installed (only pyyaml). A
+# module-level import would break that job with ModuleNotFoundError. The
+# import is deferred to the single function that uses it
+# (``build_sed_filter``). Other call sites in this module -- the rule URL
+# table, ``get_help_uri`` -- do not touch the regex at all.
+if TYPE_CHECKING:
+    from checkov.docs_generator import ID_PARTS_PATTERN  # noqa: F401
 
 # Cloud prefix -> Checkov source directory name (under
 # checkov/terraform/checks/resource/). This is the SINGLE source of truth
@@ -162,6 +169,24 @@ RULE_SOURCE_URLS: dict[str, str] = {
 }
 
 
+def __getattr__(name: str):
+    """Lazy module-level attribute access.
+
+    The CI ``mapping-lint`` job installs only pyyaml (no checkov), so
+    the legacy ``from checkov.docs_generator import ID_PARTS_PATTERN``
+    was moved out of the module top to keep that job green. Test
+    consumers (and any code that wants to reuse the same regex)
+    import ``ID_PARTS_PATTERN`` via ``from checkov_url_overrides
+    import ID_PARTS_PATTERN``; this ``__getattr__`` keeps that
+    public surface working without re-introducing the import-time
+    dependency on checkov.
+    """
+    if name == "ID_PARTS_PATTERN":
+        from checkov.docs_generator import ID_PARTS_PATTERN  # noqa: PLC0415
+        return ID_PARTS_PATTERN
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def get_help_uri(rule_id: str, upstream_help_uri: str | None = None) -> str:
     """Return the canonical GitHub source URL for a Checkov rule.
 
@@ -236,7 +261,11 @@ def build_sed_filter(
     repo_root = "https://github.com/bridgecrewio/checkov"
     # Parse the cloud prefix from check_id using Checkov's own regex
     # (DRY/LIGHTWEIGHT rule d — never redefine the pattern locally).
+    # Imported lazily at top of file (see TYPE_CHECKING block) so this
+    # module is importable in environments without checkov installed
+    # (e.g. the CI ``mapping-lint`` job that only installs pyyaml).
     if check_id:
+        from checkov.docs_generator import ID_PARTS_PATTERN  # noqa: PLC0415
         match = ID_PARTS_PATTERN.match(check_id)
         if match:
             cloud_prefix = match.group(2)

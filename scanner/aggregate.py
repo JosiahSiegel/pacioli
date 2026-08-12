@@ -140,6 +140,44 @@ class EnvResult:
     error: str | None = None
 
 
+@dataclass
+class CoverageGaps:
+    """Coverage-gap data for the HTML report.
+
+    Aggregates the two structures that ``write_html_report`` used to
+    take as separate parameters (``missing_per_req`` and
+    ``gap_records``). The two carry the same information in two
+    shapes:
+
+    * ``records`` -- the full per-req gap list (req_id, expected_count,
+      fired_count, missing_count, missing_check_ids, hint). Used by
+      the "Coverage gaps" section + the sidebar pending-count badge.
+    * ``missing_by_req`` -- a derived dict mapping ``req_id`` to the
+      list of missing check_ids. Used by the PCI status matrix to
+      render the per-row "(N/M mapped checks absent)" tooltip.
+
+    A single ``CoverageGaps`` instance is cheaper to pass through
+    ``write_html_report`` than two loose parameters (and the
+    parameter count was tripping the SonarCloud quality gate).
+    """
+
+    records: list[dict] = field(default_factory=list)
+    missing_by_req: dict[str, list[str]] = field(default_factory=dict)
+
+    @classmethod
+    def from_records(cls, records: list[dict]) -> "CoverageGaps":
+        """Build from a fresh ``compute_coverage_gaps`` result.
+
+        Derives ``missing_by_req`` from the ``records`` list so the
+        dataclass is internally consistent regardless of which fields
+        the caller already computed.
+        """
+        missing_by_req = {
+            g["req_id"]: g["missing_check_ids"] for g in records
+        }
+        return cls(records=records, missing_by_req=missing_by_req)
+
+
 # ---------------------------------------------------------------------------
 # SARIF parsing
 # ---------------------------------------------------------------------------
@@ -207,12 +245,13 @@ SEVERITY_OVERRIDE: dict[str, str] = {
 # Default severity for any check not in the override table.
 DEFAULT_SEVERITY = "MEDIUM"
 
-# Default mapping-pack path used by ``_load_pci_severity_overrides``
-# when no pack is supplied (e.g. legacy callers that touch
-# ``SEVERITY_OVERRIDE`` without going through ``resolve_severity``).
-_DEFAULT_SEVERITY_OVERRIDES_PATH = (
-    Path(__file__).resolve().parent / "mappings" / "pci_dss_4.0.1.yaml"
-)
+# _load_pci_severity_overrides resolves the install-bundled PCI pack
+# via importlib.resources (see the function body). The previous
+# ``_DEFAULT_SEVERITY_OVERRIDES_PATH`` filesystem-path constant was
+# removed during the CI test fix -- multiple CI jobs ran the
+# aggregator from a working directory that did not have a ``mappings/``
+# sibling, which broke the filesystem-path lookup. The importlib.resources
+# version is the canonical path for an installed wheel.
 
 
 def _load_pci_severity_overrides(
@@ -262,10 +301,28 @@ def _load_pci_severity_overrides(
     if SEVERITY_OVERRIDE:
         return SEVERITY_OVERRIDE
 
-    # Final fallback: load install-bundled pack (only when no
-    # mapping_pack was supplied at all).
+    # Final fallback: load install-bundled pack via importlib.resources
+    # (only when no mapping_pack was supplied at all). The wheel install
+    # ships the mapping inside the ``scanner`` package; using
+    # ``importlib.resources`` here avoids a CI/runtime edge case where
+    # the process working directory does not have a ``mappings/``
+    # sibling (which the old ``Path(__file__).parent / "mappings" / ...``
+    # call depended on).
     try:
-        data = yaml.safe_load(_DEFAULT_SEVERITY_OVERRIDES_PATH.read_text(encoding="utf-8"))
+        traversable = importlib.resources.files("scanner").joinpath(
+            "mappings/pci_dss_4.0.1.yaml"
+        )
+    except (ModuleNotFoundError, AttributeError, OSError):
+        return {}
+    try:
+        is_file = traversable.is_file()
+    except (AttributeError, OSError):
+        return {}
+    if not is_file:
+        return {}
+    try:
+        with traversable.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError):
         return {}
     if not isinstance(data, dict):
@@ -457,6 +514,145 @@ def _resolve_librarian_metadata(
     return at, {str(k): v for k, v in fp.items()}
 
 
+# Regex matching the HCL `resource "TYPE" "NAME" {` token at the
+# start of a Checkov snippet line. Captures the resource type and
+# name. Compiled once at module import so the per-result loop does
+# not re-parse the pattern on every finding.
+_RESOURCE_HCL_PATTERN = re.compile(r'resource\s+"([^\s"]+)"\s+"([^"]+)"')
+
+
+def _read_sarif(sarif_path: Path) -> dict | None:
+    """Read and parse a SARIF JSON file. Returns ``None`` on I/O or
+    JSON decode error (a warning is printed to stderr)."""
+    try:
+        return json.loads(sarif_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"WARN: failed to read {sarif_path}: {e}", file=sys.stderr)
+        return None
+
+
+def _build_rule_indices(run: dict) -> tuple[dict[int, dict], dict[str, dict]]:
+    """Build the two rule lookup dictionaries for a single run.
+
+    Returns (index_map, id_map) where:
+
+    * ``index_map`` maps the integer ``ruleIndex`` (SARIF 2.1.0) to the
+      rule dict -- the PRIMARY lookup table.
+    * ``id_map`` maps the string ``ruleId`` (legacy Checkov SARIF)
+      to the rule dict -- the FALLBACK table used when a result
+      omits ``ruleIndex``.
+    """
+    index_map: dict[int, dict] = {}
+    id_map: dict[str, dict] = {}
+    for i, rule in enumerate(run.get("tool", {}).get("driver", {}).get("rules", [])):
+        index_map[i] = rule
+        rid = rule.get("id", "")
+        if rid:
+            id_map[rid] = rule
+    return index_map, id_map
+
+
+def _resolve_rule_for_result(
+    result: dict,
+    rule_index_map: dict[int, dict],
+    rule_id_map: dict[str, dict],
+) -> tuple[str, dict]:
+    """Join a SARIF result against its rule entry.
+
+    Prefers the integer ``ruleIndex`` join (SARIF 2.1.0 -- exact
+    match against the rule entry the producer attached). Falls back
+    to ``ruleId`` string join for legacy emitters that omit the
+    index. Returns ``(rule_id, rule_entry)``; both may be empty
+    when the join misses.
+    """
+    if "ruleIndex" in result:
+        rule_entry = rule_index_map.get(result["ruleIndex"], {})
+        if rule_entry:
+            return rule_entry.get("id") or result.get("ruleId", "UNKNOWN"), rule_entry
+    rule_id = result.get("ruleId", "UNKNOWN")
+    return rule_id, rule_id_map.get(rule_id, {})
+
+
+def _resource_from_snippet(snippet: str) -> str:
+    """Extract the HCL resource address from a Checkov snippet.
+
+    Returns ``"TYPE.NAME"`` for a single match, or
+    ``"TYPE.NAME (+N more in snippet)"`` when the snippet contains
+    multiple ``resource "X" "Y" {`` tokens. Returns ``""`` when no
+    match is found.
+    """
+    first_line = snippet.split("\n", 1)[0].strip()
+    m = _RESOURCE_HCL_PATTERN.match(first_line)
+    if not m:
+        return ""
+    res_type, res_name = m.group(1), m.group(2)
+    res_count = sum(
+        1 for ln in snippet.splitlines() if _RESOURCE_HCL_PATTERN.match(ln.strip())
+    )
+    if res_count > 1:
+        return f"{res_type}.{res_name} (+{res_count - 1} more in snippet)"
+    return f"{res_type}.{res_name}"
+
+
+def _extract_resource(result: dict, snippet: str) -> str:
+    """Pick the best resource address for a SARIF result.
+
+    Prefers a structured ``resource`` (or ``resource_id`` /
+    ``address``) field emitted by the tool. Falls back to HCL
+    snippet parsing for Checkov 3.3.9 which emits the resource
+    address on the first line of the snippet only.
+    """
+    for k in ("resource", "resource_id", "address"):
+        if result.get(k):
+            return str(result[k])
+    if snippet:
+        return _resource_from_snippet(snippet)
+    return ""
+
+
+def _result_to_finding(
+    result: dict,
+    project: str,
+    env: str,
+    framework: str,
+    mapping_pack: dict | None,
+    rule_index_map: dict[int, dict],
+    rule_id_map: dict[str, dict],
+) -> Finding:
+    """Convert a single SARIF result entry into a :class:`Finding`.
+
+    Resolves severity (rule.properties.severity > mapping_pack
+    overrides > DEFAULT), helpUri (override map > upstream > empty),
+    message, location, and resource address. Decorated helper so
+    :func:`parse_sarif` stays focused on the iteration loop.
+    """
+    rule_id, rule_entry = _resolve_rule_for_result(result, rule_index_map, rule_id_map)
+    # Checkov OSS SARIF does NOT emit ``properties.severity`` (0 of 21
+    # inspected rules on Checkov 3.3.9). The mapping pack's
+    # ``severity_overrides`` table is the de-facto severity source.
+    sev = rule_entry.get("properties", {}).get("severity") if rule_entry else None
+    severity = resolve_severity(rule_id, mapping_pack, rule_severity=sev)
+    upstream_help_uri = rule_entry.get("helpUri", "") if rule_entry else ""
+    help_uri = CHECKOV_RULE_SOURCE_URLS.get(rule_id, upstream_help_uri)
+    message = result.get("message", {}).get("text", "")
+    location = result.get("locations", [{}])[0]
+    physical = location.get("physicalLocation", {})
+    artifact = physical.get("artifactLocation", {})
+    snippet = physical.get("region", {}).get("snippet", {}).get("text", "")
+    return Finding(
+        env=env,
+        project=project,
+        check_id=rule_id,
+        severity=severity,
+        resource=_extract_resource(result, snippet),
+        file_path=artifact.get("uri", ""),
+        line=physical.get("region", {}).get("startLine", 0),
+        message=message,
+        framework=framework,
+        help_uri=help_uri,
+    )
+
+
 def parse_sarif(
     sarif_path: Path,
     project: str,
@@ -466,19 +662,19 @@ def parse_sarif(
 ) -> list[Finding]:
     """Read a SARIF and yield Finding objects.
 
-    SARIF 2.1.0 results MAY carry an integer `ruleIndex` that indexes
-    into `runs[].tool.driver.rules[]`. Older tools (Checkov 3.3.x,
-    Bridgecrew) emit only `ruleId` strings -- we accept either, but
-    prefer the index key when both are present.
+    SARIF 2.1.0 results MAY carry an integer ``ruleIndex`` that
+    indexes into ``runs[].tool.driver.rules[]``. Older tools (Checkov
+    3.3.x, Bridgecrew) emit only ``ruleId`` strings -- we accept
+    either, but prefer the index key when both are present.
 
-    Joining on string `ruleId` (the legacy approach pre-commit-11) is
-    lossy when two distinct rule entries share the same `id` but
-    differ on `helpUri`, `precision`, or `properties`. The integer
-    `ruleIndex` join resolves each result against the exact rule
-    entry the SARIF producer attached.
+    Joining on string ``ruleId`` (the legacy approach pre-commit-11)
+    is lossy when two distinct rule entries share the same ``id``
+    but differ on ``helpUri``, ``precision``, or ``properties``. The
+    integer ``ruleIndex`` join resolves each result against the
+    exact rule entry the SARIF producer attached.
 
-    The rendered per-finding `helpUri` is propagated to
-    combined.sarif via `write_combined_sarif` (see also the
+    The rendered per-finding ``helpUri`` is propagated to
+    combined.sarif via ``write_combined_sarif`` (see also the
     SARIF rewriter at scanner/rewrite_sarif_help.py).
 
     ``mapping_pack`` is the parsed mapping YAML (the ``mapping_data``
@@ -488,126 +684,22 @@ def parse_sarif(
     sites), ``resolve_severity`` falls back to the install-bundled
     PCI pack so the behavior matches the pre-extraction code path.
     """
-    findings = []
-    try:
-        data = json.loads(sarif_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"WARN: failed to read {sarif_path}: {e}", file=sys.stderr)
+    data = _read_sarif(sarif_path)
+    if data is None:
         return []
-    findings = []
-    try:
-        data = json.loads(sarif_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"WARN: failed to read {sarif_path}: {e}", file=sys.stderr)
-        return []
-
+    findings: list[Finding] = []
     for run in data.get("runs", []):
-        # Primary index: integer ruleIndex -> rule dict. SARIF 2.1.0
-        # consumers MUST use this; we always populate it even if no
-        # result references it, because the run-level tool may extend
-        # the rules list across multiple invocations.
-        rule_index_map: dict[int, dict] = {}
-        # Fallback index: ruleId string -> rule dict, for legacy
-        # Checkov SARIF that omits ruleIndex from results.
-        rule_id_map: dict[str, dict] = {}
-        for i, rule in enumerate(run.get("tool", {}).get("driver", {}).get("rules", [])):
-            rule_index_map[i] = rule
-            rid = rule.get("id", "")
-            if rid:
-                rule_id_map[rid] = rule
-
+        rule_index_map, rule_id_map = _build_rule_indices(run)
         for result in run.get("results", []):
-            # Prefer ruleIndex (SARIF 2.1.0) when present; fall back
-            # to ruleId for tools that emit only that.
-            rule_entry: dict = {}
-            if "ruleIndex" in result:
-                idx = result["ruleIndex"]
-                rule_entry = rule_index_map.get(idx, {})
-            if not rule_entry:
-                rule_id = result.get("ruleId", "UNKNOWN")
-                rule_entry = rule_id_map.get(rule_id, {})
-            else:
-                rule_id = rule_entry.get("id") or result.get("ruleId", "UNKNOWN")
-
-            sev = (
-                rule_entry.get("properties", {}).get("severity")
-                if rule_entry else None
-            )
-            # Checkov OSS SARIF does NOT emit `properties.severity` (verified 2026-08-05 on Checkov 3.3.9 -- 0 of 21 inspected rules had any properties key). The mapping pack's ``severity_overrides`` table is the de-facto severity source. Future: switch to Checkov JSON output when SARIF adds severity.
-            # Resolve severity: rule.properties.severity > mapping_pack.severity_overrides[check_id] > DEFAULT
-            severity = resolve_severity(
-                rule_id,
-                mapping_pack,
-                rule_severity=sev,
-            )
-            upstream_help_uri = rule_entry.get("helpUri", "") if rule_entry else ""
-            help_uri = CHECKOV_RULE_SOURCE_URLS.get(rule_id, upstream_help_uri)
-            message = result.get("message", {}).get("text", "")
-
-            location = result.get("locations", [{}])[0]
-            physical = location.get("physicalLocation", {})
-            artifact = physical.get("artifactLocation", {})
-            uri = artifact.get("uri", "")
-            region = physical.get("region", {})
-            line = region.get("startLine", 0)
-            snippet = region.get("snippet", {}).get("text", "")
-
-            # resource address: prefer a structured `resource` field if
-            # the tool emits one; otherwise parse the snippet's first
-            # line. Checkov 3.3.9 emits `resource "TYPE" "NAME" {` on
-            # the first line of the snippet and no structured resource
-            # field on the SARIF result, so the regex path is the
-            # one that actually fires today. The structured fallback
-            # stays in place for any future tool that promotes the
-            # address into a field.
-            # Multi-line snippets and arrays-of-resources (count > 1) are
-            # rare in Checkov SARIF; we capture the FIRST
-            # `resource "X" "Y" {` and append "(+N more)" if needed.
-            resource = ""
-            for k in ("resource", "resource_id", "address"):
-                if k in result and result[k]:
-                    resource = str(result[k])
-                    break
-            if not resource and snippet:
-                first_line = snippet.split("\n", 1)[0].strip()
-                m = re.match(
-                    r'resource\s+"([^\s"]+)"\s+"([^"]+)"',
-                    first_line,
-                )
-                if m:
-                    res_type, res_name = m.group(1), m.group(2)
-                    # Count additional `resource "..." "..." {` tokens
-                    # in the snippet so a count attribute can be
-                    # surfaced when Checkov emitted N>1 resource
-                    # matches on the same rule.
-                    res_count = sum(
-                        1
-                        for ln in snippet.splitlines()
-                        if re.match(
-                            r'resource\s+"([^\s"]+)"\s+"([^"]+)"',
-                            ln.strip(),
-                        )
-                    )
-                    if res_count > 1:
-                        resource = (
-                            f"{res_type}.{res_name} "
-                            f"(+{res_count - 1} more in snippet)"
-                        )
-                    else:
-                        resource = f"{res_type}.{res_name}"
-
             findings.append(
-                Finding(
-                    env=env,
-                    project=project,
-                    check_id=rule_id,
-                    severity=severity,
-                    resource=resource,
-                    file_path=uri,
-                    line=line,
-                    message=message,
-                    framework=framework,
-                    help_uri=help_uri,
+                _result_to_finding(
+                    result,
+                    project,
+                    env,
+                    framework,
+                    mapping_pack,
+                    rule_index_map,
+                    rule_id_map,
                 )
             )
     return findings
@@ -1802,8 +1894,7 @@ def write_html_report(
     cells: dict,
     out_of_scope: list[dict],
     suppressed_count: int,
-    missing_per_req: dict[str, list[str]] | None = None,
-    gap_records: list[dict] | None = None,
+    gaps: CoverageGaps | None = None,
     remediation_by_check_id: dict[str, list[dict]] | None = None,
     drift_findings: list[dict] | None = None,
     framework_name: str | None = None,
@@ -1834,7 +1925,15 @@ def write_html_report(
     The optional `drift_findings` list (tier 3 only)
     is rendered as a Drift Findings table before "Findings by Environment".
     Pass [] (or None) for tier 1/2 runs to silently skip the section.
+
+    `gaps` collapses the legacy ``missing_per_req`` + ``gap_records``
+    pair into a single :class:`CoverageGaps` instance. Pass ``None``
+    (or leave unset) when no coverage-gap data is available -- the
+    report renders cleanly without the per-row tooltip and the
+    "Coverage gaps" section.
     """
+    if gaps is None:
+        gaps = CoverageGaps()
     if remediation_by_check_id is None:
         remediation_by_check_id = {}
     if drift_findings is None:
@@ -2185,7 +2284,7 @@ def write_html_report(
     pct_low = (low / total_findings * 100) if total_findings else 0
     pct_sup = (suppressed_count / total_findings * 100) if total_findings else 0
     # Pending coverage gaps count for sidebar badge
-    pending_gaps = sum(1 for g in (gap_records or []) if g.get("missing_count", 0) > 0)
+    pending_gaps = sum(1 for g in gaps.records if g.get("missing_count", 0) > 0)
     stale_oos = sum(1 for e in out_of_scope if e.get("stale"))
 
     # Build the SPA shell with sidebar nav. The rest of the report
@@ -2432,7 +2531,7 @@ def write_html_report(
         any_compliant = any(cells.get((rid, c)) == "compliant" for c in req_checks)
         any_not_scanned = any(cells.get((rid, c)) == "not_scanned" for c in req_checks)
         any_data = any((rid, c) in cells for c in req_checks)
-        missing_ids = (missing_per_req or {}).get(rid, [])
+        missing_ids = gaps.missing_by_req.get(rid, [])
         finding_count = sum(1 for er in env_results for f in er.findings if rid in (f.requirements or []))
         if any_non_compliant:
             klass = "kpi-high"; label = "FAIL"  # noqa: E702  (intentional one-liner pair)
@@ -2469,7 +2568,7 @@ def write_html_report(
         # them), say so explicitly.
         any_data = any((rid, c) in cells for c in req_checks)
         # Coverage-gap data: which mapped check_ids never fired.
-        missing_ids = (missing_per_req or {}).get(rid, [])
+        missing_ids = gaps.missing_by_req.get(rid, [])
         missing_count = len(missing_ids)
         # NOTE_TOKENS (see NOTE_TOKENS docstring) are filtered from
         # expected_by_req in build_coverage_matrix so the gap record's
@@ -2550,7 +2649,7 @@ def write_html_report(
     # Render a dedicated coverage-gap section after the in-scope rows,
     # BEFORE the out-of-scope section, so operators see it before
     # reaching the "everything else is excluded" content.
-    if gap_records and any(g["missing_count"] > 0 for g in gap_records):
+    if gaps.records and any(g["missing_count"] > 0 for g in gaps.records):
         body += "</table>\n<h3>Coverage gaps -- mapped checks that never fired</h3>\n"
         body += "<p class='req-coverage'>"
         body += (
@@ -2570,7 +2669,7 @@ def write_html_report(
         )
         body += "</p>\n<table>\n"
         body += "  <tr><th>PCI Requirement</th><th>Expected</th><th>Fired</th><th>Missing</th><th>IDs to triage</th><th>Hint</th></tr>\n"
-        for g in gap_records:
+        for g in gaps.records:
             if g["missing_count"] == 0:
                 continue
             missing_ids_html = "<br/>".join(
@@ -4051,10 +4150,10 @@ def main() -> int:
     )
     write_combined_sarif(out_dir / "combined.sarif", results)
     fail_count = write_junit(out_dir / "junit.xml", results, [])
-    # Per-req missing-list computed once for HTML rendering + CSV cell.
-    missing_per_req = {
-        g["req_id"]: g["missing_check_ids"] for g in gap_records
-    }
+    # Per-req missing-list is now derived from gap_records inside
+    # CoverageGaps.from_records(). The derived gaps instance is
+    # passed straight to write_html_report (collapsed param).
+    coverage_gaps = CoverageGaps.from_records(gap_records)
     # Collect per-env drift reports (tier 3 only). Tier 1/2 envs have no drift_report.json;
     # _collect_drift_findings walks each env's plan_dir and silently
     # skips missing files. Returns [] for tier 1/2 runs so the
@@ -4073,10 +4172,9 @@ def main() -> int:
         cells,
         out_of_scope,
         suppressed_count,
-        missing_per_req,
-        gap_records,
-        remediation_by_check_id,
-        drift_findings,
+        gaps=coverage_gaps,
+        remediation_by_check_id=remediation_by_check_id,
+        drift_findings=drift_findings,
         remediation_framework_label=rem_html_framework_label,
     )
 

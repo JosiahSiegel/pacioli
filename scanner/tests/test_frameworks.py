@@ -89,11 +89,13 @@ def test_framework_file_patterns_is_dict():
     assert isinstance(FRAMEWORK_FILE_PATTERNS, dict)
     for fw, entry in FRAMEWORK_FILE_PATTERNS.items():
         assert isinstance(fw, str)
-        assert isinstance(entry, tuple) and len(entry) == 2
+        assert isinstance(entry, tuple)
+        assert len(entry) == 2
         patterns, sniff = entry
         assert isinstance(patterns, tuple)
         for pat in patterns:
-            assert isinstance(pat, str) and pat, f"empty pattern in {fw!r}"
+            assert isinstance(pat, str), f"non-string pattern in {fw!r}: {pat!r}"
+            assert pat, f"empty pattern in {fw!r}"
         assert sniff is None or callable(sniff), f"bad sniff in {fw!r}: {sniff!r}"
 
 
