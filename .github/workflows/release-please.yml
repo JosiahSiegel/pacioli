@@ -20,6 +20,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: .github/release-please-config.json
           release-type: python
+      - name: Checkout repository for gh CLI git context
+        uses: actions/checkout@v4
       - name: Dispatch artifact build
         if: steps.release.outputs.release_created == 'true'
         env:
