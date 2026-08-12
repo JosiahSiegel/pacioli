@@ -20,7 +20,15 @@ pacioli scan . --output-dir .
 pacioli scan . --no-open
 ```
 
-The report is written under `~/.pacioli/runs/<run-id>/aggregate/report.html`. Use `--output-dir` to save it in the repository.
+The default mapping pack (PCI DSS v4.0.1) ships inside the installed package
+and is resolved automatically — no setup needed. If you have multiple mapping
+packs installed, `pacioli scan` will prompt you to pick one. When run
+non-interactively (CI, scripts, `--non-interactive`, or `PACIOLI_NON_INTERACTIVE=1`)
+the picker is skipped and the default mapping is used; to force a specific
+mapping, pass `--mapping <path>` or set `PACIOLI_MAPPING=<path>`.
+
+The report is written under `~/.pacioli/runs/<run-id>/aggregate/report.html`.
+Use `--output-dir` to save it in the repository.
 
 ### From source
 
