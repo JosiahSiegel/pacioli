@@ -5,6 +5,19 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [Unreleased]
+
+
+### Features
+
+* **cli:** interactive mapping-pack picker when no `--mapping` / `PACIOLI_MAPPING` is set in an interactive shell (#[26](https://github.com/JosiahSiegel/pacioli/pull/26))
+
+
+### Documentation
+
+* clarify Quick start — default mapping is shipped; first-time users no longer need to know the mapping name (#[26](https://github.com/JosiahSiegel/pacioli/pull/26))
+
+
 ## [1.0.0](https://github.com/JosiahSiegel/pacioli/compare/v0.2.2...v1.0.0) (2026-08-12)
 
 
