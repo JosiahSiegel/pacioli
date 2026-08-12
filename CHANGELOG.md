@@ -5,6 +5,29 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [1.0.0](https://github.com/JosiahSiegel/pacioli/compare/v0.2.2...v1.0.0) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* CSV/SARIF column/property rename.
+    - coverage_matrix.csv: pci_requirement -> requirement
+    - coverage_gaps.csv: pci_requirement -> requirement, pci_anchor_url -> doc_anchor_url
+    - SARIF properties: pci_project -> project, pci_env -> env, pci_source_sarif -> source_sarif
+    - Mapping pack's doc_anchor top-level key now controls the HTML section header link.
+
+### Features
+
+* generalize scanner to support all Checkov clouds and frameworks ([0d32001](https://github.com/JosiahSiegel/pacioli/commit/0d3200138466b58cb3c573144953cf38ff2996f9))
+* generalize scanner to support all Checkov clouds and frameworks ([3717092](https://github.com/JosiahSiegel/pacioli/commit/37170926ef4265c07ba6d4dd1c276c5efe900eb3))
+
+
+### Bug Fixes
+
+* address CI failures and Sonar findings for [#21](https://github.com/JosiahSiegel/pacioli/issues/21) ([af621de](https://github.com/JosiahSiegel/pacioli/commit/af621de7d250dbd699f78984c0fdea4fceeb87cc))
+* address remaining SonarCloud findings for [#21](https://github.com/JosiahSiegel/pacioli/issues/21) ([4c0282f](https://github.com/JosiahSiegel/pacioli/commit/4c0282f12884543bded619429912993909ddd955))
+* **ci:** sync mapping packs into scanner/mappings/ before wheel build ([c517661](https://github.com/JosiahSiegel/pacioli/commit/c51766136d0826daefb5dfc2d2cedeb73da028ca))
+
 ## [0.2.2](https://github.com/JosiahSiegel/pacioli/compare/v0.2.1...v0.2.2) (2026-08-12)
 
 
