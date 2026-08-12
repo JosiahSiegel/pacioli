@@ -149,13 +149,22 @@ message MUST start with one of these types:
 - `fix:` — bug fix (triggers a patch bump)
 - `perf:` — performance improvement (triggers a patch bump)
 - `refactor:` — code change that neither fixes a bug nor adds a
-  feature (patch bump)
-- `docs:` — documentation only (no version bump)
-- `test:` — test additions or corrections (no version bump)
-- `build:` — build system or dependency changes (no version bump)
-- `ci:` — CI configuration changes (no version bump)
-- `chore:` — tooling or maintenance (no version bump)
-- `revert:` — reverts a previous commit
+  feature (triggers a patch bump; visible in CHANGELOG "Changed"
+  section per `.github/release-please-config.json`)
+- `docs:` — documentation only (release-please treats as patch by
+  default, but this type is `hidden: true` in `changelog-sections`,
+  so the workflow logs `No user facing commits found` and skips a
+  release PR)
+- `test:` — test additions or corrections (same as `docs:` — hidden
+  patch, no release PR)
+- `build:` — build system or dependency changes (same as `docs:` —
+  hidden patch, no release PR)
+- `ci:` — CI configuration changes (same as `docs:` — hidden patch,
+  no release PR)
+- `chore:` — tooling or maintenance (same as `docs:` — hidden patch,
+  no release PR)
+- `revert:` — reverts a previous commit (visible; triggers a patch
+  bump; appears in CHANGELOG "Removed" section)
 
 Example `feat:` commit with a body:
 
@@ -178,6 +187,11 @@ BREAKING CHANGE: --gate-threshold has been replaced with --fail-on.
 
 See <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 for the full grammar.
+
+For a deeper explanation of *how* these types map to release-please's
+behavior (which types actually open a release PR, which are hidden,
+and how to force a release with `Release-As:`), see
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Adding a new Checkov rule → framework mapping
 
