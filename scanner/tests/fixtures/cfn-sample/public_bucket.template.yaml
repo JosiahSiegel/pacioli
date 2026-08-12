@@ -55,6 +55,6 @@ Description: >
   HIGH and exercise the gate pathway end-to-end.
 Resources:
   PublicBucket:
-    Type: AWS::S3::Bucket
+    Type: AWS::S3::Bucket  # NOSONAR — fixture is intentionally vulnerable to exercise Checkov CKV_AWS_18/20/21/53/54/55/56
     Properties:
       AccessControl: PublicRead  # NOSONAR — intentional CKV_AWS_20/53/54/55/56 trigger

@@ -143,7 +143,7 @@ def _sync_one_source(
     return False
 
 
-def sync(*, check: bool, verbose: bool, dry_run: bool) -> int:
+def sync(*, verbose: bool, dry_run: bool) -> int:
     """Run the sync. Returns the number of files that drifted (caller maps to exit code)."""
     DEST_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -188,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        drifted = sync(check=args.check, verbose=args.verbose, dry_run=args.dry_run)
+        drifted = sync(verbose=args.verbose, dry_run=args.dry_run)
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

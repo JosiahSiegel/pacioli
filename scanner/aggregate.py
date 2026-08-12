@@ -2531,7 +2531,6 @@ def write_html_report(
         any_compliant = any(cells.get((rid, c)) == "compliant" for c in req_checks)
         any_not_scanned = any(cells.get((rid, c)) == "not_scanned" for c in req_checks)
         any_data = any((rid, c) in cells for c in req_checks)
-        missing_ids = gaps.missing_by_req.get(rid, [])
         finding_count = sum(1 for er in env_results for f in er.findings if rid in (f.requirements or []))
         if any_non_compliant:
             klass = "kpi-high"; label = "FAIL"  # noqa: E702  (intentional one-liner pair)

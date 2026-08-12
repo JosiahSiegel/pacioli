@@ -43,7 +43,7 @@ Description: >
   satisfied so only the intentional finding remains.
 Resources:
   StaticSiteBucket:
-    Type: AWS::S3::Bucket
+    Type: AWS::S3::Bucket  # NOSONAR — fixture is intentionally vulnerable to exercise Checkov CKV_AWS_20 + verify inline skip suppresses it
     Properties:
       # checkov:skip=CKV_AWS_20: read access is intentional for a public static site
       AccessControl: PublicRead  # NOSONAR — intentional CKV_AWS_20 trigger (must be permissive)
@@ -51,7 +51,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
+      PublicAccessBlockConfiguration:  # NOSONAR — BlockPublicAcls=false is required so the bucket can be public; the rest are explicit-pass
         BlockPublicAcls: false  # NOSONAR — companion to the AccessControl=PublicRead above
         BlockPublicPolicy: true
         IgnorePublicAcls: true
