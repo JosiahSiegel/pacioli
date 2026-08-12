@@ -13,6 +13,7 @@ jump directly to the section that matches your role.
 | **A security auditor** reviewing an emitted report | [Report Format](REPORT_FORMAT.md) → [Operator Guide § Mapping schema](MAPPING_SCHEMA.md) |
 | **Someone debugging a failure** | [Troubleshooting](TROUBLESHOOTING.md) |
 | **A maintainer** reviewing or extending the safety model | [Safety Model](SAFETY_MODEL.md) |
+| **A maintainer** cutting or debugging a release | [Releasing Pacioli](RELEASING.md) |
 
 ## Reference
 
@@ -38,6 +39,9 @@ jump directly to the section that matches your role.
   contributing back, running the test suite.
 - **[Safety Model](SAFETY_MODEL.md)** — read-only invariant,
   `refuse_if_mutating` rule list, and how to add new patterns.
+- **[Releasing Pacioli](RELEASING.md)** — how the release-please
+  pipeline works, what triggers a release PR, what doesn't, and how to
+  force a release with `Release-As:` when needed.
 - **[Troubleshooting](TROUBLESHOOTING.md)** — common failure modes and
   their resolution.
 - **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — workflow for filing
