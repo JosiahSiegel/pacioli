@@ -343,3 +343,31 @@ edit.
 
 See [SECURITY.md](SECURITY.md). Do not file security issues as
 public GitHub issues.
+
+### Local hygiene
+
+The repo's `.gitignore` keeps local build, cache, and tool outputs
+out of source control. The directories you should never see in
+`git status` are:
+
+- `build/`, `dist/`, `pacioli.egg-info/` — setuptools / wheel / sdist
+- `.pytest_cache/`, `.ruff_cache/`, `__pycache__/` — test and lint caches
+- `.checkov/`, `.pacioli/runs/`, `*.sarif`, `report.html`,
+  `tfplan.binary`, `plan.json`, `coverage_matrix.csv` — local scan
+  output
+
+To wipe them in one step, run:
+
+```bash
+make clean
+```
+
+You can verify what git is currently ignoring with:
+
+```bash
+git status --ignored --short
+```
+
+If you ever suspect `.gitignore` is dropping or tracking something
+it shouldn't, run `git check-ignore -v <path>` to see which rule
+matched.
