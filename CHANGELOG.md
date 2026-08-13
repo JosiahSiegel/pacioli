@@ -62,6 +62,41 @@ once it reaches 1.0.
   both the message and the `is_interactive` gate.
 
 
+## [1.1.2](https://github.com/JosiahSiegel/pacioli/compare/v1.1.1...v1.1.2) (2026-08-13)
+
+
+### Bug Fixes
+
+* **release:** sync mapping packs into the wheel bundle before build
+
+  1.1.1 shipped a wheel that did not contain `scanner/mappings/*.yaml`
+  because the release workflow skipped the `sync_mappings.py` step that
+  `ci.yml` runs. Symptom: a fresh `pip install` of 1.1.1 followed by
+  `pacioli scan .` produced a misleading `Mapping pack does not exist:
+  C:\Python314\Lib\site-packages\mappings` error pointing at the
+  editable-install dir (which never exists on wheel installs).
+
+  Fix: add the sync step to `release.yml` mirroring `ci.yml`, AND
+  improve the `resolve_mapping` error message so the user sees
+  "No installed mapping packs found. Run 'pacioli init' to install
+  one, or pass --mapping <path> or set PACIOLI_MAPPING=<path>." when
+  both layouts are empty.
+
+
+### Features
+
+* **cli:** add `--version` top-level flag
+
+  `pacioli --version` prints the installed package version and exits
+  0. The version is read from `importlib.metadata.version('pacioli')`
+  so the printed value is ALWAYS the actually-installed wheel, never
+  a hardcoded literal that could drift from `pyproject.toml`.
+
+  Resolves the UX gap exposed by the 1.1.0 -> 1.1.1 hotfix episode:
+  the user had no way to ask the binary which version it was, so
+  wheel-upgrade failures were silent until the next scan.
+
+
 ## [Unreleased]
 
 
