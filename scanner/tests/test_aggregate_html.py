@@ -720,7 +720,7 @@ class TestHtmlReport:
             '<option value="system">System</option>',
             "pacioli.report.theme",
             "localStorage.getItem",
-            "matchMedia('(prefers-color-scheme: dark)')",
+            "@media (prefers-color-scheme: light)",
             ':focus-visible',
             'prefers-reduced-motion: reduce',
         ):

@@ -237,3 +237,29 @@ def test_static_report_loads_in_chromium(
     page.goto(static_report_url, wait_until="domcontentloaded")
 
     expect(page).to_have_title("Pacioli PCI DSS v4.0.1 Compliance Report")
+
+
+@pytest.mark.browser
+def test_hash_routes_activate_on_direct_load_and_hash_change(
+    page: Page,
+    exclusion_report_url: str,
+) -> None:
+    """Every supported route activates its section and navigation link."""
+    from playwright.sync_api import expect
+
+    routes = ("dashboard", "findings", "environments", "coverage", "remediation", "oos", "drift")
+
+    for route in routes:
+        page.goto(f"{exclusion_report_url}#{route}", wait_until="domcontentloaded")
+        expect(page.locator(f"#route-{route}")).to_have_class("route active")
+        expect(page.locator(f'nav.sidebar-nav a[data-route="{route}"]')).to_have_class("active")
+        expect(page.locator(".route.active")).to_have_count(1)
+        expect(page.locator("nav.sidebar-nav a.active")).to_have_count(1)
+
+    page.goto(exclusion_report_url, wait_until="domcontentloaded")
+    for route in routes:
+        page.evaluate(f"window.location.hash = '#{route}'")
+        expect(page.locator(f"#route-{route}")).to_have_class("route active")
+        expect(page.locator(f'nav.sidebar-nav a[data-route="{route}"]')).to_have_class("active")
+        expect(page.locator(".route.active")).to_have_count(1)
+        expect(page.locator("nav.sidebar-nav a.active")).to_have_count(1)
