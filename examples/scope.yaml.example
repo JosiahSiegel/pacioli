@@ -1,23 +1,34 @@
 # Example Pacioli scope manifest.
-# Copy this to your Terraform repo as `pci_scope.yaml` and customize.
+# Copy this to your IaC repo as `pci_scope.yaml` and customize.
 #
-# Each `project` is a logical grouping (usually a Terraform module).
-# Each project lists the `envs` to scan. The scanner walks
-# <repo_root>/env/<project>/<env>/*.tf for each entry.
+# The required root key is `projects:`. Each project is a logical grouping
+# (usually a Terraform module); the scanner walks env/<project>/<env>/ for
+# every project and environment whose status is `in_scope`.
 #
-# The scope file lives in YOUR Terraform repo (not in pacioli itself),
-# because scope is tenant-specific.
+# `pending` and `excluded` require a non-blank reason. They are never scanned
+# and do not enter a newly generated report. The scope file lives in YOUR IaC
+# repo (not in Pacioli) because the audit boundary is tenant-specific.
 
-- project: myapp
-  description: My application infrastructure
-  envs:
-    - prod
-    - staging
-- project: myapp-data
-  description: Data layer for myapp
-  envs:
-    - prod
-- project: shared-services
-  description: Shared services (logging, monitoring, identity)
-  envs:
-    - prod
+projects:
+  - project: myapp
+    description: My application infrastructure
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: pending
+        reason: Data-classification attestation is awaiting Security approval.
+  - project: myapp-data
+    description: Data layer for myapp
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+  - project: shared-services
+    description: Shared services (logging, monitoring, identity)
+    status: excluded
+    reason: Shared platform is assessed under a separate audit boundary.
+    envs:
+      - name: prod
+        status: in_scope

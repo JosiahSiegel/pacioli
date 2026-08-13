@@ -15,10 +15,12 @@ state. No real repo or fixture directory is touched.
 """
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 # Make the scanner package importable (conftest.py already does this,
 # but tests should not assume the order).
@@ -79,7 +81,56 @@ def _write_yaml(path: Path, content: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 1. env/ tree detection
+# 1. Shipped scope-example regression
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_scope_example_uses_structured_records_and_discovers_pairs(
+    tmp_path: Path,
+) -> None:
+    """The shipped template is strict-schema-valid and yields only in-scope pairs."""
+    project_root = Path(__file__).resolve().parents[2]
+    example = project_root / "examples" / "scope.yaml.example"
+    manifest = yaml.safe_load(example.read_text(encoding="utf-8"))
+
+    assert set(manifest) == {"projects"}
+    assert isinstance(manifest["projects"], list)
+    for project in manifest["projects"]:
+        assert isinstance(project, dict)
+        assert set(project) <= {"project", "description", "status", "reason", "envs"}
+        assert isinstance(project["project"], str) and project["project"].strip()
+        assert isinstance(project.get("description", ""), str)
+        assert project["status"] in {"in_scope", "pending", "excluded"}
+        assert isinstance(project["envs"], list)
+        assert project["status"] not in {"pending", "excluded"} or (
+            isinstance(project.get("reason"), str) and project["reason"].strip()
+        )
+        for environment in project["envs"]:
+            assert isinstance(environment, dict)
+            assert set(environment) <= {"name", "status", "reason"}
+            assert isinstance(environment["name"], str) and environment["name"].strip()
+            assert environment["status"] in {"in_scope", "pending", "excluded"}
+            assert environment["status"] not in {"pending", "excluded"} or (
+                isinstance(environment.get("reason"), str) and environment["reason"].strip()
+            )
+
+    shutil.copy(example, tmp_path / "pci_scope.yaml")
+    _make_env_tree(
+        tmp_path,
+        {
+            "myapp": {"prod": ["main.tf"], "staging": ["main.tf"]},
+            "myapp-data": {"prod": ["main.tf"]},
+            "shared-services": {"prod": ["main.tf"]},
+        },
+    )
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == [("myapp", "prod"), ("myapp-data", "prod")]
+
+
+# ---------------------------------------------------------------------------
+# 2. env/ tree detection
 # ---------------------------------------------------------------------------
 
 

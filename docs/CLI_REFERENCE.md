@@ -45,14 +45,19 @@ pacioli scan [--mode MODE] [--project P] [--env E]
 |---|---|---|---|
 | `--mode` | `gate` \| `report` \| `audit` | `report` (or `gate` if `CI=1`) | `gate` exits non-zero on HIGH/CRITICAL. `report` never blocks; auto-aggregates. `audit` re-emits a prior report. |
 | `--tier` | `source` \| `plan` \| `state` | `source` | Scan depth tier. `plan` adds `terraform init` + `terraform plan`. `state` adds the `.tfstate` blob download + drift diff (implies `plan`). |
-| `--project` | `<project name>` | (no filter) | Restrict to a single project from `pci_scope.yaml`. |
-| `--env` | `<env name>` | (no filter) | Restrict to a single env. |
+| `--project` | `<project name>` | (no filter) | Filter the post-scope set of `in_scope` pairs to one project; it cannot add a pending or excluded project. |
+| `--env` | `<env name>` | (no filter) | Filter the post-scope set of `in_scope` pairs to one environment; it cannot add a pending or excluded environment. |
 | `--dry-run` | flag | off | Print every command without executing. Does not actually run Checkov or `terraform`. |
 | `--verbose` | flag | off | Enable INFO-level logging. Same as `PACIOLI_VERBOSE=1`. |
 | `--label` | `<text>` | (derived from scope) | Custom slug for the run-dir name. Sanitized to `[A-Za-z0-9_.-]`. Suffixes the UTC date. |
 | `--no-open` | flag | off | Do not auto-open `report.html` after a successful aggregate. |
 | `--non-interactive` | flag | off | Disable the interactive mapping picker. Same as `PACIOLI_NON_INTERACTIVE=1` or `CI=1`. |
 | `--help` / `-h` | flag | — | Show usage and exit. |
+
+`--project` and `--env` run after `pci_scope.yaml` has resolved the
+in-scope project/environment set (including `scan_paths:`). They narrow an
+already permitted scan scope; they do not change audit scope or override a
+`pending`/`excluded` declaration.
 
 ### Exit codes
 

@@ -1,56 +1,40 @@
-"""Auto-discover (project, env) pairs in an IaC target repo.
+"""Auto-discover the in-scope ``(project, env)`` pairs in an IaC repo.
 
-Ports the precedence rules from ``scanner/lib/common.sh`` (bash):
+``<target>/pci_scope.yaml`` is authoritative when present. Its root may contain
+only ``projects:`` and ``scan_paths:`` and must provide at least one non-empty
+list. ``projects:`` records have this exact shape::
 
-  1. If ``<target>/pci_scope.yaml`` exists, it is the source of truth.
-     Only entries with ``status: in_scope`` are loaded; for each entry
-     the YAML's ``envs`` list determines which envs to scan, walking
-     ``env/<project>/<env>/`` for each (mirrors bash ``load_pci_scope``
-     + ``require_env_dir``).
+    - project: <non-blank string>
+      description: <optional string>
+      status: in_scope | pending | excluded
+      reason: <required non-blank string for pending/excluded>
+      envs:
+        - name: <non-blank string>
+          status: in_scope | pending | excluded
+          reason: <required non-blank string for pending/excluded>
 
-  2. Else if ``<target>/env/`` exists, walk ``env/<project>/<env>/``
-     subdirectories and emit one pair per env that contains at least
-     one IaC file detected by
-     :func:`scanner.frameworks.detect_frameworks` (excluding ``~*``
-     stubs). The check is framework-aware — Terraform ``*.tf``,
-     Kubernetes ``*.yaml``, Dockerfile, Bicep, CloudFormation, etc.
-     all qualify.
+Legacy scalar environments (for example, ``- prod``) are invalid. Only pairs
+whose project and environment are both ``in_scope`` are discovered. A pending
+or excluded project overrides all of its environments. Pending and excluded
+pairs are never scanned.
 
-  3. Else detect IaC files at the repo root via
-     :func:`scanner.frameworks.detect_frameworks`; if any exist, return
-     ``[("default", "default")]`` (a flat repo with no env layout).
+``scan_paths:`` may be the only root list or accompany ``projects:``. Each
+entry permits only ``path`` (required non-blank string), optional ``project``,
+``env``, ``backend_key``, ``workspace``, and ``stack_label`` strings. ``project``
+defaults to ``"default"`` and ``env`` to the basename of ``path``. Colliding
+``(project, env)`` entries require per-entry ``stack_label`` values. Explicit
+stack paths are exclusion-gated only when their declared logical pair is pending
+or excluded; unmatched paths remain discoverable.
 
-  4. If none of the above produces any pairs, raise
-     :class:`NoIaCFoundError` (alias :class:`NoTerraformFoundError`).
+Without a scope manifest, discovery walks ``env/<project>/<env>/`` directories
+that contain a framework detected by :func:`scanner.frameworks.detect_frameworks`.
+Otherwise it detects framework files at the repo root and emits
+``[("default", "default")]``. If no branch produces a pair, it raises
+:class:`NoIaCFoundError` (alias :class:`NoTerraformFoundError`).
 
-``scan_paths:`` extension
--------------------------
-In addition to the four legacy branches, ``pci_scope.yaml`` may carry an
-OPTIONAL top-level ``scan_paths:`` list whose entries declare stack
-roots directly (``{path, project?, env?, backend_key?, workspace?,
-stack_label?}``). When present, these entries are unioned with whatever
-the legacy branches produced. Stack roots in ``scan_paths:`` do NOT
-have to live under ``<target>/env/<project>/<env>/`` — they may point
-anywhere on the filesystem (a sibling checkout, a sibling repo in a
-monorepo, etc.).
-
-Two entries that resolve to the same ``(project, env)`` MUST carry a
-per-entry ``stack_label:`` to disambiguate, otherwise the scanner
-fail-closes with a clear message naming both entries. The contract is
-the same as the bash scanner's ``--scan-path`` / ``--scan-glob`` flags
-introduced alongside this Todo.
-
-``--project`` and ``--env`` filters are applied AFTER the YAML-vs-env-
-tree decision so the precedence semantics match the bash scanner. In
-flat-root mode (legacy branch 3) the filters RELABEL the single
-``(default, default)`` pair rather than filtering to zero.
-
-Why YAML takes precedence: in the bash scanner ``load_pci_scope`` is
-the only authoritative source of the project list when the file
-exists; the env/ tree is just where the .tf files live. A consumer
-may have ``env/<project>/<env>`` directories for projects that are
-explicitly NOT in PCI scope (sandbox, dev-sandbox) — the YAML is
-the explicit allowlist.
+``--project`` and ``--env`` filters apply to the fully resolved in-scope set.
+They cannot add a pending or excluded pair. In flat-root mode only, filters
+relabel the single ``(default, default)`` pair rather than filtering to zero.
 """
 
 from __future__ import annotations
@@ -317,7 +301,20 @@ def _expect_fields(raw: object, expected: set[str], location: str) -> dict:
 
 
 def _parse_scope_manifest(scope_file: Path) -> _ScopeManifest:
-    """Parse the strict structured-only pci_scope.yaml contract."""
+    """Parse the strict ``pci_scope.yaml`` schema into exclusion-gating data.
+
+    Root keys are exactly ``projects`` and ``scan_paths``; at least one must be
+    a non-empty list. Project records accept only ``project``, ``description``,
+    ``status``, ``reason``, and ``envs``. Environment records accept only
+    ``name``, ``status``, and ``reason``. Both statuses are one of ``in_scope``,
+    ``pending``, or ``excluded``; pending and excluded records require a
+    non-blank reason. Scalar environment names and unknown keys are rejected.
+
+    The returned in-scope pairs require both project and environment status to
+    be ``in_scope``. A non-in-scope project overrides its child environment's
+    status and reason. ``scan_paths`` is validated at the same root boundary
+    and parsed separately by :func:`_load_scan_paths`.
+    """
     if not _HAVE_YAML:
         raise RuntimeError(
             f"pci_scope.yaml was found at {scope_file} but PyYAML is not installed; install pyyaml or remove pci_scope.yaml."
@@ -695,36 +692,25 @@ def discover_pairs(
     env_filter: Optional[str] = None,
     include_modules: bool = False,
 ) -> list[DiscoveredPair]:
-    """Return the list of ``(project, env)`` pairs to scan.
+    """Return the resolved in-scope ``(project, env)`` pairs to scan.
 
-    Precedence (mirrors bash ``load_pci_scope``):
+    If ``pci_scope.yaml`` exists, its strict ``projects:`` and optional
+    ``scan_paths:`` records are authoritative. A projects pair is returned only
+    when both statuses are ``in_scope``. A manifest may instead contain only
+    ``scan_paths:``; declared paths are excluded only when the same manifest
+    declares their logical pair pending or excluded. Otherwise discovery uses
+    the ``env/<project>/<env>/`` tree, then the flat-root framework fallback.
 
-      1. ``<target>/pci_scope.yaml`` exists → use it (in-scope only).
-         Any ``scan_paths:`` entries in the same YAML are unioned with
-         the ``projects:`` list. A YAML with only ``scan_paths:`` (no
-         ``projects:``) is valid; ``scan_paths:`` provides the pairs.
-      2. ``<target>/env/`` exists → walk ``env/<project>/<env>/``.
-         (scan_paths has no effect in this branch — the env/ tree
-         IS the discovery source.)
-      3. Otherwise → flat-repo fallback: scan root ``*.tf`` and emit
-         ``[("default", "default")]`` if any exist. Filters RELABEL
-         the single pair rather than filtering to zero.
-
-    Filters are applied inside the branch helpers so a non-matching
-    filter returns ``[]`` rather than raising (``NoIaCFoundError``
-    is reserved for the "nothing to scan at all" case — see below;
-    :class:`NoTerraformFoundError` is a deprecated alias kept for
-    backward compat).
+    ``--project`` and ``--env`` filter the fully merged, exclusion-gated
+    in-scope set. A non-matching filter returns ``[]``; it does not make a
+    pending or excluded pair scannable. In flat-root fallback mode alone, the
+    filters relabel its single ``(default, default)`` pair.
 
     Raises:
-        NoIaCFoundError: when NEITHER the ``projects:`` list NOR
-            the ``scan_paths:`` list OR the env/-tree walk produces
-            any pairs (the legacy "nothing to scan at all" signal).
-            Also raised by :func:`_discover_from_env_tree` /
-            :func:`_discover_flat_repo` for their empty-repo cases.
-        ScanPathsCollisionError: when two ``scan_paths:`` entries
-            collide on ``(project, env)`` and neither has a
-            ``stack_label``.
+        NoIaCFoundError: when an unfiltered manifest, env tree, or flat repo
+            produces no scan pairs.
+        ScanPathsCollisionError: when colliding ``scan_paths:`` entries lack a
+            per-entry ``stack_label``.
     """
     target_repo = Path(target_repo)
     scope_file = target_repo / SCOPE_FILENAME

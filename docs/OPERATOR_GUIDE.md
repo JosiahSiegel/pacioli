@@ -413,25 +413,67 @@ Every 90 days:
 
 ## Adding a new project to scope
 
-1. Edit `pci_scope.yaml` — copy an existing entry, change `project` to
-   the new one, set `status: in_scope`, add the data-classification
-   attestation (cite a ticket).
-2. Run `pacioli scan --project <new_proj> --env prod` to validate.
-3. Verify against Azure Portal (Golden env workflow above).
-4. Commit `pci_scope.yaml` as a PR titled "PCI scope: add <new_proj>".
+`pci_scope.yaml` uses a strict structured schema. This is a **breaking
+change** from legacy manifests: a scalar environment such as `- prod` is
+rejected. Migrate every scalar item to `- name: prod` plus its `status`, wrap
+legacy top-level project records beneath `projects:`, and add a `status` to
+every project.
+
+A `projects:` root admits only project records with `project` (non-blank
+string), optional `description` (string), `status`, optional `reason`
+(string), and `envs` (list). Each `envs` item admits only `name` (non-blank
+string), `status`, and optional `reason` (string). Status is exactly
+`in_scope`, `pending`, or `excluded`; `pending` and `excluded` require a
+non-blank reason. The only other root key is `scan_paths:`. A scan-path item
+requires `path` and may use `project`, `env`, `backend_key`, `workspace`, and
+`stack_label`; omitted project/env values default to `default` and the path
+basename respectively. Use `stack_label` to disambiguate duplicate
+`(project, env)` scan paths.
+
+```yaml
+projects:
+  - project: myapp
+    description: My application infrastructure
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: pending
+        reason: Data-classification attestation is awaiting Security approval.
+  - project: sandbox
+    status: excluded
+    reason: Sandbox is outside the PCI audit boundary.
+    envs:
+      - name: dev
+        status: in_scope
+```
+
+1. Copy a structured project entry, change `project`, set `status: in_scope`,
+   and add the data-classification attestation (cite a ticket).
+2. Add each environment as a structured record and set its scan status.
+3. Run `pacioli scan --project <new_proj> --env prod` to validate.
+4. Verify against Azure Portal (Golden env workflow above).
+5. Commit `pci_scope.yaml` as a PR titled "PCI scope: add <new_proj>".
 
 ### Status field semantics
 
+A project status gates every environment underneath it. A `pending` or
+`excluded` project overrides an otherwise `in_scope` environment. An
+environment's status applies only to that environment when its project is
+`in_scope`.
+
 | Status | Behavior |
 |---|---|
-| `in_scope` | Scanned on every run |
-| `pending` | **Skipped** — data-classification attestation still owed. Set to `in_scope` after the ticket is closed |
-| `excluded` | **Skipped** — not in PCI audit boundary (e.g. sandbox, no deployed resources) |
+| `in_scope` | Scanned only when both the project and environment are `in_scope`. |
+| `pending` | **Never scanned** — data-classification attestation or approval is still owed. Set to `in_scope` after the ticket is closed. |
+| `excluded` | **Never scanned** — not in the PCI audit boundary (for example, a sandbox with no deployed resources). |
 
-To temporarily remove a project from scans while keeping its
-declaration (e.g. while remediating findings), set its status to
-`pending` and reopen once it's clean. Do not set to `excluded` unless
-the project is permanently out of audit scope.
+Pending and excluded environments never enter a newly generated report. To
+temporarily remove a project or a single environment from scans while keeping
+its declaration, set the relevant status to `pending` and record the reason.
+Use `excluded` only when that declared audit target is permanently out of
+scope.
 
 ## See also
 
