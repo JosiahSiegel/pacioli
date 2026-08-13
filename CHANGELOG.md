@@ -5,6 +5,22 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [1.1.0](https://github.com/JosiahSiegel/pacioli/compare/v1.0.0...v1.1.0) (2026-08-13)
+
+
+### Features
+
+* **cli:** wire interactive mapping picker into scan/gate handlers ([ee9f0f1](https://github.com/JosiahSiegel/pacioli/commit/ee9f0f1d31b19ca5aa608ba9045737f730578bb1))
+* interactive mapping-pack picker + README quickstart fix ([5d93124](https://github.com/JosiahSiegel/pacioli/commit/5d93124b9a6eddcfecf4950403eee2591cccddd8))
+* **mapping_picker:** interactive picker module ([38b1fb8](https://github.com/JosiahSiegel/pacioli/commit/38b1fb8436bae36783903edd37743f45c3f0221a))
+
+
+### Documentation
+
+* CHANGELOG entry for mapping picker ([f692ea4](https://github.com/JosiahSiegel/pacioli/commit/f692ea4bd7e631de37f60487833b35bae64775df))
+* CLI_REFERENCE entries for --non-interactive and picker ([193c92c](https://github.com/JosiahSiegel/pacioli/commit/193c92c7e14e81e4ae0b1852c61eb4e14ba4c888))
+* README quickstart reword for mapping picker ([c4ad9bc](https://github.com/JosiahSiegel/pacioli/commit/c4ad9bc25769e0c30c944c38e8c0734440b74f40))
+
 ## [Unreleased]
 
 
