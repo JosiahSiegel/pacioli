@@ -311,3 +311,88 @@ def test_pick_mapping_pack_non_tty_stdin_raises(
     with pytest.raises(PathResolutionError) as excinfo:
         picker_mod.pick_mapping_pack(args)
     assert "Mapping pack does not exist" in str(excinfo.value)
+
+
+def test_pick_mapping_pack_zero_discovered_packs_raises_install_message(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """HOTFIX 1.1.1: zero discovered packs -> distinct install message, not cancellation.
+
+    When the user has NO mapping packs installed (e.g. fresh wheel install
+    with no PACIOLI_MAPPING, no --mapping, no editable-install mappings),
+    the picker must NOT raise the generic "<picker cancelled>" message --
+    that message tells the user to pass --mapping, but the real problem
+    is that they have no mapping pack to point at. The user needs to be
+    told to install one, not configure a path.
+
+    Regression: 1.1.0 raised PathResolutionError("<picker cancelled>")
+    with a misleading message and a leaked traceback. This test pins
+    both the message and the exit-code path.
+
+    Expected: PathResolutionError whose message does NOT contain
+    "<picker cancelled>", but DOES contain "install" (telling the user
+    to run `pacioli init` or pass --mapping explicitly).
+    """
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("PACIOLI_NON_INTERACTIVE", raising=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    # Force both discovery helpers to return empty -- simulating a
+    # user with zero mapping packs installed.
+    monkeypatch.setattr(
+        picker_mod, "_discover_editable_packs", lambda: [], raising=False
+    )
+    monkeypatch.setattr(
+        picker_mod, "_discover_bundled_packs", lambda: [], raising=False
+    )
+    # Belt-and-suspenders: if the picker incorrectly tries to call
+    # input() before the zero-packs guard, this raises (which would
+    # fail the test loudly).
+    monkeypatch.setattr(
+        "builtins.input", lambda *_a, **_kw: "1"
+    )
+
+    args = _ns()
+    with pytest.raises(PathResolutionError) as excinfo:
+        picker_mod.pick_mapping_pack(args)
+    msg = str(excinfo.value)
+    # The misleading "<picker cancelled>" copy must NOT appear here.
+    assert "<picker cancelled>" not in msg, (
+        f"zero-packs error must not use cancellation message: {msg!r}"
+    )
+    # The user must be told to install/configure, not just pass --mapping.
+    assert "install" in msg.lower() or "no mapping pack" in msg.lower(), (
+        f"zero-packs error must guide user to install: {msg!r}"
+    )
+
+
+def test_is_interactive_false_when_no_packs_discovered(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """HOTFIX 1.1.1: is_interactive() returns False when no packs installed.
+
+    The picker should never be invoked when there is nothing to pick.
+    is_interactive() is the gate every caller already honors, so the
+    cheapest possible fix is to teach it to inspect disk. This keeps
+    the CLI wiring trivial (no extra guard at the call site) and ensures
+    the picker is never even entered in the zero-pack case.
+
+    Mocking: we patch _discover_editable_packs to return [] so the
+    function sees no packs. The bundled-discovery helper is also
+    forced to [].
+    """
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("PACIOLI_NON_INTERACTIVE", raising=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        picker_mod, "_discover_editable_packs", lambda: [], raising=False
+    )
+    monkeypatch.setattr(
+        picker_mod, "_discover_bundled_packs", lambda: [], raising=False
+    )
+
+    args = _ns()
+    assert picker_mod.is_interactive(args) is False, (
+        "is_interactive() must return False when zero packs are discoverable"
+    )
