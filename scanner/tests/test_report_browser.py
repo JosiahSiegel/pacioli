@@ -13,6 +13,9 @@ import pytest
 from scanner.aggregate import EnvResultFull, Finding, write_html_report
 from test_aggregate_html import _build_run_dir, _invoke_aggregate_main
 
+
+EVIDENCE_DIR = Path(__file__).resolve().parents[2] / ".omo" / "evidence" / "environment-exclusion" / "task-8-screenshots"
+
 if TYPE_CHECKING:
     from playwright.sync_api import Page
 
@@ -112,6 +115,115 @@ def test_environment_exclusions_recompute_and_persist(
     assert page.locator("#kpi-total").inner_text() == "0"
     assert page.locator("#env-health-list .empty-view").count() == 1
     assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
+
+
+@pytest.mark.browser
+def test_report_visual_evidence_at_responsive_theme_and_motion_contracts(
+    page: Page,
+    exclusion_report_url: str,
+) -> None:
+    """Generated report renders every required view without browser errors."""
+    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    page.on("pageerror", lambda error: pytest.fail(f"page error: {error}"))
+    console_errors: list[str] = []
+    page.on(
+        "console",
+        lambda message: console_errors.append(message.text)
+        if message.type == "error"
+        else None,
+    )
+
+    for width in (375, 768, 1280):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.emulate_media(color_scheme="dark", reduced_motion="no-preference")
+        page.goto(exclusion_report_url, wait_until="domcontentloaded")
+        page.evaluate("localStorage.removeItem('pacioli.report.theme')")
+        page.reload(wait_until="domcontentloaded")
+        assert page.locator("html").get_attribute("data-theme") == "dark"
+        assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--color-bg').trim()") == "#121820"
+        page.screenshot(path=str(EVIDENCE_DIR / f"{width}-dark.png"), full_page=True)
+
+        page.evaluate("localStorage.setItem('pacioli.report.theme', 'light')")
+        page.reload(wait_until="domcontentloaded")
+        assert page.locator("html").get_attribute("data-theme") == "light"
+        assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--color-bg').trim()") == "#f5f7fb"
+        page.screenshot(path=str(EVIDENCE_DIR / f"{width}-light.png"), full_page=True)
+
+        page.evaluate("localStorage.setItem('pacioli.report.theme', 'system')")
+        page.emulate_media(color_scheme="light", reduced_motion="no-preference")
+        page.reload(wait_until="domcontentloaded")
+        assert page.locator("html").get_attribute("data-theme") == "system"
+        assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--color-bg').trim()") == "#f5f7fb"
+        page.screenshot(path=str(EVIDENCE_DIR / f"{width}-system.png"), full_page=True)
+
+        page.emulate_media(color_scheme="dark", reduced_motion="reduce")
+        assert page.evaluate(
+            "Number.parseFloat(getComputedStyle(document.querySelector('#theme-select')).transitionDuration) <= 0.00001",
+        )
+        page.locator("#theme-select").focus()
+        page.screenshot(
+            path=str(EVIDENCE_DIR / f"{width}-reduced-motion.png"),
+            full_page=True,
+        )
+
+    page.emulate_media(color_scheme="dark", reduced_motion="no-preference")
+    page.goto(exclusion_report_url + "#environments", wait_until="domcontentloaded")
+    environment_rows = page.locator("#environment-table-body tr")
+    assert environment_rows.nth(0).locator("td").nth(0).inner_text() == "payments"
+    assert environment_rows.nth(0).locator("td").nth(1).inner_text() == "prod [blue]"
+    assert environment_rows.nth(1).locator("td").nth(0).inner_text() == "payments"
+    assert environment_rows.nth(1).locator("td").nth(1).inner_text() == "prod [green]"
+    page.screenshot(path=str(EVIDENCE_DIR / "labeled-stack.png"), full_page=True)
+
+    checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
+    for index in range(checkboxes.count()):
+        checkboxes.nth(index).check()
+    assert page.locator("#env-health-list .empty-view").count() == 1
+    assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
+    assert '"excluded"' in page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    page.screenshot(path=str(EVIDENCE_DIR / "all-environments-excluded.png"), full_page=True)
+
+    page.reload(wait_until="domcontentloaded")
+    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 3
+    page.get_by_role("button", name="Full-report reset").click()
+    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 0
+    assert console_errors == []
+
+
+@pytest.mark.browser
+def test_report_theme_defaults_dark_when_local_storage_is_denied(
+    page: Page,
+    exclusion_report_url: str,
+) -> None:
+    """Storage-denied reports remain functional with the dark first-render fallback."""
+    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    page_errors: list[str] = []
+    console_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.on(
+        "console",
+        lambda message: console_errors.append(message.text)
+        if message.type == "error"
+        else None,
+    )
+    page.add_init_script(
+        """
+        for (const name of ['getItem', 'setItem']) {
+          Object.defineProperty(Storage.prototype, name, {
+            configurable: true,
+            value: function () { throw new DOMException('denied', 'SecurityError'); },
+          });
+        }
+        """,
+    )
+
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(exclusion_report_url, wait_until="domcontentloaded")
+    assert page.locator("html").get_attribute("data-theme") == "dark"
+    assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--color-bg').trim()") == "#121820"
+    page.screenshot(path=str(EVIDENCE_DIR / "local-storage-denied-dark.png"), full_page=True)
+    assert page_errors == []
+    assert console_errors == []
 
 
 @pytest.mark.browser
