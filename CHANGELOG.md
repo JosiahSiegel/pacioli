@@ -5,6 +5,25 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [1.2.0](https://github.com/JosiahSiegel/pacioli/compare/v1.1.1...v1.2.0) (2026-08-13)
+
+
+### Features
+
+* **cli:** --version flag, version read from importlib.metadata (1.1.2) ([369d1a1](https://github.com/JosiahSiegel/pacioli/commit/369d1a16483767fe66bc518b5d0bf252809b6b10))
+
+
+### Bug Fixes
+
+* hotfix 1.1.2 — --version flag + wheel-build sync fix ([a908bd7](https://github.com/JosiahSiegel/pacioli/commit/a908bd770d4903d2a90346cd7da83aedd2ba3402))
+* **release:** sync mapping packs into wheel bundle before build (1.1.2) ([3d70ccd](https://github.com/JosiahSiegel/pacioli/commit/3d70ccd394f31a38266f1da917412d7624e80508))
+
+
+### Documentation
+
+* CHANGELOG entry for 1.1.2 hotfix ([9d6e92f](https://github.com/JosiahSiegel/pacioli/commit/9d6e92fe8c59652e0989ae650784b0a6dded4e82))
+* CLI_REFERENCE entry for --version flag (1.1.2 hotfix) ([4aa4977](https://github.com/JosiahSiegel/pacioli/commit/4aa497797e9eab6853900ba73204b52a8810b782))
+
 ## [1.1.1](https://github.com/JosiahSiegel/pacioli/compare/v1.1.0...v1.1.1) (2026-08-13)
 
 
