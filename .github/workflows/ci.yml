@@ -55,8 +55,31 @@ jobs:
           # individually pinned (S8544 cannot inspect -r files).
           pip install --only-binary=:all: checkov==3.3.9 pyyaml==6.0.2 requests==2.32.3
 
-      - name: Run pytest
-        run: pytest -v
+      - name: Run non-browser pytest
+        run: pytest scanner/tests/ -v -m "not browser"
+
+  browser:
+    name: Static report browser smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip==25.2
+          pip install -e ".[test]"
+
+      - name: Install Chromium and system dependencies
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run static report browser smoke test
+        run: make test-browser
 
   mapping-lint:
     name: Validate mapping YAML

@@ -1,0 +1,53 @@
+# Task 4 — Playwright browser harness evidence
+
+## Install test extra and Chromium
+
+```text
+$ python -m pip install -e ".[test]"
+Successfully installed playwright-1.57.0 pytest-playwright-0.7.2 pacioli-1.2.1
+
+$ python -m playwright --version
+Version 1.57.0
+
+$ python -m playwright install --with-deps chromium
+Chromium 143.0.7499.4 (playwright build v1200) downloaded to C:\Users\jsiegel\AppData\Local\ms-playwright\chromium-1200
+Chromium Headless Shell 143.0.7499.4 (playwright build v1200) downloaded to C:\Users\jsiegel\AppData\Local\ms-playwright\chromium_headless_shell-1200
+```
+
+## Browser smoke test
+
+```text
+$ make test-browser
+python scripts/sync_mappings.py
+synced 1 file(s) into S:\repos\pacioli-worktrees\environment-exclusion\scanner\mappings.
+pytest scanner/tests/test_report_browser.py -v --browser chromium --tracing retain-on-failure --screenshot only-on-failure
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.1.1, pluggy-1.6.0 -- C:\Python314\python.exe
+plugins: base-url-2.1.0, playwright-0.7.2
+collecting ... collected 1 item
+
+scanner/tests/test_report_browser.py::test_static_report_loads_in_chromium[chromium] PASSED [100%]
+
+============================== 1 passed in 2.35s ==============================
+```
+
+## Ordinary test suite excludes browser marker
+
+```text
+$ make test
+==== 603 passed, 6 skipped, 1 deselected, 10 warnings in 302.34s (0:05:02) ====
+```
+
+## Syntax and workflow validation
+
+```text
+$ python -m py_compile scanner/tests/test_report_browser.py
+(exit 0)
+
+$ python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml', encoding='utf-8')); print('ci.yml parses')"
+ci.yml parses
+```
+
+`lsp_diagnostics` could not inspect the task-owned worktree because its active
+LSP root is the separate `S:\repos\pacioli` checkout; it reported `ENOENT` for
+this worktree path. Python syntax compilation and the complete test suite passed.

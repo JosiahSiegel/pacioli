@@ -37,7 +37,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.0"]
+test = [
+    "pytest>=8.0",
+    "pytest-playwright==0.7.2",
+    "playwright==1.57.0",
+]
 
 [project.scripts]
 pacioli = "scanner.cli:main"
