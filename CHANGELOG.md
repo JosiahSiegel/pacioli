@@ -5,6 +5,20 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [1.1.1](https://github.com/JosiahSiegel/pacioli/compare/v1.1.0...v1.1.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** wrap picker in helper with PathResolutionError catch (1.1.1) ([54de6a3](https://github.com/JosiahSiegel/pacioli/commit/54de6a34f2f4d973ef11c4e465b2c5e3d955f390))
+* hotfix 1.1.1 — mapping picker zero-packs crash ([6629d71](https://github.com/JosiahSiegel/pacioli/commit/6629d714af8f07744ffa2e4f6a0a67591e847a11))
+* **mapping_picker:** distinct zero-packs error + skip picker when no packs (1.1.1) ([093ee33](https://github.com/JosiahSiegel/pacioli/commit/093ee332497dc04f297bd74cc67f10d0e6defce3))
+
+
+### Documentation
+
+* CHANGELOG entry for 1.1.1 hotfix ([0168bae](https://github.com/JosiahSiegel/pacioli/commit/0168bae9cbb1027eb99c1c64b422394093bea512))
+
 ## [1.1.0](https://github.com/JosiahSiegel/pacioli/compare/v1.0.0...v1.1.0) (2026-08-13)
 
 
