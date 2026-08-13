@@ -73,6 +73,17 @@ _CANCEL_MESSAGE: str = (
     "Pass --mapping <path> or set PACIOLI_MAPPING=<path>."
 )
 
+#: Error message raised when no mapping packs are installed at all.
+#: Distinct from :data:`_CANCEL_MESSAGE` (which is for user-initiated
+#: cancellation) because the user-action is different: pass --mapping
+#: is useless when there is nothing to point at. The user has to install
+#: a mapping pack via ``pacioli init`` or by dropping a YAML into
+#: ``~/.pacioli/mappings/``.
+_NO_PACKS_MESSAGE: str = (
+    "No mapping packs installed. "
+    "Run 'pacioli init' to install one, or pass --mapping <path>."
+)
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -89,11 +100,17 @@ def is_interactive(args: argparse.Namespace) -> bool:
     * ``CI`` is set to a truthy value (covers GitHub Actions, Azure
       DevOps, GitLab CI, CircleCI, etc.).
     * ``sys.stdin.isatty()`` returns False.
+    * No mapping packs are discoverable any of the two layouts
+      (editable ``<install_root>/mappings``, bundled ``scanner/mappings``).
+      The picker cannot prompt the user to pick from nothing; zero packs
+      is a configuration problem, not a UX problem, and the resolver
+      will fall through to its default-mapping path.
 
     Returns True otherwise.
 
     The CLI dispatcher MUST gate the call to :func:`pick_mapping_pack`
-    on this guard so the picker never runs against non-TTY stdin.
+    on this guard so the picker never runs against non-TTY stdin or
+    against an empty universe of choices.
     """
     if getattr(args, "non_interactive", False):
         return False
@@ -106,6 +123,11 @@ def is_interactive(args: argparse.Namespace) -> bool:
     except (AttributeError, ValueError):
         is_tty = False
     if not is_tty:
+        return False
+    # HOTFIX 1.1.1: refuse to prompt when there is nothing to pick.
+    # Cheap disk probe -- the picker is already paying this cost on
+    # every call, so the extra ~milliseconds here are noise.
+    if not _discover_packs():
         return False
     return True
 
@@ -157,7 +179,10 @@ def pick_mapping_pack(args: argparse.Namespace) -> MappingPack:
 
     packs = _discover_packs()
     if not packs:
-        raise PathResolutionError(_CANCEL_MESSAGE)
+        # HOTFIX 1.1.1: zero packs is a configuration problem, not a
+        # user-cancellation. The "you cancelled" message would mislead
+        # the user into thinking --mapping fixes it; it does not.
+        raise PathResolutionError(_NO_PACKS_MESSAGE)
 
     # Print the numbered list. Use a leading blank line so the prompt
     # is visually separated from any prior CLI output.
