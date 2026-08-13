@@ -122,6 +122,38 @@ def test_subcommand_help_exits_zero(subcommand_args: list[str]) -> None:
     )
 
 
+def test_pacioli_version_flag_prints_version_and_exits_zero() -> None:
+    """HOTFIX 1.1.2: ``pacioli --version`` prints the installed package
+    version and exits 0.
+
+    This is a UX fix for the workflow where the user wants to verify
+    which wheel is actually installed (the 1.1.0 -> 1.1.1 hotfix
+    episode showed this matters: the failure mode was completely
+    silent because there was no way to ask ``pacioli`` which version
+    it was).
+
+    Contract:
+    * Exit code 0 (version queries are not errors).
+    * Stdout contains the literal version string from
+      ``importlib.metadata.version("pacioli")`` (so the printed
+      version is ALWAYS the installed wheel, never a hardcoded
+      constant that could drift).
+    * No subcommand is required (the test invokes ``pacioli`` with
+      ONLY ``--version``).
+    """
+    result = _run_cli("--version")
+    assert result.returncode == 0, (
+        f"pacioli --version returned rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    import importlib.metadata
+    expected = importlib.metadata.version("pacioli")
+    assert expected in result.stdout, (
+        f"expected --version stdout to contain {expected!r}, got: "
+        f"{result.stdout[:200]!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 6. End-to-end pacioli scan produces report.html
 # ---------------------------------------------------------------------------
