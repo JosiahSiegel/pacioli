@@ -117,6 +117,7 @@ from scanner.frameworks import (  # noqa: E402
 )
 from scanner import mapping_picker  # noqa: E402
 from scanner.orchestrator import OrchestratorError  # noqa: E402
+from scanner.paths import PathResolutionError  # noqa: E402
 from scanner.safety import MutatingOperationRefused  # noqa: E402
 
 
@@ -1002,6 +1003,38 @@ def _append_scan_path_entries(argv: list[str], entries: list[dict[str, Any]]) ->
 # ---------------------------------------------------------------------------
 
 
+def _maybe_prompt_for_mapping_pack(args: argparse.Namespace) -> Optional[int]:
+    """Run the interactive mapping picker if its gate is open.
+
+    Returns:
+        None when the picker was not needed (or succeeded and wrote
+        ``args.mapping``). Returns an int exit code when the user
+        cancelled or no packs are installed; the caller MUST return
+        that code immediately.
+
+    HOTFIX 1.1.1: every PathResolutionError raised by the picker is
+    caught here and converted to a clean exit-2 with the friendly
+    message printed via the project's logger. This is the
+    belt-and-suspenders guarantee that the user never sees a stack
+    trace from the picker -- even if the picker's own internal
+    guards regress, the dispatcher caps the damage.
+    """
+    if args.mapping or os.environ.get("PACIOLI_MAPPING"):
+        return None
+    if not mapping_picker.is_interactive(args):
+        return None
+    try:
+        chosen = mapping_picker.pick_mapping_pack(args)
+    except PathResolutionError as exc:
+        # Friendly print, then exit-2. We print (not log-error) because
+        # the message is the user-facing answer to "why did pacioli
+        # exit 2?" -- it must read on its own.
+        print(f"pacioli: {exc}", file=sys.stderr)
+        return 2
+    args.mapping = str(chosen.path)
+    return None
+
+
 def _handle_scan(args: argparse.Namespace) -> int:
     """Dispatch ``pacioli scan`` to :func:`scanner.orchestrator.main`."""
     args = _apply_backcompat(args)
@@ -1017,17 +1050,15 @@ def _handle_scan(args: argparse.Namespace) -> int:
         framework=getattr(args, "framework", None),
     )
 
-    # Interactive mapping picker. Resolves when both --mapping AND
-    # PACIOLI_MAPPING are unset AND the run is interactive. The chosen
-    # pack is set on args.mapping so the orchestrator sees it as if the
-    # user had typed --mapping explicitly (preserves the "explicit never
-    # silently swaps" contract). Cancellation (Esc / blank / Ctrl-C /
-    # non-TTY) raises PathResolutionError which the existing exit-code-2
-    # path handles.
-    if not args.mapping and not os.environ.get("PACIOLI_MAPPING"):
-        if mapping_picker.is_interactive(args):
-            chosen = mapping_picker.pick_mapping_pack(args)
-            args.mapping = str(chosen.path)
+    # Interactive mapping picker. HOTFIX 1.1.1: routed through the
+    # shared _maybe_prompt_for_mapping_pack helper so cancellation and
+    # "no packs installed" both surface as clean exit-2 messages,
+    # never a stack trace. The chosen pack is set on args.mapping so the
+    # orchestrator sees it as if the user had typed --mapping explicitly
+    # (preserves the "explicit never silently swaps" contract).
+    rc = _maybe_prompt_for_mapping_pack(args)
+    if rc is not None:
+        return rc
 
     from scanner import orchestrator as _orchestrator
 
@@ -1057,11 +1088,10 @@ def _handle_gate(args: argparse.Namespace) -> int:
         framework=getattr(args, "framework", None),
     )
 
-    # Interactive mapping picker (same gate as _handle_scan).
-    if not args.mapping and not os.environ.get("PACIOLI_MAPPING"):
-        if mapping_picker.is_interactive(args):
-            chosen = mapping_picker.pick_mapping_pack(args)
-            args.mapping = str(chosen.path)
+    # Interactive mapping picker (same gate as _handle_scan; HOTFIX 1.1.1).
+    rc = _maybe_prompt_for_mapping_pack(args)
+    if rc is not None:
+        return rc
 
     from scanner import orchestrator as _orchestrator
 
