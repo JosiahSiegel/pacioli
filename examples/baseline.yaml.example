@@ -1,58 +1,33 @@
-# Example Pacioli baseline manifest.
-# Copy this to your Terraform repo as `pci_baseline.yaml` and customize.
+# Pacioli baseline — repo-wide suppressions for known/accepted findings.
+# Copy this to your IaC repo as `pci_baseline.yaml` and customize.
 #
-# A baseline entry suppresses a specific Checkov rule for a specific
-# resource pattern. Every entry MUST have all 9 fields below, or the
-# aggregator will refuse to run.
+# Schema:
+#   version:          schema version (always 1)
+#   verified_against: ISO date when this file was generated
+#   suppressions:     list of suppression entries (empty by default)
 #
-# - check_id:             CKV_AZURE_<n>  (string)
-# - resource_pattern:     glob (e.g. "azurerm_storage_account.*")
-# - justification:        human-readable why this is accepted risk
-# - compensating_control: reference to other control (e.g., "WAF rule abc123")
-# - owner:                team or person accountable (string)
-# - ticket_id:            ticket ID authorizing the suppression
-# - approved_by:          approver name
-# - approved_on:          ISO date — when this was approved
-# - expires_on:           ISO date — after this, the suppression is invalid
-#                         and the aggregator will re-surface the finding
+# Each suppression entry:
+#   check_id, resource_pattern, justification, compensating_control,
+#   owner, ticket_id, expires_on
 #
-# ENFORCEMENT:
-#   aggregator suppresses ONLY if expires_on >= today AND owner is set.
-#   Otherwise, the finding is emitted as ACTIVE.
+# The aggregator suppresses ONLY if expires_on >= today AND owner != "TBD".
+# Stubs (TBD*) NEVER suppress findings.
 #
-# AUDIT TRAIL:
-#   Stale exclusions (expires_on < today) appear with a red STALE badge
-#   so the auditor knows they need re-approval.
+# Example — populate after first scan via `pacioli baseline init`:
+# suppressions:
+#   - check_id: CKV_AZURE_59
+#     resource_pattern: "azurerm_storage_account.example"
+#     justification: "Legacy resource, migration planned"
+#     compensating_control: "WAF rule abc123"
+#     owner: "team@example.com"
+#     ticket_id: "TICKET-123"
+#     expires_on: "2026-12-31"
 #
-# INITIAL POPULATION:
-#   This file is intentionally empty. After the first scan, run:
-#     make -f Makefile.pacioli scan-baseline-init RUN_DIR=.checkov/<run_id>/
-#   which generates stub entries for every finding. Triage top-50 by
-#   count * severity_weight; populate the schema fields. Remaining
-#   entries stay as TBD and surface in the report as "requires triage".
-#
-# NOTE on the example entries below:
-#   - All values are placeholders wrapped in angle brackets (<...>).
-#     Replace them with your real ticket IDs + team contacts before use.
-#   - There are intentionally no real names, real emails, or real
-#     ticket IDs in this file. Anyone copy-pasting these values into
-#     production will notice and fix them.
+# Next steps:
+#   1. Run `pacioli scan` to generate findings
+#   2. Run `pacioli baseline init <run_dir>` to seed stub suppressions
+#   3. Triage top-stubs by hit_count and populate the 7 fields
 
-- check_id: CKV_AZURE_59
-  resource_pattern: "azurerm_storage_account.<your-resource-name>"
-  justification: "<explain why this resource is accepted risk>"
-  compensating_control: "<reference to the compensating control>"
-  owner: "<team-or-person-email>"
-  ticket_id: "<ticket-id>"
-  approved_by: "<approver-name>"
-  approved_on: "<YYYY-MM-DD>"
-  expires_on: "<YYYY-MM-DD>"
-- check_id: CKV_AZURE_3
-  resource_pattern: "azurerm_storage_account.<your-resource-name>"
-  justification: "<legacy resource pending migration>"
-  compensating_control: "<WAF rule or other mitigation>"
-  owner: "<team-or-person-email>"
-  ticket_id: "<ticket-id>"
-  approved_by: "<approver-name>"
-  approved_on: "<YYYY-MM-DD>"
-  expires_on: "<YYYY-MM-DD>"
+version: 1
+verified_against: 2026-01-01
+suppressions: []
