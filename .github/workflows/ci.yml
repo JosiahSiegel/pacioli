@@ -73,7 +73,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip==25.2
-          pip install -e ".[test]"
+          pip install --only-binary=:all: pytest==9.1.1 pytest-playwright==0.7.2 playwright==1.57.0
 
       - name: Install Chromium and system dependencies
         run: python -m playwright install --with-deps chromium

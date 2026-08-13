@@ -291,7 +291,7 @@ def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) ->
     (tmp_path / "pci_scope.yaml").write_text("projects: scalar", encoding="utf-8")
     output_dir = tmp_path / "runs"
 
-    with pytest.raises(ValueError, match="pci_scope.yaml.projects"):
+    def _invoke_scan() -> None:
         Orchestrator().scan(
             target_repo=tmp_path,
             project=None,
@@ -302,6 +302,9 @@ def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) ->
             baseline_path=None,
             state_account=None,
         )
+
+    with pytest.raises(ValueError, match="pci_scope.yaml.projects"):
+        _invoke_scan()
 
     assert not output_dir.exists()
 

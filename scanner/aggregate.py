@@ -1895,6 +1895,104 @@ def _environment_display_label(project: str, env: str, stack_label: str | None) 
     return f"{label} [{stack_label}]" if stack_label else label
 
 
+def _count_findings_by_severity(findings: list[Finding]) -> dict[str, int]:
+    """Return unsuppressed finding counts grouped for report presentation."""
+    return {
+        "high_critical": sum(
+            not finding.suppressed and finding.severity in ("HIGH", "CRITICAL")
+            for finding in findings
+        ),
+        "medium": sum(
+            not finding.suppressed and finding.severity == "MEDIUM"
+            for finding in findings
+        ),
+        "low": sum(
+            not finding.suppressed and finding.severity == "LOW"
+            for finding in findings
+        ),
+    }
+
+
+def _should_upgrade_resource_severity(current: str, prior: str) -> bool:
+    """Return True if the current finding's severity should override the prior severity."""
+    if current == "CRITICAL":
+        return True
+    if current == "HIGH" and prior != "CRITICAL":
+        return True
+    if current == "MEDIUM" and prior == "LOW":
+        return True
+    return False
+
+
+def _build_environment_block(result: EnvResult) -> dict:
+    """Build the report-model block for one scanned environment."""
+    identity = {
+        "project": result.project,
+        "env": result.env,
+        "stack_label": result.stack_label,
+        "display_label": _environment_display_label(
+            result.project, result.env, result.stack_label
+        ),
+    }
+    environment_findings = [
+        {
+            "identity_label": identity["display_label"],
+            "project": finding.project,
+            "env": finding.env,
+            "stack_label": result.stack_label,
+            "check_id": finding.check_id,
+            "severity": finding.severity,
+            "resource": finding.resource,
+            "file_path": finding.file_path,
+            "line": finding.line,
+            "message": finding.message,
+            "framework": finding.framework,
+            "requirements": finding.requirements,
+            "suppressed": finding.suppressed,
+            "help_uri": finding.help_uri,
+        }
+        for finding in result.findings
+    ]
+    severity_counts = _count_findings_by_severity(result.findings)
+    return {
+        "identity": identity,
+        "scan_status": result.scan_status,
+        "error": result.error,
+        "findings": environment_findings,
+        "counts": {
+            "total": len(result.findings),
+            "high": severity_counts["high_critical"],
+            "medium": severity_counts["medium"],
+            "low": severity_counts["low"],
+        },
+    }
+
+
+def _build_top_lists(findings: list[Finding]) -> tuple[list[dict], list[dict]]:
+    """Build sorted resource and rule frequency lists from unsuppressed findings."""
+    resource_counts: dict[str, int] = {}
+    resource_severity: dict[str, str] = {}
+    rule_counts: dict[str, int] = {}
+    for finding in findings:
+        if finding.resource and not finding.suppressed:
+            resource_counts[finding.resource] = resource_counts.get(finding.resource, 0) + 1
+            resource_severity.setdefault(finding.resource, "LOW")
+            prior_severity = resource_severity[finding.resource]
+            if _should_upgrade_resource_severity(finding.severity, prior_severity):
+                resource_severity[finding.resource] = finding.severity
+        if not finding.suppressed:
+            rule_counts[finding.check_id] = rule_counts.get(finding.check_id, 0) + 1
+    top_resources = [
+        {"resource": resource, "count": count, "severity": resource_severity[resource]}
+        for resource, count in sorted(resource_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    ]
+    top_rules = [
+        {"check_id": check_id, "count": count}
+        for check_id, count in sorted(rule_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    ]
+    return top_resources, top_rules
+
+
 def _build_report_model(
     env_results: list[EnvResult],
     mapping_data: dict,
@@ -1907,114 +2005,20 @@ def _build_report_model(
     framework_version: str,
 ) -> dict:
     """Build the complete immutable input contract for browser projections."""
-    total_findings = sum(len(result.findings) for result in env_results)
-    severity_counts = {
-        "high_critical": sum(
-            1
-            for result in env_results
-            for finding in result.findings
-            if not finding.suppressed and finding.severity in ("HIGH", "CRITICAL")
-        ),
-        "medium": sum(
-            1
-            for result in env_results
-            for finding in result.findings
-            if not finding.suppressed and finding.severity == "MEDIUM"
-        ),
-        "low": sum(
-            1
-            for result in env_results
-            for finding in result.findings
-            if not finding.suppressed and finding.severity == "LOW"
-        ),
-    }
-    environments = []
-    findings = []
-    resource_counts: dict[str, int] = {}
-    resource_severity: dict[str, str] = {}
-    rule_counts: dict[str, int] = {}
-    for result in env_results:
-        identity = {
-            "project": result.project,
-            "env": result.env,
-            "stack_label": result.stack_label,
-            "display_label": _environment_display_label(
-                result.project, result.env, result.stack_label
-            ),
-        }
-        environment_findings = []
-        for finding in result.findings:
-            finding_model = {
-                "identity_label": identity["display_label"],
-                "project": finding.project,
-                "env": finding.env,
-                "stack_label": result.stack_label,
-                "check_id": finding.check_id,
-                "severity": finding.severity,
-                "resource": finding.resource,
-                "file_path": finding.file_path,
-                "line": finding.line,
-                "message": finding.message,
-                "framework": finding.framework,
-                "requirements": finding.requirements,
-                "suppressed": finding.suppressed,
-                "help_uri": finding.help_uri,
-            }
-            findings.append(finding_model)
-            environment_findings.append(finding_model)
-            if finding.resource and not finding.suppressed:
-                resource_counts[finding.resource] = resource_counts.get(finding.resource, 0) + 1
-                resource_severity.setdefault(finding.resource, "LOW")
-                prior_severity = resource_severity[finding.resource]
-                if finding.severity == "CRITICAL" or (
-                    finding.severity == "HIGH" and prior_severity != "CRITICAL"
-                ):
-                    resource_severity[finding.resource] = finding.severity
-                elif finding.severity == "MEDIUM" and prior_severity == "LOW":
-                    resource_severity[finding.resource] = finding.severity
-            if not finding.suppressed:
-                rule_counts[finding.check_id] = rule_counts.get(finding.check_id, 0) + 1
-        environments.append(
-            {
-                "identity": identity,
-                "scan_status": result.scan_status,
-                "error": result.error,
-                "findings": environment_findings,
-                "counts": {
-                    "total": len(result.findings),
-                    "high": sum(
-                        1
-                        for finding in result.findings
-                        if not finding.suppressed
-                        and finding.severity in ("HIGH", "CRITICAL")
-                    ),
-                    "medium": sum(
-                        1
-                        for finding in result.findings
-                        if not finding.suppressed and finding.severity == "MEDIUM"
-                    ),
-                    "low": sum(
-                        1
-                        for finding in result.findings
-                        if not finding.suppressed and finding.severity == "LOW"
-                    ),
-                },
-            }
-        )
-    top_resources = [
-        {"resource": resource, "count": count, "severity": resource_severity[resource]}
-        for resource, count in sorted(resource_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    raw_findings = [
+        finding for result in env_results for finding in result.findings
     ]
-    top_rules = [
-        {"check_id": check_id, "count": count}
-        for check_id, count in sorted(rule_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    environments = [_build_environment_block(result) for result in env_results]
+    findings = [
+        finding for environment in environments for finding in environment["findings"]
     ]
+    top_resources, top_rules = _build_top_lists(raw_findings)
     return {
         "schema_version": 1,
         "framework": {"name": framework_name, "version": framework_version},
         "counts": {
-            "total_findings": total_findings,
-            **severity_counts,
+            "total_findings": len(raw_findings),
+            **_count_findings_by_severity(raw_findings),
             "suppressed": suppressed_count,
             "environment_count": len(env_results),
         },
@@ -2036,6 +2040,15 @@ def _build_report_model(
         "drift_findings": drift_findings,
         "baseline": {"suppressed_count": suppressed_count},
     }
+
+
+def _severity_css_class(severity: str) -> str:
+    """Return the CSS severity modifier used by dashboard count pills."""
+    if severity in ("HIGH", "CRITICAL"):
+        return "high"
+    if severity == "MEDIUM":
+        return "medium"
+    return ""
 
 
 def _serialize_report_model(model: dict) -> str:
@@ -2496,7 +2509,7 @@ def write_html_report(
         resource = resource_entry["resource"]
         severity = resource_entry["severity"]
         count = resource_entry["count"]
-        severity_class = "high" if severity in ("HIGH", "CRITICAL") else ("medium" if severity == "MEDIUM" else "")
+        severity_class = _severity_css_class(severity)
         body += f'      <div class="top-list-row"><code>{html.escape(resource)}</code><span class="count-pill {severity_class}">{count}</span></div>\n'
     body += """    </div>
     <div class="top-list" id="top-rules">

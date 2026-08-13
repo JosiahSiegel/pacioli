@@ -300,6 +300,72 @@ def _expect_fields(raw: object, expected: set[str], location: str) -> dict:
     return raw
 
 
+def _validate_root(data: object) -> dict:
+    """Validate the scope root and require a non-empty projects or scan_paths list."""
+    root = _expect_fields(data, {"projects", "scan_paths"}, "root")
+    projects = root.get("projects")
+    scan_paths = root.get("scan_paths")
+    if projects is not None and not isinstance(projects, list):
+        raise _scope_error("projects", "must be a list when present")
+    if scan_paths is not None and not isinstance(scan_paths, list):
+        raise _scope_error("scan_paths", "must be a list when present")
+    if not projects and not scan_paths:
+        raise _scope_error("root", "requires a non-empty projects or scan_paths list")
+    return root
+
+
+def _validate_project(project_raw: object, index: int) -> tuple[dict, str, str, Optional[str]]:
+    """Validate one project record and return its parsed scope metadata."""
+    location = f"projects[{index}]"
+    project = _expect_fields(
+        project_raw,
+        {"project", "description", "status", "reason", "envs"},
+        location,
+    )
+    project_name = _required_string(project, "project", location)
+    _optional_string(project, "description", location)
+    project_status, project_reason = _scope_status(project, location)
+    envs = project.get("envs")
+    if envs is None:
+        raise _scope_error(f"{location}.envs", "is required and must be a list")
+    if not isinstance(envs, list):
+        raise _scope_error(f"{location}.envs", "must be a list")
+    return project, project_name, project_status, project_reason
+
+
+def _validate_environment(
+    env_raw: object, project_location: str, env_index: int
+) -> tuple[dict, str, str, Optional[str]]:
+    """Validate one environment record and return its parsed scope metadata."""
+    location = f"{project_location}.envs[{env_index}]"
+    environment = _expect_fields(env_raw, {"name", "status", "reason"}, location)
+    env_name = _required_string(environment, "name", location)
+    env_status, env_reason = _scope_status(environment, location)
+    return environment, env_name, env_status, env_reason
+
+
+def _record_environment_decision(
+    project: str,
+    env: str,
+    project_status: str,
+    project_reason: Optional[str],
+    env_status: str,
+    env_reason: Optional[str],
+    pairs: list[tuple[str, str]],
+    excluded_pairs: set[tuple[str, str]],
+    skipped: list[SkippedScopeEnvironment],
+) -> None:
+    """Record the effective in-scope or excluded decision for one environment."""
+    key = (project, env)
+    if project_status == "in_scope" and env_status == "in_scope":
+        pairs.append(key)
+        return
+    excluded_pairs.add(key)
+    status = project_status if project_status != "in_scope" else env_status
+    reason = project_reason if project_status != "in_scope" else env_reason
+    skipped.append(SkippedScopeEnvironment(project, env, status, reason or ""))
+
+
 def _parse_scope_manifest(scope_file: Path) -> _ScopeManifest:
     """Parse the strict ``pci_scope.yaml`` schema into exclusion-gating data.
 
@@ -319,58 +385,39 @@ def _parse_scope_manifest(scope_file: Path) -> _ScopeManifest:
         raise RuntimeError(
             f"pci_scope.yaml was found at {scope_file} but PyYAML is not installed; install pyyaml or remove pci_scope.yaml."
         )
-    data = _read_scope_yaml(scope_file)
-    root = _expect_fields(data, {"projects", "scan_paths"}, "root")
-    projects_raw = root.get("projects")
-    scan_paths_raw = root.get("scan_paths")
-    if projects_raw is not None and not isinstance(projects_raw, list):
-        raise _scope_error("projects", "must be a list when present")
-    if scan_paths_raw is not None and not isinstance(scan_paths_raw, list):
-        raise _scope_error("scan_paths", "must be a list when present")
-    projects = projects_raw or []
-    scan_paths = scan_paths_raw or []
-    if not projects and not scan_paths:
-        raise _scope_error("root", "requires a non-empty projects or scan_paths list")
-
+    root = _validate_root(_read_scope_yaml(scope_file))
+    projects = root.get("projects") or []
     pairs: list[tuple[str, str]] = []
     excluded_pairs: set[tuple[str, str]] = set()
     skipped: list[SkippedScopeEnvironment] = []
     seen: set[tuple[str, str]] = set()
     for project_index, project_raw in enumerate(projects):
-        project_location = f"projects[{project_index}]"
-        project = _expect_fields(
-            project_raw,
-            {"project", "description", "status", "reason", "envs"},
-            project_location,
+        project, project_name, project_status, project_reason = _validate_project(
+            project_raw, project_index
         )
-        project_name = _required_string(project, "project", project_location)
-        _optional_string(project, "description", project_location)
-        project_status, project_reason = _scope_status(project, project_location)
-        if "envs" not in project:
-            raise _scope_error(f"{project_location}.envs", "is required and must be a list")
-        envs = project["envs"]
-        if not isinstance(envs, list):
-            raise _scope_error(f"{project_location}.envs", "must be a list")
-        for env_index, environment_raw in enumerate(envs):
-            environment_location = f"{project_location}.envs[{env_index}]"
-            environment = _expect_fields(
-                environment_raw,
-                {"name", "status", "reason"},
-                environment_location,
+        project_location = f"projects[{project_index}]"
+        for env_index, env_raw in enumerate(project["envs"]):
+            _, env_name, env_status, env_reason = _validate_environment(
+                env_raw, project_location, env_index
             )
-            env_name = _required_string(environment, "name", environment_location)
-            env_status, env_reason = _scope_status(environment, environment_location)
             key = (project_name, env_name)
             if key in seen:
-                raise _scope_error(environment_location, f"duplicates declared environment {project_name}/{env_name}")
+                raise _scope_error(
+                    f"{project_location}.envs[{env_index}]",
+                    f"duplicates declared environment {project_name}/{env_name}",
+                )
             seen.add(key)
-            if project_status == "in_scope" and env_status == "in_scope":
-                pairs.append(key)
-                continue
-            excluded_pairs.add(key)
-            status = project_status if project_status != "in_scope" else env_status
-            reason = project_reason if project_status != "in_scope" else env_reason
-            skipped.append(SkippedScopeEnvironment(project_name, env_name, status, reason or ""))
+            _record_environment_decision(
+                project_name,
+                env_name,
+                project_status,
+                project_reason,
+                env_status,
+                env_reason,
+                pairs,
+                excluded_pairs,
+                skipped,
+            )
     return _ScopeManifest(pairs, excluded_pairs, skipped, root)
 
 

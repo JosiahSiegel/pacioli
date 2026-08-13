@@ -98,7 +98,8 @@ def test_shipped_scope_example_uses_structured_records_and_discovers_pairs(
     for project in manifest["projects"]:
         assert isinstance(project, dict)
         assert set(project) <= {"project", "description", "status", "reason", "envs"}
-        assert isinstance(project["project"], str) and project["project"].strip()
+        assert isinstance(project["project"], str)
+        assert project["project"].strip()
         assert isinstance(project.get("description", ""), str)
         assert project["status"] in {"in_scope", "pending", "excluded"}
         assert isinstance(project["envs"], list)
@@ -108,7 +109,8 @@ def test_shipped_scope_example_uses_structured_records_and_discovers_pairs(
         for environment in project["envs"]:
             assert isinstance(environment, dict)
             assert set(environment) <= {"name", "status", "reason"}
-            assert isinstance(environment["name"], str) and environment["name"].strip()
+            assert isinstance(environment["name"], str)
+            assert environment["name"].strip()
             assert environment["status"] in {"in_scope", "pending", "excluded"}
             assert environment["status"] not in {"pending", "excluded"} or (
                 isinstance(environment.get("reason"), str) and environment["reason"].strip()
