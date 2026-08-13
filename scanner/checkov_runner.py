@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -167,56 +168,75 @@ class CheckovRunner:
         return argv
 
     def _run(self, env_dir: Path, args: list[str], sarif_out: Path) -> int:
-        """Invoke Checkov from inside ``env_dir`` and place SARIF at ``sarif_out``.
+        """Invoke Checkov in a fresh subprocess from inside ``env_dir``.
 
-        This is the single choke point for the Windows relpath
-        workaround: the ``os.chdir(env_dir)`` happens inside the ``try``
-        and the ``finally`` restores the saved CWD unconditionally, so
-        an exception from Checkov cannot leave the process in the
-        scanned directory.
+        Each scan runs as ``python -m checkov.main <args>`` with
+        ``cwd=env_dir``. Subprocess isolation is MANDATORY: Checkov 3.3.9
+        caches its scan results in module-level state, so calling
+        ``Checkov(argv=...).run()`` twice from the same Python process
+        returns the SARIF from the FIRST scan regardless of the second
+        scan's ``-d`` target or CWD. Reproduced locally with a minimal
+        4-scan sequence on alternating env_dirs; all 4 SARIFs were
+        byte-identical.
+
+        Subprocess isolation also obsoletes the previous Windows
+        relpath workaround (the os.chdir dance) — the child process
+        starts in ``env_dir`` natively. The runner is therefore
+        thread-safe again (no process-global CWD mutation).
 
         Args:
-            env_dir: Directory to run Checkov from (becomes the CWD).
+            env_dir: Directory to run Checkov from (becomes the CWD
+                of the child process).
             args: argv tail, excluding output/fail flags.
             sarif_out: Final path for the SARIF file.
 
         Returns:
-            Checkov's exit code (``0`` when ``run()`` returns ``None``).
+            Checkov's exit code (``0`` on a clean run).
         """
         env_dir = Path(env_dir).resolve()
         sarif_out = Path(sarif_out).resolve()
         sarif_out.parent.mkdir(parents=True, exist_ok=True)
 
-        # Import lazily: importing checkov is slow (~1s) and pulls in a
-        # large dependency tree, so a caller that only imports this
-        # module does not pay for it.
-        from checkov.main import Checkov
-
         # Checkov writes <output-file-path>/results_sarif.sarif. Use a
         # scratch dir so a partial/failed run never clobbers an existing
-        # SARIF at the destination.
+        # SARIF at the destination. The scratch dir sits next to the
+        # final SARIF so the cross-drive move at the end is impossible
+        # (sarif_out.parent is the scratch parent).
         tmp_dir = Path(tempfile.mkdtemp(prefix="pacioli_ckv_", dir=sarif_out.parent))
         try:
-            argv = list(args) + [
-                "--output", "sarif",
-                "--output-file-path", str(tmp_dir),
-            ] + self._fail_flags()
+            argv = [sys.executable, "-m", "checkov.main", *args,
+                    "--output", "sarif",
+                    "--output-file-path", str(tmp_dir),
+                    *self._fail_flags()]
 
-            saved_cwd = os.getcwd()
-            try:
-                # --- Windows relpath workaround (see module docstring) ---
-                os.chdir(env_dir)
-                rc = Checkov(argv=argv).run()
-            finally:
-                os.chdir(saved_cwd)
+            # Capture stderr for diagnostics on non-zero exit. Checkov
+            # writes progress lines (and the failure summary) to stderr;
+            # the SARIF artifact is the only thing we care about, and it
+            # is on disk regardless of exit code.
+            completed = subprocess.run(
+                argv,
+                cwd=str(env_dir),
+                capture_output=True,
+                text=True,
+                timeout=900,  # 15 min hard cap per scan; scan.sh uses no cap but
+                              # a stuck subprocess shouldn't wedge the orchestrator.
+                check=False,
+            )
 
             produced = tmp_dir / _SARIF_BASENAME
             if produced.is_file():
                 shutil.move(str(produced), str(sarif_out))
                 rewrite_sarif_file(sarif_out)
+            elif completed.returncode != 0:
+                # Surface Checkov's own error output so the operator can
+                # diagnose without re-running the scan manually.
+                sys.stderr.write(
+                    f"checkov exited with rc={completed.returncode} and produced "
+                    f"no SARIF in {tmp_dir}; stderr tail:\n"
+                    f"{completed.stderr[-2000:]}\n"
+                )
 
-            # Checkov returns None on a clean run; normalize to 0.
-            return 0 if rc is None else int(rc)
+            return int(completed.returncode)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
