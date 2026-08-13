@@ -5,6 +5,26 @@ environment variable in the Pacioli scanner. Use it as a lookup
 table; for the workflow-level narrative, see
 [Operator Guide](OPERATOR_GUIDE.md).
 
+## `pacioli` (top-level flags)
+
+These flags are accepted before any subcommand and apply to every
+command. They are also re-declared on the subcommand parsers so they
+can be passed positionally after the subcommand.
+
+### Synopsis
+
+```bash
+pacioli [--non-interactive] [--version] [--help] <subcommand> ...
+```
+
+### Arguments
+
+| Argument | Values | Default | Description |
+|---|---|---|---|
+| `--non-interactive` | flag | off | Disable the interactive mapping picker. Same as `PACIOLI_NON_INTERACTIVE=1` or `CI=1`. |
+| `--version` | flag | — | Print the installed package version (read from `importlib.metadata`) and exit 0. Use this to confirm which wheel is actually installed before reporting an issue. |
+| `--help` / `-h` | flag | — | Show the top-level usage banner and exit. |
+
 ## `pacioli scan`
 
 The driver subcommand. Orchestrates Checkov per in-scope env.
