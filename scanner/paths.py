@@ -217,9 +217,17 @@ def resolve_mapping(args: argparse.Namespace) -> MappingPack:
         path = _resolve_bundled_mapping_pack()
 
     if path is None or not path.is_file():
+        # HOTFIX 1.1.2: when both the editable-install layout
+        # (<install_root>/mappings/) and the wheel-install layout
+        # (scanner/mappings/ via importlib.resources) fail to yield
+        # a mapping pack, give the user an actionable message that
+        # mirrors the picker hotfix 1.1.1 wording. The previous message
+        # pointed at the editable-install dir (which is meaningless on
+        # a wheel install) and never told the user to install.
         raise PathResolutionError(
-            f"Mapping pack does not exist: {default_dir}. "
-            "Pass --mapping <path> or set PACIOLI_MAPPING=<path>."
+            "No installed mapping packs found. "
+            "Run 'pacioli init' to install one, "
+            "or pass --mapping <path> or set PACIOLI_MAPPING=<path>."
         )
     return MappingPack(path=path, framework=_framework(path))
 
