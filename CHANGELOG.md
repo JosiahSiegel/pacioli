@@ -5,6 +5,19 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [1.2.1](https://github.com/JosiahSiegel/pacioli/compare/v1.2.0...v1.2.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **checkov_runner:** invoke Checkov as subprocess to avoid process-level cache (1.2.1) ([63bb482](https://github.com/JosiahSiegel/pacioli/commit/63bb48236b41064c65275f369464e22577028885))
+* hotfix 1.2.1 — Checkov subprocess isolation (cross-env SARIF contamination) ([0a9a049](https://github.com/JosiahSiegel/pacioli/commit/0a9a049e5704fd3fe4ef3b85472cf1db18e8cac3))
+
+
+### Documentation
+
+* CHANGELOG entry for 1.2.1 hotfix ([793de2e](https://github.com/JosiahSiegel/pacioli/commit/793de2e114b831decfaa845de9dce0ec5011a5b7))
+
 ## [1.2.0](https://github.com/JosiahSiegel/pacioli/compare/v1.1.1...v1.2.0) (2026-08-13)
 
 
