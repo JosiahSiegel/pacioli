@@ -36,6 +36,7 @@ Design choices:
 from __future__ import annotations
 
 import json
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -50,6 +51,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scanner.aggregate import (  # noqa: E402  (import after sys.path.insert)
+    CoverageGaps,
     EnvResult,
     EnvResultFull,
     Finding,
@@ -72,6 +74,7 @@ from scanner.aggregate import (  # noqa: E402  (import after sys.path.insert)
     write_coverage_csv,
     write_coverage_gaps_csv,
     write_fix_list_md,
+    write_html_report,
     write_junit,
 )
 
@@ -739,6 +742,113 @@ class TestHtmlReport:
         assert "WCAG 2.2 AA" in design_text
         assert "Accepted debt" in design_text
 
+    def test_html_report_serializes_escaped_full_scan_model(self, tmp_path: Path) -> None:
+        """The renderer embeds every browser projection fact in one inert JSON model."""
+        # Given: duplicate logical environments, findings, mappings, OOS, and drift data.
+        findings = [
+            Finding(
+                project="payments",
+                env="prod",
+                check_id="CKV_AZURE_44",
+                severity="HIGH",
+                resource="azurerm_storage_account.primary",
+                file_path="main.tf",
+                line=7,
+                message="unsafe <value> & </script>",
+                framework="terraform",
+                requirements=["1.2.1"],
+            ),
+            Finding(
+                project="payments",
+                env="prod",
+                check_id="CKV_AZURE_3",
+                severity="LOW",
+                resource="azurerm_storage_account.replica",
+                file_path="replica.tf",
+                line=2,
+                message="baseline finding",
+                framework="terraform",
+                requirements=["1.2.1"],
+                suppressed=True,
+            ),
+        ]
+        environments = [
+            EnvResultFull(
+                project="payments", env="prod", stack_label="blue", scan_status="ok", findings=findings[:1]
+            ),
+            EnvResultFull(
+                project="payments", env="prod", stack_label="green", scan_status="failed_to_plan",
+                findings=findings[1:], error="state pull failed"
+            ),
+        ]
+        mapping = {
+            "framework_name": "PCI <DSS>",
+            "framework_version": "4.0.1",
+            "requirements": [
+                {
+                    "id": "1.2.1",
+                    "title": "Network <controls>",
+                    "checks": ["CKV_AZURE_44", "CKV_AZURE_3"],
+                }
+            ],
+        }
+        out_of_scope = [{"id": "11.x", "title": "Manual", "stale": False}]
+        gaps = compute_coverage_gaps({"1.2.1": {"CKV_AZURE_44", "CKV_AZURE_3"}}, {"CKV_AZURE_44"})
+        report_path = tmp_path / "report.html"
+
+        # When: the report is rendered.
+        write_html_report(
+            report_path,
+            environments,
+            tmp_path / "mapping.yaml",
+            mapping,
+            {("1.2.1", "CKV_AZURE_44"): "non_compliant"},
+            out_of_scope,
+            suppressed_count=1,
+            gaps=CoverageGaps.from_records(gaps),
+            drift_findings=[
+                {
+                    "project": "payments",
+                    "env": "prod",
+                    "resource": "azurerm_storage_account.primary",
+                    "file_path": "main.tf",
+                    "attribute": "min_tls_version",
+                    "drift_type": "attribute_changed",
+                    "source_value": "TLS1_2",
+                    "state_value": "TLS1_0",
+                    "severity": "HIGH",
+                }
+            ],
+        )
+
+        # Then: JSON is inert and parseable exactly from text content semantics.
+        report = report_path.read_text(encoding="utf-8")
+        model_match = re.search(
+            r'<script type="application/json" id="pacioli-report-model">(.*?)</script>',
+            report,
+            flags=re.DOTALL,
+        )
+        assert model_match is not None
+        model_text = model_match.group(1)
+        assert "\\u003c" in model_text
+        assert "\\u003e" in model_text
+        assert "\\u0026" in model_text
+        assert "</script>" not in model_text
+        model = json.loads(model_text)
+        assert model["schema_version"] == 1
+        assert model["counts"]["total_findings"] == 2
+        assert model["environments"][0]["identity"] == {
+            "project": "payments", "env": "prod", "stack_label": "blue", "display_label": "payments/prod [blue]"
+        }
+        assert model["findings"][0]["message"] == "unsafe <value> & </script>"
+        assert model["findings"][1]["suppressed"] is True
+        assert model["top_lists"]["resources"]
+        assert model["requirements"][0]["checks"] == ["CKV_AZURE_44", "CKV_AZURE_3"]
+        assert model["out_of_scope_requirements"] == out_of_scope
+        assert model["drift_findings"][0]["drift_type"] == "attribute_changed"
+        assert "textContent" in report
+        assert "pacioli-report-model" in report
+
     def test_html_report_renders_pci_anchor_in_coverage_route(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -956,6 +1066,68 @@ class TestHelpers:
         # projB/staging: ok + has paac SARIF
         assert idx[("projB", "staging")].scan_status == "ok"
         assert idx[("projB", "staging")].sarif_files.get("paac") is not None
+
+    def test_walk_run_dir_uses_metadata_identity_and_rejects_invalid_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        """Metadata is canonical for new run directories and legacy remains readable."""
+        # Given: a labeled physical directory accompanied by canonical metadata.
+        metadata_dir = tmp_path / "payments" / "production-blue"
+        metadata_dir.mkdir(parents=True)
+        (metadata_dir / "pacioli_environment.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "project": "payments",
+                    "env": "production",
+                    "stack_label": "blue",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (metadata_dir / "results_source.sarif").write_text(
+            json.dumps({"runs": [{"results": []}]}), encoding="utf-8"
+        )
+        # And: a legacy directory remains a directory-name fallback.
+        legacy_dir = tmp_path / "legacy" / "dev"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "results_source.sarif").write_text(
+            json.dumps({"runs": [{"results": []}]}), encoding="utf-8"
+        )
+
+        # When: the aggregator discovers the run directory.
+        results = walk_run_dir(tmp_path, [])
+
+        # Then: metadata owns logical identity and legacy has no label.
+        identities = {(result.project, result.env, result.stack_label) for result in results}
+        assert ("payments", "production", "blue") in identities
+        assert ("legacy", "dev", None) in identities
+
+        # Given: a metadata file mismatched to its enclosing project directory.
+        invalid_dir = tmp_path / "wrong-project" / "env-blue"
+        invalid_dir.mkdir(parents=True)
+        (invalid_dir / "pacioli_environment.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "project": "other-project",
+                    "env": "env",
+                    "stack_label": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # When / Then: malformed canonical metadata fails rather than silently inferring.
+        with pytest.raises(ValueError, match="project mismatches directory"):
+            walk_run_dir(tmp_path, [])
+
+        # Given: malformed JSON at the metadata boundary.
+        (invalid_dir / "pacioli_environment.json").write_text("{bad json", encoding="utf-8")
+
+        # When / Then: malformed metadata fails with its path and cause.
+        with pytest.raises(ValueError, match="invalid environment metadata"):
+            walk_run_dir(tmp_path, [])
 
     def test_load_findings_populates_env_results(self, tmp_path: Path) -> None:
         """load_findings mutates each EnvResultFull.findings from its SARIFs."""

@@ -138,6 +138,9 @@ class EnvResult:
     scan_status: str  # ok | failed_to_plan | no_sarif
     findings: list[Finding] = field(default_factory=list)
     error: str | None = None
+    # Identity belongs to the scan metadata, not a physical run-directory name.
+    # ``None`` marks a legacy run directory with no metadata sidecar.
+    stack_label: str | None = None
 
 
 @dataclass
@@ -1886,6 +1889,163 @@ def _render_drift_section(drift_findings: list[dict]) -> str:
     )
 
 
+def _environment_display_label(project: str, env: str, stack_label: str | None) -> str:
+    """Return the canonical human label for one environment identity."""
+    label = f"{project}/{env}"
+    return f"{label} [{stack_label}]" if stack_label else label
+
+
+def _build_report_model(
+    env_results: list[EnvResult],
+    mapping_data: dict,
+    cells: dict,
+    out_of_scope: list[dict],
+    suppressed_count: int,
+    gaps: CoverageGaps,
+    drift_findings: list[dict],
+    framework_name: str,
+    framework_version: str,
+) -> dict:
+    """Build the complete immutable input contract for browser projections."""
+    total_findings = sum(len(result.findings) for result in env_results)
+    severity_counts = {
+        "high_critical": sum(
+            1
+            for result in env_results
+            for finding in result.findings
+            if not finding.suppressed and finding.severity in ("HIGH", "CRITICAL")
+        ),
+        "medium": sum(
+            1
+            for result in env_results
+            for finding in result.findings
+            if not finding.suppressed and finding.severity == "MEDIUM"
+        ),
+        "low": sum(
+            1
+            for result in env_results
+            for finding in result.findings
+            if not finding.suppressed and finding.severity == "LOW"
+        ),
+    }
+    environments = []
+    findings = []
+    resource_counts: dict[str, int] = {}
+    resource_severity: dict[str, str] = {}
+    rule_counts: dict[str, int] = {}
+    for result in env_results:
+        identity = {
+            "project": result.project,
+            "env": result.env,
+            "stack_label": result.stack_label,
+            "display_label": _environment_display_label(
+                result.project, result.env, result.stack_label
+            ),
+        }
+        environment_findings = []
+        for finding in result.findings:
+            finding_model = {
+                "project": finding.project,
+                "env": finding.env,
+                "stack_label": result.stack_label,
+                "check_id": finding.check_id,
+                "severity": finding.severity,
+                "resource": finding.resource,
+                "file_path": finding.file_path,
+                "line": finding.line,
+                "message": finding.message,
+                "framework": finding.framework,
+                "requirements": finding.requirements,
+                "suppressed": finding.suppressed,
+                "help_uri": finding.help_uri,
+            }
+            findings.append(finding_model)
+            environment_findings.append(finding_model)
+            if finding.resource and not finding.suppressed:
+                resource_counts[finding.resource] = resource_counts.get(finding.resource, 0) + 1
+                prior_severity = resource_severity.get(finding.resource, "LOW")
+                if finding.severity == "CRITICAL" or (
+                    finding.severity == "HIGH" and prior_severity != "CRITICAL"
+                ):
+                    resource_severity[finding.resource] = finding.severity
+                elif finding.severity == "MEDIUM" and prior_severity == "LOW":
+                    resource_severity[finding.resource] = finding.severity
+            if not finding.suppressed:
+                rule_counts[finding.check_id] = rule_counts.get(finding.check_id, 0) + 1
+        environments.append(
+            {
+                "identity": identity,
+                "scan_status": result.scan_status,
+                "error": result.error,
+                "findings": environment_findings,
+                "counts": {
+                    "total": len(result.findings),
+                    "high": sum(
+                        1
+                        for finding in result.findings
+                        if not finding.suppressed
+                        and finding.severity in ("HIGH", "CRITICAL")
+                    ),
+                    "medium": sum(
+                        1
+                        for finding in result.findings
+                        if not finding.suppressed and finding.severity == "MEDIUM"
+                    ),
+                    "low": sum(
+                        1
+                        for finding in result.findings
+                        if not finding.suppressed and finding.severity == "LOW"
+                    ),
+                },
+            }
+        )
+    top_resources = [
+        {"resource": resource, "count": count, "severity": resource_severity[resource]}
+        for resource, count in sorted(resource_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    ]
+    top_rules = [
+        {"check_id": check_id, "count": count}
+        for check_id, count in sorted(rule_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    ]
+    return {
+        "schema_version": 1,
+        "framework": {"name": framework_name, "version": framework_version},
+        "counts": {
+            "total_findings": total_findings,
+            **severity_counts,
+            "suppressed": suppressed_count,
+            "environment_count": len(env_results),
+        },
+        "environments": environments,
+        "findings": findings,
+        "top_lists": {"resources": top_resources, "rules": top_rules},
+        "requirements": mapping_data.get("requirements", []),
+        "requirement_mappings": {
+            requirement["id"]: requirement.get("checks", [])
+            for requirement in mapping_data.get("requirements", [])
+            if requirement.get("id")
+        },
+        "coverage_cells": [
+            {"requirement": requirement, "check_id": check_id, "status": status}
+            for (requirement, check_id), status in sorted(cells.items())
+        ],
+        "coverage_gaps": gaps.records,
+        "out_of_scope_requirements": out_of_scope,
+        "drift_findings": drift_findings,
+        "baseline": {"suppressed_count": suppressed_count},
+    }
+
+
+def _serialize_report_model(model: dict) -> str:
+    """Serialize the inert report model without HTML parsing ambiguity."""
+    return (
+        json.dumps(model, ensure_ascii=True)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def write_html_report(
     out: Path,
     env_results: list[EnvResult],
@@ -1971,19 +2131,6 @@ def write_html_report(
     # as build_coverage_matrix so the heatmap + per-row filter agree
     # on what counts as a "note req".
     note_tokens_html = _resolve_note_tokens(mapping_data)
-    total_findings = sum(len(er.findings) for er in env_results)
-    high_critical = sum(
-        1 for er in env_results for f in er.findings
-        if not f.suppressed and f.severity in ("HIGH", "CRITICAL")
-    )
-    medium = sum(
-        1 for er in env_results for f in er.findings
-        if not f.suppressed and f.severity == "MEDIUM"
-    )
-    low = sum(
-        1 for er in env_results for f in er.findings
-        if not f.suppressed and f.severity == "LOW"
-    )
 
     # Resolve framework name + version from mapping YAML. Supports any
     # framework (PCI DSS, SOC 2, CIS Azure, NIST 800-53, ISO 27001, ...)
@@ -1994,10 +2141,29 @@ def write_html_report(
     if framework_version is None:
         framework_version = mapping_data.get("framework_version") or mapping_data.get("pci_dss_version", "4.0.1")
     framework_full = f"{framework_name} v{framework_version}"
+    report_model = _build_report_model(
+        env_results,
+        mapping_data,
+        cells,
+        out_of_scope,
+        suppressed_count,
+        gaps,
+        drift_findings,
+        framework_name,
+        framework_version,
+    )
+    report_model_json = _serialize_report_model(report_model)
+    total_findings = report_model["counts"]["total_findings"]
+    high_critical = report_model["counts"]["high_critical"]
+    medium = report_model["counts"]["medium"]
+    low = report_model["counts"]["low"]
 
     banner = ""
     if failed_envs:
-        envs_str = ", ".join(f"{er.project}/{er.env}" for er in failed_envs)
+        envs_str = ", ".join(
+            _environment_display_label(er.project, er.env, er.stack_label)
+            for er in failed_envs
+        )
         banner = (
             f'<div class="banner-error">'
             f"RED BANNER: state-pull failed for {envs_str}. "
@@ -2141,45 +2307,20 @@ def write_html_report(
 
 """
 
-    # Compute per-environment aggregate stats for the dashboard route.
-    # Each env_results entry has a project, env, scan_status, and findings list.
-    env_stats = []
-    for er in env_results:
-        f_total = len(er.findings)
-        f_high = sum(1 for f in er.findings if not f.suppressed and f.severity in ("HIGH", "CRITICAL"))
-        f_med = sum(1 for f in er.findings if not f.suppressed and f.severity == "MEDIUM")
-        f_low = sum(1 for f in er.findings if not f.suppressed and f.severity == "LOW")
-        env_stats.append({
-            "label": f"{er.project}/{er.env}",
-            "project": er.project,
-            "env": er.env,
-            "scan_status": er.scan_status,
-            "total": f_total,
-            "high": f_high,
-            "medium": f_med,
-            "low": f_low,
-        })
-    # Top vulnerable resources (by total finding count across all envs)
-    from collections import Counter as _Counter
-    res_counter = _Counter()
-    res_severity = {}
-    for er in env_results:
-        for f in er.findings:
-            if f.resource and not f.suppressed:
-                res_counter[f.resource] += 1
-                cur = res_severity.get(f.resource, "LOW")
-                if f.severity == "CRITICAL" or (f.severity == "HIGH" and cur != "CRITICAL"):
-                    res_severity[f.resource] = f.severity
-                elif f.severity == "MEDIUM" and cur == "LOW":
-                    res_severity[f.resource] = f.severity
-    top_resources = res_counter.most_common(15)
-    # Top rule IDs by frequency
-    rule_counter = _Counter()
-    for er in env_results:
-        for f in er.findings:
-            if not f.suppressed:
-                rule_counter[f.check_id] += 1
-    top_rules = rule_counter.most_common(15)
+    # Every server-side projection begins with the same immutable browser model.
+    env_stats = [
+        {
+            "label": environment["identity"]["display_label"],
+            "project": environment["identity"]["project"],
+            "env": environment["identity"]["env"],
+            "stack_label": environment["identity"]["stack_label"],
+            "scan_status": environment["scan_status"],
+            **environment["counts"],
+        }
+        for environment in report_model["environments"]
+    ]
+    top_resources = report_model["top_lists"]["resources"]
+    top_rules = report_model["top_lists"]["rules"]
     # Compute percentages for donut
     pct_high = (high_critical / total_findings * 100) if total_findings else 0
     pct_med = (medium / total_findings * 100) if total_findings else 0
@@ -2220,6 +2361,7 @@ def write_html_report(
 {CSS_STYLE}</style>
 </head>
 <body>
+<script type="application/json" id="pacioli-report-model">{report_model_json}</script>
 <div id="app">
 <aside id="sidebar">
   <div class="sidebar-brand">
@@ -2338,16 +2480,18 @@ def write_html_report(
     <div class="top-list">
       <h3>Top Vulnerable Resources</h3>
 """
-    for rsc, cnt in top_resources:
-        sev = res_severity.get(rsc, "LOW")
-        sev_class = "high" if sev in ("HIGH", "CRITICAL") else ("medium" if sev == "MEDIUM" else "")
-        body += f'      <div class="top-list-row"><code>{html.escape(rsc)}</code><span class="count-pill {sev_class}">{cnt}</span></div>\n'
+    for resource_entry in top_resources:
+        resource = resource_entry["resource"]
+        severity = resource_entry["severity"]
+        count = resource_entry["count"]
+        severity_class = "high" if severity in ("HIGH", "CRITICAL") else ("medium" if severity == "MEDIUM" else "")
+        body += f'      <div class="top-list-row"><code>{html.escape(resource)}</code><span class="count-pill {severity_class}">{count}</span></div>\n'
     body += """    </div>
     <div class="top-list">
       <h3>Top Fired Rules</h3>
 """
-    for cid, cnt in top_rules:
-        body += f'      <div class="top-list-row"><code>{html.escape(cid)}</code><span class="count-pill">{cnt}</span></div>\n'
+    for rule_entry in top_rules:
+        body += f'      <div class="top-list-row"><code>{html.escape(rule_entry["check_id"])}</code><span class="count-pill">{rule_entry["count"]}</span></div>\n'
     body += """    </div>
   </div>
 </section>  <!-- /route-dashboard -->
@@ -2361,10 +2505,15 @@ def write_html_report(
             if e["scan_status"] != "ok"
             else f'<span class="badge-row COMPLIANT">{e["scan_status"]}</span>'
         )
+        stack_label_display = (
+            f" <small>[{html.escape(e['stack_label'])}]</small>"
+            if e["stack_label"]
+            else ""
+        )
         _env_table_rows.append(
-            f"<tr data-project=\"{html.escape(e['project'])}\" data-env=\"{html.escape(e['env'])}\">"
+            f"<tr data-project=\"{html.escape(e['project'])}\" data-env=\"{html.escape(e['env'])}\" data-stack-label=\"{html.escape(e['stack_label'] or '')}\">"
             f"<td><code>{html.escape(e['project'])}</code></td>"
-            f"<td><code>{html.escape(e['env'])}</code></td>"
+            f"<td><code>{html.escape(e['env'])}</code>{stack_label_display}</td>"
             f"<td>{status_pill}</td>"
             f"<td><strong>{e['total']}</strong></td>"
             f"<td class=\"count-high\">{e['high']}</td>"
@@ -2695,7 +2844,6 @@ def write_html_report(
     # narrow the findings list to a single project/env without paging.
     # Click an env card to filter; "ALL" restores the full view.
     body += '  <div id="env-summary-cards" class="env-summary-cards"></div>\n'
-    body += '  <script>window.__envStats = ' + json.dumps(env_stats) + ';</script>\n'
     body += (
         '<div id="filter-ui">\n'
         '  <label class="visually-hidden" for="finding-search">Search findings</label>\n'
@@ -2715,10 +2863,13 @@ def write_html_report(
     body += "<h2>Findings by Environment</h2>\n"
 
     for er in env_results:
+        environment_label = _environment_display_label(
+            er.project, er.env, er.stack_label
+        )
         if er.scan_status != "ok":
-            body += f"<h3>{er.project}/{er.env} <em>(scan failed: {html.escape(er.error or 'unknown')})</em></h3>\n"
+            body += f"<h3>{html.escape(environment_label)} <em>(scan failed: {html.escape(er.error or 'unknown')})</em></h3>\n"
             continue
-        body += f"<h3>{er.project}/{er.env} ({len(er.findings)} findings)</h3>\n"
+        body += f"<h3>{html.escape(environment_label)} ({len(er.findings)} findings)</h3>\n"
         for f in er.findings:
             classes = f"finding-body finding {f.severity}"
             if f.suppressed:
@@ -2757,6 +2908,7 @@ def write_html_report(
                 f'data-file-path="{html.escape(f.file_path or "", quote=True)}" '
                 f'data-project="{html.escape(f.project or "", quote=True)}" '
                 f'data-env="{html.escape(f.env or "", quote=True)}" '
+                f'data-stack-label="{html.escape(er.stack_label or "", quote=True)}" '
                 f'data-suppressed="{"true" if f.suppressed else "false"}" '
                 f'data-message="{html.escape(msg_attr, quote=True)}"'
             )
@@ -2938,6 +3090,20 @@ def write_html_report(
   // Initial route from hash
   const initial = (location.hash || '#dashboard').replace('#', '');
   showRoute(initial);
+
+  const reportModelElement = document.getElementById('pacioli-report-model');
+  const reportModel = reportModelElement ? JSON.parse(reportModelElement.textContent) : null;
+  window.__envStats = reportModel ? reportModel.environments.map(environment => ({
+    label: environment.identity.display_label,
+    project: environment.identity.project,
+    env: environment.identity.env,
+    stack_label: environment.identity.stack_label,
+    scan_status: environment.scan_status,
+    total: environment.counts.total,
+    high: environment.counts.high,
+    medium: environment.counts.medium,
+    low: environment.counts.low,
+  })) : [];
 
   // ----- Severity donut chart (pure SVG, no deps) -----
   (function renderDonut() {
@@ -3647,6 +3813,47 @@ class EnvResultFull(EnvResult):
     sarif_files: dict[str, Path | None] = field(default_factory=dict)
 
 
+def _read_environment_metadata(env_dir: Path, directory_project: str, directory_env: str) -> tuple[str, str, str | None]:
+    """Return canonical identity from metadata, or legacy directory identity."""
+    metadata_path = env_dir / "pacioli_environment.json"
+    if not metadata_path.exists():
+        return directory_project, directory_env, None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        raise ValueError(f"invalid environment metadata at {metadata_path}: {error}") from error
+    if not isinstance(metadata, dict):
+        raise ValueError(f"invalid environment metadata at {metadata_path}: expected object")
+    expected_keys = {"schema_version", "project", "env", "stack_label"}
+    if set(metadata) != expected_keys:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: expected keys {sorted(expected_keys)}"
+        )
+    if metadata["schema_version"] != 1:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: unsupported schema_version {metadata['schema_version']!r}"
+        )
+    project = metadata["project"]
+    env = metadata["env"]
+    stack_label = metadata["stack_label"]
+    if not isinstance(project, str) or not project:
+        raise ValueError(f"invalid environment metadata at {metadata_path}: project must be a non-empty string")
+    if not isinstance(env, str) or not env:
+        raise ValueError(f"invalid environment metadata at {metadata_path}: env must be a non-empty string")
+    if stack_label is not None and (not isinstance(stack_label, str) or not stack_label):
+        raise ValueError(f"invalid environment metadata at {metadata_path}: stack_label must be a non-empty string or null")
+    if project != directory_project:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: project mismatches directory ({project!r} != {directory_project!r})"
+        )
+    expected_directory_env = env if stack_label is None else f"{env}-{stack_label}"
+    if directory_env != expected_directory_env:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: env/stack_label mismatches directory ({expected_directory_env!r} != {directory_env!r})"
+        )
+    return project, env, stack_label
+
+
 def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
     """Walk a run dir and produce EnvResultFull per project/env.
 
@@ -3669,7 +3876,11 @@ def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
         for env_dir in entry.iterdir():
             if not env_dir.is_dir():
                 continue
-            env = env_dir.name
+            canonical_project, canonical_env, stack_label = _read_environment_metadata(
+                env_dir, project, env_dir.name
+            )
+            project = canonical_project
+            env = canonical_env
             sarif_files: dict[str, Path | None] = {}
             for sarif_path in env_dir.glob("results_*.sarif"):
                 pass_name = _sarif_filename_to_pass(sarif_path.name)
@@ -3687,6 +3898,7 @@ def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
             r = EnvResultFull(
                 project=project,
                 env=env,
+                stack_label=stack_label,
                 scan_status="ok",
                 plan_dir=env_dir,
                 sarif_files=sarif_files,
