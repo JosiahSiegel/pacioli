@@ -286,47 +286,64 @@ def test_env_with_mixed_real_and_stub_tf_files_is_kept(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "yaml_text, expected_pairs",
     [
-        # Only in_scope entries are honored.
+        # Only structured in_scope entries are honored.
         (
             """
 projects:
   - project: payments
     status: in_scope
-    envs: [dev, prod]
+    envs:
+      - name: dev
+        status: in_scope
+      - name: prod
+        status: in_scope
   - project: sandbox
-    status: out_of_scope
-    envs: [dev, prod]
+    status: excluded
+    reason: isolated development account
+    envs:
+      - name: dev
+        status: in_scope
+      - name: prod
+        status: in_scope
   - project: dev_sandbox
-    status: not_in_scope
-    envs: [dev]
+    status: in_scope
+    envs:
+      - name: dev
+        status: pending
+        reason: ownership review
 """,
             [("payments", "dev"), ("payments", "prod")],
         ),
-        # No envs key for an in_scope entry → no pairs for it.
+        # An empty env list is valid but does not yield pairs.
         (
             """
 projects:
   - project: payments
     status: in_scope
-    envs: [prod]
+    envs:
+      - name: prod
+        status: in_scope
   - project: empty
     status: in_scope
+    envs: []
 """,
             [("payments", "prod")],
         ),
-        # No in_scope entries → discovery falls through and (since
-        # there's no env/ and no root .tf) raises.
+        # No in-scope entries yields no pairs.
         (
             """
 projects:
   - project: sandbox
-    status: out_of_scope
-    envs: [dev]
+    status: excluded
+    reason: not a regulated workload
+    envs:
+      - name: dev
+        status: in_scope
 """,
             None,  # sentinel: expect NoTerraformFoundError
         ),
     ],
-    ids=["in_scope_only", "missing_envs", "no_in_scope_entries"],
+    ids=["in_scope_only", "empty_envs", "no_in_scope_entries"],
 )
 def test_pci_scope_yaml_in_scope_only(
     tmp_path: Path,
@@ -365,10 +382,15 @@ def test_pci_scope_yaml_takes_precedence_over_env_tree(tmp_path: Path) -> None:
 projects:
   - project: payments
     status: in_scope
-    envs: [prod]
+    envs:
+      - name: prod
+        status: in_scope
   - project: sandbox
-    status: out_of_scope
-    envs: [dev]
+    status: excluded
+    reason: sandbox is out of scope
+    envs:
+      - name: dev
+        status: in_scope
 """,
     )
 
@@ -386,10 +408,18 @@ def test_pci_scope_yaml_with_filters(tmp_path: Path) -> None:
 projects:
   - project: payments
     status: in_scope
-    envs: [dev, prod]
+    envs:
+      - name: dev
+        status: in_scope
+      - name: prod
+        status: in_scope
   - project: inventory
     status: in_scope
-    envs: [dev, prod]
+    envs:
+      - name: dev
+        status: in_scope
+      - name: prod
+        status: in_scope
 """,
     )
 
@@ -469,7 +499,9 @@ def test_scan_paths_unions_with_projects_branch(tmp_path: Path) -> None:
 projects:
   - project: payments
     status: in_scope
-    envs: [prod]
+    envs:
+      - name: prod
+        status: in_scope
 scan_paths:
   - path: {other_stack}
     project: platform
@@ -766,7 +798,9 @@ scan_paths: []
 projects:
   - project: payments
     status: in_scope
-    envs: [prod]
+    envs:
+      - name: prod
+        status: in_scope
 """,
     )
 
@@ -783,7 +817,9 @@ def test_scan_paths_missing_key_is_noop(tmp_path: Path) -> None:
 projects:
   - project: payments
     status: in_scope
-    envs: [prod]
+    envs:
+      - name: prod
+        status: in_scope
 """,
     )
 
@@ -792,6 +828,140 @@ projects:
     assert _pairs(pairs) == [("payments", "prod")]
     # Legacy branch: stack_root is None.
     assert pairs[0].stack_root is None
+
+
+@pytest.mark.parametrize(
+    "yaml_text, location",
+    [
+        ("projects: scalar", "projects"),
+        ("projects: []", "root"),
+        ("projects: {}", "projects"),
+        ("projects:\n  - project: payments\n    status: in_scope\n    envs: [prod]", "projects[0].envs[0]"),
+        ("projects:\n  - project: payments\n    status: excluded\n    envs: []", "projects[0].reason"),
+        ("projects:\n  - project: payments\n    status: in_scope\n    envs: scalar", "projects[0].envs"),
+        ("projects:\n  - project: payments\n    status: invalid\n    envs: []", "projects[0].status"),
+        ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: in_scope\n      - name: prod\n        status: in_scope", "projects[0].envs[1]"),
+        ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: excluded", "projects[0].envs[0].reason"),
+        ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: in_scope\n        extra: no", "projects[0].envs[0]"),
+    ],
+)
+def test_scope_manifest_rejects_malformed_records(
+    tmp_path: Path,
+    yaml_text: str,
+    location: str,
+) -> None:
+    """Every malformed structured scope record raises a location-bearing ValueError."""
+    _write_yaml(tmp_path / "pci_scope.yaml", yaml_text)
+
+    with pytest.raises(ValueError) as excinfo:
+        discover_pairs(tmp_path)
+
+    assert location in str(excinfo.value)
+
+
+def test_scope_manifest_excludes_declared_pairs_but_keeps_unmatched_scan_paths(
+    tmp_path: Path,
+) -> None:
+    """Pending/excluded logical pairs gate both sources but unrelated stacks stay valid."""
+    pending_stack = _make_stack_root(tmp_path, "pending-stack")
+    unmatched_stack = _make_stack_root(tmp_path, "unmatched-stack")
+    _write_yaml(
+        tmp_path / "pci_scope.yaml",
+        f"""
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: pending
+        reason: deployment approval outstanding
+  - project: billing
+    status: excluded
+    reason: moved to a separate assessment
+    envs:
+      - name: prod
+        status: in_scope
+scan_paths:
+  - path: {pending_stack}
+    project: payments
+    env: staging
+  - path: {unmatched_stack}
+    project: platform
+    env: main
+""",
+    )
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == [("platform", "main"), ("payments", "prod")]
+    assert pairs[0].stack_root == unmatched_stack
+
+
+def test_scan_paths_only_manifest_is_valid(tmp_path: Path) -> None:
+    """A non-empty scan_paths-only manifest remains a valid source of pairs."""
+    stack = _make_stack_root(tmp_path, "stack")
+    _write_yaml(
+        tmp_path / "pci_scope.yaml",
+        f"""
+scan_paths:
+  - path: {stack}
+    project: payments
+    env: prod
+""",
+    )
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == [("payments", "prod")]
+
+
+def test_filters_narrow_merged_projects_and_scan_paths(tmp_path: Path) -> None:
+    """Filters apply after merger to structured projects and explicit stack pairs."""
+    stack = _make_stack_root(tmp_path, "stack")
+    _write_yaml(
+        tmp_path / "pci_scope.yaml",
+        f"""
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+scan_paths:
+  - path: {stack}
+    project: payments
+    env: prod
+    stack_label: external
+""",
+    )
+
+    pairs = discover_pairs(tmp_path, project_filter="payments", env_filter="prod")
+
+    assert [(pair.project, pair.env, pair.stack_label) for pair in pairs] == [
+        ("payments", "prod", "external"),
+        ("payments", "prod", None),
+    ]
+
+
+def test_labeled_scan_path_retains_identity(tmp_path: Path) -> None:
+    """A labeled scan-path pair keeps project, env, and stack label together."""
+    stack = _make_stack_root(tmp_path, "stack")
+    _write_yaml(
+        tmp_path / "pci_scope.yaml",
+        f"""
+scan_paths:
+  - path: {stack}
+    project: payments
+    env: prod
+    stack_label: east
+""",
+    )
+
+    pair = discover_pairs(tmp_path)[0]
+
+    assert (pair.project, pair.env, pair.stack_label) == ("payments", "prod", "east")
 
 
 def test_scan_paths_invalid_path_raises(tmp_path: Path) -> None:
@@ -805,8 +975,10 @@ scan_paths:
 """,
     )
 
-    with pytest.raises(ValueError, match="path is required"):
+    with pytest.raises(ValueError) as excinfo:
         discover_pairs(tmp_path)
+
+    assert "scan_paths[0].path" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

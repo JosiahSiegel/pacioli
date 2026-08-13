@@ -50,6 +50,7 @@ from scanner import cli as scanner_cli  # noqa: E402
 from scanner import orchestrator as scanner_orchestrator  # noqa: E402
 from scanner import safety as scanner_safety  # noqa: E402
 from scanner.checkov_runner import CheckovRunner, _SARIF_BASENAME  # noqa: E402
+from scanner.discovery import DiscoveredPair  # noqa: E402
 from scanner.orchestrator import (  # noqa: E402
     Orchestrator,
     OrchestratorError,
@@ -239,6 +240,70 @@ def test_source_only_scan_produces_per_pair_sarifs(
     agg_argv = stub_aggregate[0]
     assert "--run-dir" in agg_argv
     assert str(output_dir.resolve()) in agg_argv
+
+
+def test_environment_metadata_is_written_before_first_checkov_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact environment artifact exists before the first pair scan starts."""
+    env_dir = tmp_path / "stack"
+    env_dir.mkdir()
+    run_root = tmp_path / "runs"
+    runner = object()
+    observed: list[dict[str, object]] = []
+
+    def fake_scan_one_pair(self, received_runner, state, state_account):  # noqa: ANN001
+        assert received_runner is runner
+        observed.append(json.loads((state.env_run_dir / "pacioli_environment.json").read_text(encoding="utf-8")))
+        return 0
+
+    monkeypatch.setattr(Orchestrator, "_scan_one_pair", fake_scan_one_pair)
+
+    rc = Orchestrator()._run_scan_loop(
+        runner=runner,
+        pairs=[
+            DiscoveredPair(
+                project="payments",
+                env="prod",
+                stack_root=env_dir,
+                stack_label="east",
+            )
+        ],
+        target_repo=tmp_path,
+        run_root=run_root,
+        state_account=None,
+    )
+
+    assert rc == 0
+    assert observed == [
+        {
+            "schema_version": 1,
+            "project": "payments",
+            "env": "prod",
+            "stack_label": "east",
+        }
+    ]
+
+
+def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) -> None:
+    """Scope validation fails before a run root or output directory is created."""
+    (tmp_path / "pci_scope.yaml").write_text("projects: scalar", encoding="utf-8")
+    output_dir = tmp_path / "runs"
+
+    with pytest.raises(ValueError, match="pci_scope.yaml.projects"):
+        Orchestrator().scan(
+            target_repo=tmp_path,
+            project=None,
+            env=None,
+            label="run-1",
+            output_dir=output_dir,
+            mapping_path=None,
+            baseline_path=None,
+            state_account=None,
+        )
+
+    assert not output_dir.exists()
 
 
 # ---------------------------------------------------------------------------
