@@ -108,9 +108,10 @@ checkov --version
 
 ## Step 2: create the scope file
 
-`pci_scope.yaml` declares the PCI audit boundary. For `projects:` entries,
-the scanner walks `env/<project>/<env>/` only when both the project and
-environment are `in_scope`.
+`pci_scope.yaml` declares **scan scope**, the version-controlled PCI audit
+boundary. For `projects:` entries, the scanner walks
+`env/<project>/<env>/` only when both the project and environment are
+`in_scope`.
 
 ```bash
 cp ../pacioli/examples/scope.yaml.example ./pci_scope.yaml
@@ -169,10 +170,18 @@ status controls only that named environment when its project is `in_scope`.
 | `pending` | Never scanned; use while an attestation or approval is outstanding. |
 | `excluded` | Never scanned; use for a workload outside the PCI audit boundary. |
 
-`pending` and `excluded` projects or environments never enter a newly
-generated report. For your initial setup, make every intended scan pair
-`in_scope`; retain pending or excluded declarations with reasons so the audit
-boundary remains explicit in Git.
+`pending` and `excluded` projects or environments are omitted at scan time
+and never enter a newly generated report. For your initial setup, make every
+intended scan pair `in_scope`; retain pending or excluded declarations with
+reasons so the audit boundary remains explicit in Git.
+
+For temporary browser triage after a full scan, use the report's **Hide
+environments** checkboxes. That separate **report view** is a client-side
+report-view-only exclusion: it recomputes what is shown without changing scan
+scope or generated files. SARIF, CSV, and JUnit evidence remains unchanged as
+full-scan evidence. The report defaults to Dark and persists the chosen Dark,
+Light, or System theme locally in the browser. See
+[Report Format](REPORT_FORMAT.md#report-view-theme-and-evidence-boundaries).
 
 ## Step 3: create the baseline file (initially empty)
 

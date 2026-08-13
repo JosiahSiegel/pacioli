@@ -413,11 +413,12 @@ Every 90 days:
 
 ## Adding a new project to scope
 
-`pci_scope.yaml` uses a strict structured schema. This is a **breaking
-change** from legacy manifests: a scalar environment such as `- prod` is
-rejected. Migrate every scalar item to `- name: prod` plus its `status`, wrap
-legacy top-level project records beneath `projects:`, and add a `status` to
-every project.
+`pci_scope.yaml` defines **scan scope**: the version-controlled PCI audit
+boundary applied when Pacioli scans. It uses structured-only `envs` records.
+This is a **breaking change** from legacy manifests: a scalar environment such
+as `- prod` is rejected. Migrate every scalar item to `- name: prod` plus its
+`status`, wrap legacy top-level project records beneath `projects:`, and add a
+`status` to every project.
 
 A `projects:` root admits only project records with `project` (non-blank
 string), optional `description` (string), `status`, optional `reason`
@@ -469,11 +470,29 @@ environment's status applies only to that environment when its project is
 | `pending` | **Never scanned** — data-classification attestation or approval is still owed. Set to `in_scope` after the ticket is closed. |
 | `excluded` | **Never scanned** — not in the PCI audit boundary (for example, a sandbox with no deployed resources). |
 
-Pending and excluded environments never enter a newly generated report. To
-temporarily remove a project or a single environment from scans while keeping
-its declaration, set the relevant status to `pending` and record the reason.
-Use `excluded` only when that declared audit target is permanently out of
-scope.
+Pending and excluded environments are omitted at scan time and never enter a
+newly generated report. To temporarily remove a project or a single
+environment from scans while keeping its declaration, set the relevant status
+to `pending` and record the reason. Use `excluded` only when that declared
+audit target is permanently out of scope.
+
+### Scan scope versus report view
+
+`pci_scope.yaml` statuses are scan-scope decisions: they are permanent until
+changed in version control and determine whether an environment is scanned at
+all. They are not browser controls.
+
+The static HTML report also offers a **report view** control, **Hide
+environments**. It is a client-side report-view-only exclusion for temporary
+triage: it hides selected environments and recomputes every report view from
+the remaining full-scan data. Clear the checkbox or use **Full-report reset**
+to restore the full report view.
+
+A report view must not be used to redefine compliance scope. Its browser-local
+preference neither omits an environment at scan time nor changes generated
+scan artifacts: SARIF, CSV, and JUnit evidence remains unchanged as full-scan
+evidence. See [Report Format](REPORT_FORMAT.md#report-view-theme-and-evidence-boundaries)
+for the UI, theme, and empty-filter behavior.
 
 ## See also
 
