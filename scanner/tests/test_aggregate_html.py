@@ -679,6 +679,66 @@ class TestHtmlReport:
         # the bundled yaml installed, dozens of these pre tags appear.
         assert 'class="remediation-hcl"' in html
 
+    def test_html_report_contains_dark_first_theme_contract(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The report ships dark-first semantic tokens and an accessible theme control."""
+        import importlib.resources
+
+        bundled = importlib.resources.files("scanner").joinpath(
+            "mappings/pci_dss_4.0.1.yaml"
+        )
+        if not bundled.is_file():
+            pytest.skip("Install-bundled mapping not present")
+
+        _build_run_dir(tmp_path)
+        out_dir = tmp_path / "aggregate"
+        monkeypatch.chdir(tmp_path)
+
+        rc = _invoke_aggregate_main(
+            ["aggregate.py", "--run-dir", str(tmp_path), "--out", str(out_dir)]
+        )
+        assert rc == 0
+        html = (out_dir / "report.html").read_text(encoding="utf-8")
+
+        for marker in (
+            '<meta name="color-scheme" content="dark light">',
+            '<html lang="en" data-theme="dark">',
+            '[data-theme="dark"]',
+            '[data-theme="light"]',
+            '[data-theme="system"]',
+            '--color-bg:',
+            '--color-fg:',
+            '--color-accent:',
+            'id="theme-select"',
+            '<label for="theme-select">Theme</label>',
+            '<option value="dark">Dark</option>',
+            '<option value="light">Light</option>',
+            '<option value="system">System</option>',
+            "pacioli.report.theme",
+            "localStorage.getItem",
+            "matchMedia('(prefers-color-scheme: dark)')",
+            ':focus-visible',
+            'prefers-reduced-motion: reduce',
+        ):
+            assert marker in html
+
+        design = _REPO_ROOT / "DESIGN.md"
+        design_text = design.read_text(encoding="utf-8")
+        for header in (
+            "## 1. Atmosphere & Identity",
+            "## 2. Color",
+            "## 3. Typography",
+            "## 4. Spacing & Layout",
+            "## 5. Components",
+            "## 6. Motion & Interaction",
+            "## 7. Depth & Surface",
+            "## 8. Accessibility Constraints & Accepted Debt",
+        ):
+            assert header in design_text
+        assert "WCAG 2.2 AA" in design_text
+        assert "Accepted debt" in design_text
+
     def test_html_report_renders_pci_anchor_in_coverage_route(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

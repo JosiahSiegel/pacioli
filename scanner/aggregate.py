@@ -1870,14 +1870,14 @@ def _render_drift_section(drift_findings: list[dict]) -> str:
         )
     return (
         "<h2>Drift Findings</h2>\n"
-        "<p style=\"font-style:italic; color:#555;\">"
+        "<p class=\"inline-muted\"><em>"
         "Drift is the difference between the planned resource shape "
         "(source .tf + terraform plan) and the live Azure state "
         "(.tfstate pulled from Azure Storage). Investigate every drift "
         "finding before re-running <code>terraform apply</code> &mdash; "
         "it may indicate manual changes that need to be either codified "
         "in source or reverted to match the plan."
-        "</p>\n"
+        "</em></p>\n"
         "<table>\n"
         "  <tr><th>Resource</th><th>File:Line</th><th>Attribute</th>"
         "<th>Drift Type</th><th>Source &rarr; State</th><th>Severity</th></tr>\n"
@@ -1999,8 +1999,7 @@ def write_html_report(
     if failed_envs:
         envs_str = ", ".join(f"{er.project}/{er.env}" for er in failed_envs)
         banner = (
-            f'<div style="background:#c00;color:#fff;padding:1em;margin:1em 0;'
-            f'border:2px solid #900;font-weight:bold;">'
+            f'<div class="banner-error">'
             f"RED BANNER: state-pull failed for {envs_str}. "
             f"Reports below are based on source-only scan; do not rely on PCI "
             f"compliance claims until re-scan succeeds."
@@ -2010,233 +2009,136 @@ def write_html_report(
     # CSS is held as a plain string (NOT inside an f-string) because Python
     # 3.12+ parses `{...}` greedily inside f-strings -- and CSS has braces.
     CSS_STYLE = """\
-  /* ===== Pacioli PCI Report -- first-class SPA styles ===== */
+  /* ===== Pacioli report -- semantic token contract ===== */
+  :root, [data-theme="dark"] {
+    color-scheme: dark;
+    --color-bg: #121820;
+    --color-surface: #1b2532;
+    --color-surface-subtle: #253142;
+    --color-surface-raised: #202c3b;
+    --color-fg: #f3f7fb;
+    --color-fg-muted: #b6c2d1;
+    --color-nav-bg: #101b2d;
+    --color-nav-surface: #172a43;
+    --color-nav-fg: #e7f0fb;
+    --color-nav-muted: #b8c9dd;
+    --color-border: #38475a;
+    --color-border-subtle: #2b3849;
+    --color-accent: #79b8ff;
+    --color-accent-surface: #17395f;
+    --color-danger: #ff8a8a;
+    --color-danger-surface: #54272f;
+    --color-warning: #ffd08a;
+    --color-warning-surface: #564222;
+    --color-neutral: #bdc7d4;
+    --color-success: #86d7a2;
+    --color-success-surface: #1d4932;
+    --color-code-bg: #0e1724;
+    --color-code-fg: #d5ebff;
+    --color-focus: #9ecbff;
+    --color-shadow: rgba(0, 0, 0, 0.28);
+    --color-nav-divider: rgba(231, 240, 251, 0.16);
+    --color-nav-hover: rgba(231, 240, 251, 0.08);
+    --color-nav-active: rgba(231, 240, 251, 0.16);
+    --color-nav-field: rgba(231, 240, 251, 0.1);
+    --color-nav-field-hover: rgba(231, 240, 251, 0.2);
+    --color-surface-shadow: rgba(0, 0, 0, 0.28);
+  }
+  [data-theme="light"] {
+    color-scheme: light;
+    --color-bg: #f5f7fb;
+    --color-surface: #ffffff;
+    --color-surface-subtle: #eef2f8;
+    --color-surface-raised: #fafcff;
+    --color-fg: #172033;
+    --color-fg-muted: #536276;
+    --color-nav-bg: #0a2648;
+    --color-nav-surface: #0d3560;
+    --color-nav-fg: #eef6ff;
+    --color-nav-muted: #c7d8ea;
+    --color-border: #ccd5e1;
+    --color-border-subtle: #e2e8f0;
+    --color-accent: #075cc4;
+    --color-accent-surface: #e6f1ff;
+    --color-danger: #b42318;
+    --color-danger-surface: #fff0f0;
+    --color-warning: #9a5d00;
+    --color-warning-surface: #fff7e6;
+    --color-neutral: #66758a;
+    --color-success: #187a3d;
+    --color-success-surface: #e9f8ee;
+    --color-code-bg: #10223a;
+    --color-code-fg: #d5ebff;
+    --color-focus: #005fcc;
+    --color-shadow: rgba(31, 48, 70, 0.12);
+    --color-nav-divider: rgba(238, 246, 255, 0.2);
+    --color-nav-hover: rgba(238, 246, 255, 0.12);
+    --color-nav-active: rgba(238, 246, 255, 0.2);
+    --color-nav-field: rgba(238, 246, 255, 0.12);
+    --color-nav-field-hover: rgba(238, 246, 255, 0.24);
+    --color-surface-shadow: rgba(31, 48, 70, 0.12);
+  }
+  [data-theme="system"] { color-scheme: dark light; }
+  @media (prefers-color-scheme: light) {
+    [data-theme="system"] {
+      --color-bg: #f5f7fb; --color-surface: #ffffff; --color-surface-subtle: #eef2f8;
+      --color-surface-raised: #fafcff; --color-fg: #172033; --color-fg-muted: #536276;
+      --color-nav-bg: #0a2648; --color-nav-surface: #0d3560; --color-nav-fg: #eef6ff;
+      --color-nav-muted: #c7d8ea; --color-border: #ccd5e1; --color-border-subtle: #e2e8f0;
+      --color-accent: #075cc4; --color-accent-surface: #e6f1ff; --color-danger: #b42318;
+      --color-danger-surface: #fff0f0; --color-warning: #9a5d00; --color-warning-surface: #fff7e6;
+      --color-neutral: #66758a; --color-success: #187a3d; --color-success-surface: #e9f8ee;
+      --color-code-bg: #10223a; --color-code-fg: #d5ebff; --color-focus: #005fcc;
+      --color-shadow: rgba(31, 48, 70, 0.12); --color-nav-divider: rgba(238, 246, 255, 0.2);
+      --color-nav-hover: rgba(238, 246, 255, 0.12); --color-nav-active: rgba(238, 246, 255, 0.2);
+      --color-nav-field: rgba(238, 246, 255, 0.12); --color-nav-field-hover: rgba(238, 246, 255, 0.24);
+      --color-surface-shadow: rgba(31, 48, 70, 0.12);
+    }
+  }
   *, *::before, *::after { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
-                 Arial, sans-serif;
-    color: #1a1f2e;
-    background: #f5f6fa;
-    line-height: 1.5;
-    font-size: 14px;
+  :focus-visible { outline: 3px solid var(--color-focus); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
   }
-  a { color: #0050b3; text-decoration: none; }
+  /* ===== Report layout and components ===== */
+  html, body { margin: 0; min-height: 100%; padding: 0; }
+  body { background: var(--color-bg); color: var(--color-fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 14px; line-height: 1.5; }
+  a { color: var(--color-accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em;
-         background: #eef; padding: 0 4px; border-radius: 3px; }
-  h1, h2, h3, h4 { color: #0a1a3a; margin: 0 0 0.5em 0; font-weight: 600; }
-  h1 { font-size: 1.8em; }
-  h2 { font-size: 1.4em; border-bottom: 2px solid #003a70; padding-bottom: 0.3em; }
-  h3 { font-size: 1.15em; color: #003a70; margin-top: 1.5em; }
-  h4 { font-size: 1em; margin-top: 1em; }
+  code { background: var(--color-surface-subtle); border-radius: 3px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; padding: 0 var(--space-1, 4px); }
+  h1, h2, h3, h4 { color: var(--color-fg); font-weight: 600; margin: 0 0 0.5em; }
+  h1 { font-size: 1.8em; } h2 { border-bottom: 2px solid var(--color-accent); font-size: 1.4em; padding-bottom: 0.3em; } h3 { color: var(--color-accent); font-size: 1.15em; margin-top: 1.5em; } h4 { font-size: 1em; margin-top: 1em; }
   table { border-collapse: collapse; margin: 1em 0; width: 100%; }
-  th, td { border: 1px solid #d0d6e0; padding: 6px 10px; text-align: left; }
-  th { background: #eef2f8; font-weight: 600; }
+  th, td { border: 1px solid var(--color-border); padding: 6px 10px; text-align: left; } th { background: var(--color-surface-subtle); }
+  #app { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100dvh; }
+  #sidebar { background: var(--color-nav-bg); color: var(--color-nav-fg); height: 100dvh; overflow-y: auto; padding: 0; position: sticky; top: 0; }
+  .sidebar-brand { border-bottom: 1px solid var(--color-nav-divider); padding: 1.4em 1.2em; }
+  .sidebar-brand h1 { color: var(--color-nav-fg); font-size: 1.3em; line-height: 1.1; margin: 0; }
+  .sidebar-brand .subtitle, .sidebar-footer { color: var(--color-nav-muted); font-size: 0.78em; line-height: 1.4; }
+  .sidebar-brand .subtitle { margin-top: 4px; } .sidebar-footer { border-top: 1px solid var(--color-nav-divider); padding: 1em 1.2em; }
+  nav.sidebar-nav { padding: 0.6em 0; } nav.sidebar-nav a { align-items: center; border-left: 3px solid transparent; color: var(--color-nav-fg); display: flex; font-weight: 500; gap: 10px; padding: 0.7em 1.2em; transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out; }
+  nav.sidebar-nav a:hover { background: var(--color-nav-hover); color: var(--color-nav-fg); text-decoration: none; } nav.sidebar-nav a.active { background: var(--color-nav-active); border-left-color: var(--color-accent); }
+  nav.sidebar-nav a .icon { display: inline-block; font-size: 1.05em; text-align: center; width: 18px; } nav.sidebar-nav a .badge { background: var(--color-danger); border-radius: 10px; color: var(--color-nav-bg); font-size: 0.7em; font-weight: 700; margin-left: auto; padding: 1px 7px; } nav.sidebar-nav a .badge.ok { background: var(--color-success); } nav.sidebar-nav a .badge.warn { background: var(--color-warning); }
+  #main { min-width: 0; overflow-x: auto; padding: 1.4em 2em 4em; } .route { display: none; } .route.active { display: block; } .route-header { align-items: flex-end; border-bottom: 1px solid var(--color-border); display: flex; justify-content: space-between; margin-bottom: 1.4em; padding-bottom: 1em; } .route-header h1 { margin: 0; } .route-header .meta { color: var(--color-fg-muted); font-size: 0.85em; line-height: 1.5; text-align: right; }
+  .kpi-grid { display: grid; gap: 1em; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); margin: 1em 0 1.4em; } .kpi, .top-list, .panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 6px; box-shadow: 0 1px 3px var(--color-surface-shadow); padding: 1em 1.2em; } .kpi { overflow: hidden; position: relative; } .kpi::before { background: var(--color-accent); bottom: 0; content: ""; left: 0; position: absolute; top: 0; width: 4px; } .kpi.kpi-high::before { background: var(--color-danger); } .kpi.kpi-medium::before { background: var(--color-warning); } .kpi.kpi-low::before { background: var(--color-neutral); } .kpi.kpi-ok::before { background: var(--color-success); } .kpi-label, .kpi-sub { color: var(--color-fg-muted); } .kpi-label { font-size: 0.78em; letter-spacing: 0.06em; margin-bottom: 6px; text-transform: uppercase; } .kpi-value { color: var(--color-fg); font-size: 2.2em; font-weight: 700; line-height: 1; } .kpi-sub { font-size: 0.85em; margin-top: 6px; }
+  .donut-wrap { align-items: center; display: flex; gap: 1.4em; margin: 1em 0; } .donut-legend { display: flex; flex-direction: column; gap: 0.5em; } .donut-legend-row { align-items: center; display: flex; font-size: 0.9em; gap: 0.6em; } .donut-legend-swatch { border-radius: 3px; height: 14px; width: 14px; } .swatch-high { background: var(--color-danger); } .swatch-medium { background: var(--color-warning); } .swatch-low { background: var(--color-neutral); } .swatch-ok { background: var(--color-success); }
+  .env-bar-row { align-items: center; background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: 4px; display: flex; gap: 0.8em; margin: 0.4em 0; padding: 0.4em 0.6em; } .env-bar-name { font-size: 0.92em; font-weight: 600; width: 260px; } .env-bar-track { background: var(--color-surface-subtle); border-radius: 3px; display: flex; flex: 1; height: 22px; overflow: hidden; } .env-bar-segment { height: 100%; } .env-bar-segment.high { background: var(--color-danger); } .env-bar-segment.medium { background: var(--color-warning); } .env-bar-segment.low { background: var(--color-neutral); } .env-bar-count { font-size: 0.9em; font-weight: 600; text-align: right; width: 80px; }
+  .top-list { margin: 0.6em 0; padding: 0.8em 1em; } .top-list h3 { font-size: 1em; margin: 0 0 0.6em; } .top-list-row { border-bottom: 1px solid var(--color-border-subtle); display: flex; font-size: 0.9em; justify-content: space-between; padding: 0.3em 0; } .top-list-row:last-child { border-bottom: 0; } .count-pill { background: var(--color-surface-subtle); border-radius: 10px; font-weight: 600; padding: 1px 8px; } .count-pill.high { background: var(--color-danger-surface); color: var(--color-danger); } .count-pill.medium { background: var(--color-warning-surface); color: var(--color-warning); }
+  .two-col { display: grid; gap: 1.4em; grid-template-columns: 1fr 1fr; margin: 1em 0; } .panel h3 { margin-top: 0; } .finding, .finding-body { background: var(--color-surface-raised); border-left: 4px solid var(--color-neutral); border-radius: 0 4px 4px 0; margin: 0.5em 0; padding: 0.8em 1em; } .finding.HIGH, .finding.CRITICAL, .finding-body.HIGH, .finding-body.CRITICAL { background: var(--color-danger-surface); border-left-color: var(--color-danger); } .finding.MEDIUM, .finding-body.MEDIUM { background: var(--color-warning-surface); border-left-color: var(--color-warning); } .suppressed { opacity: 0.5; text-decoration: line-through; } .req-coverage { color: var(--color-fg-muted); font-size: 0.9em; }
+  #filter-ui { align-items: center; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 6px; box-shadow: 0 1px 3px var(--color-surface-shadow); display: flex; flex-wrap: wrap; gap: 8px; margin: 1em 0; padding: 12px; position: sticky; top: 0; z-index: 10; } #filter-ui input[type="search"], #filter-ui select, #theme-select { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg); padding: 6px 10px; } #filter-ui input[type="search"] { width: 240px; } button { font: inherit; } #filter-ui button { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg); cursor: pointer; font-weight: 500; padding: 6px 12px; transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out, transform 120ms ease-out; } #filter-ui button:hover { background: var(--color-surface-raised); } #filter-ui button:active { transform: translateY(1px); } #filter-ui button.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); } #finding-count { color: var(--color-accent); font-size: 0.95em; font-weight: 700; margin-left: auto; }
+  .count-high { color: var(--color-danger); font-weight: 700; } .count-medium { color: var(--color-warning); font-weight: 600; } .count-low { color: var(--color-neutral); } .badge-row { border-radius: 12px; display: inline-block; font-size: 0.78em; font-weight: 600; padding: 2px 8px; } .badge-row.NON-COMPLIANT, .badge-row.STALE { background: var(--color-danger-surface); color: var(--color-danger); } .badge-row.NOT-SCANNED { background: var(--color-surface-subtle); color: var(--color-fg-muted); } .badge-row.COMPLIANT { background: var(--color-success-surface); color: var(--color-success); } .badge-row.OUT-OF-SCOPE { background: var(--color-accent-surface); color: var(--color-accent); } .badge-row.NO-MATCHING-RESOURCES { background: var(--color-warning-surface); color: var(--color-warning); }
+  .heatmap { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(min(110px, 100%), 1fr)); margin: 1em 0; } .heatmap-cell { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 4px; cursor: pointer; font-size: 0.85em; padding: 8px 10px; text-align: center; transition: transform 100ms ease-out, box-shadow 100ms ease-out, border-color 100ms ease-out; } .heatmap-cell:hover { border-color: var(--color-accent); box-shadow: 0 4px 8px var(--color-shadow); transform: translateY(-2px); } .heatmap-cell .req-id { color: var(--color-accent); font-weight: 700; } .heatmap-cell .req-count { color: var(--color-fg-muted); font-size: 0.75em; margin-top: 4px; } .heatmap-cell.kpi-high { background: var(--color-danger-surface); border-color: var(--color-danger); } .heatmap-cell.kpi-high .req-id { color: var(--color-danger); } .heatmap-cell.kpi-ok { background: var(--color-success-surface); border-color: var(--color-success); } .heatmap-cell.kpi-ok .req-id { color: var(--color-success); } .heatmap-cell.kpi-medium, .heatmap-cell.kpi-warn { background: var(--color-warning-surface); border-color: var(--color-warning); } .heatmap-cell.filtered { background: var(--color-accent-surface); border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent), 0 4px 12px var(--color-shadow); transform: translateY(-2px); } .heatmap-cell.filtered .req-id { color: var(--color-accent); } .heatmap-cell.dimmed { opacity: 0.25; } .heatmap-cell.dimmed:hover { opacity: 0.6; }
+  .remediation { background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; margin: 8px 0; padding: 8px 12px; } .remediation h4 { color: var(--color-accent); font-size: 0.95em; margin: 0 0 6px; } .remediation-hcl { background: var(--color-code-bg); border-radius: 4px; color: var(--color-code-fg); font-size: 0.85em; line-height: 1.5; overflow-x: auto; padding: 12px; white-space: pre; } .chain-of-custody { background: var(--color-surface-subtle); border-left: 3px solid var(--color-accent); border-radius: 0 3px 3px 0; color: var(--color-fg-muted); font-size: 0.85em; margin: 4px 0; padding: 4px 8px; } .coc-true { color: var(--color-success); font-weight: 600; } .coc-partial { color: var(--color-warning); font-weight: 600; }
+  .banner-error { background: var(--color-danger-surface); border-left: 6px solid var(--color-danger); border-radius: 4px; color: var(--color-danger); font-weight: 600; margin: 0 0 1em; padding: 1em 1.4em; } .banner-info { background: var(--color-accent-surface); border-left: 4px solid var(--color-accent); border-radius: 4px; color: var(--color-accent); margin: 0 0 1em; padding: 0.8em 1.2em; } .pulse-bar { border-radius: 50%; display: inline-block; height: 8px; margin-right: 4px; vertical-align: middle; width: 8px; } .pulse-bar.hot { background: var(--color-danger); } .pulse-bar.warm { background: var(--color-warning); } .pulse-bar.cool { background: var(--color-success); }
+  .theme-control { align-items: center; border-top: 1px solid var(--color-nav-divider); display: flex; gap: 8px; padding: 0.8em 1.2em; } .theme-control label { color: var(--color-nav-muted); font-size: 0.85em; } .theme-control #theme-select { background: var(--color-nav-field); border-color: var(--color-nav-divider); color: var(--color-nav-fg); flex: 1; }
+  .inline-muted { color: var(--color-fg-muted); } .inline-warning { color: var(--color-warning); } .oos-badge { background: var(--color-accent-surface); border-radius: 3px; color: var(--color-accent); font-weight: 700; padding: 2px 6px; } .oos-badge.stale { background: var(--color-danger-surface); color: var(--color-danger); } .oos-details { font-size: 0.9em; margin: 6px 0 0 1em; } .oos-details dd { margin: 0 0 4px; } .missing-value { color: var(--color-fg-muted); }
+  .visually-hidden { height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; width: 1px; clip: rect(0 0 0 0); white-space: nowrap; }
+  .filter-notice { align-items: center; background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; display: none; font-size: 0.9em; margin: 0.4em 0 0.8em; padding: 8px 12px; } .filter-notice-clear, .filter-notice-view { border: 1px solid var(--color-accent); border-radius: 3px; cursor: pointer; font-size: 0.85em; margin-left: 8px; padding: 2px 8px; } .filter-notice-clear { background: var(--color-surface); color: var(--color-accent); } .filter-notice-view { background: var(--color-accent); color: var(--color-bg); margin-left: 4px; }
+  .env-summary-cards { display: flex; flex-wrap: wrap; gap: 0.6em; margin: 0.6em 0 1em; } .env-card { cursor: pointer; text-align: left; } .env-card.is-selected { border: 2px solid var(--color-accent); } .env-bar-row.interactive, #route-environments tr[data-project] { cursor: pointer; } .env-bar-row { cursor: pointer; }
+  #sidebar-filter { border-bottom: 1px solid var(--color-nav-divider); border-top: 1px solid var(--color-nav-divider); font-size: 0.85em; padding: 0.8em 1.2em; } .sidebar-filter-label, #filter-summary { color: var(--color-nav-muted); font-size: 0.8em; } .sidebar-filter-label { font-size: 0.75em; letter-spacing: 0.06em; margin-bottom: 6px; text-transform: uppercase; } .sidebar-filter-input, .sidebar-filter-select, .sidebar-filter-reset, .gsev-btn { background: var(--color-nav-field); border: 1px solid var(--color-nav-divider); border-radius: 3px; color: var(--color-nav-fg); } .sidebar-filter-input, .sidebar-filter-select { padding: 5px 8px; width: 100%; } .sidebar-filter-input { margin-bottom: 6px; } .sidebar-filter-cluster { display: flex; flex-wrap: wrap; gap: 4px; } .gsev-btn { cursor: pointer; flex: 1; font-size: 0.85em; padding: 3px 8px; } .gsev-btn.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); } .gsev-btn:hover, .sidebar-filter-reset:hover { background: var(--color-nav-field-hover); } .sidebar-filter-select, .sidebar-filter-reset { margin-top: 6px; } .sidebar-filter-reset { cursor: pointer; padding: 4px; width: 100%; } #filter-summary { margin-top: 8px; }
+  #filter-banner { align-items: center; background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; display: none; flex-wrap: wrap; font-size: 0.9em; gap: 8px; margin: 0.6em 0; padding: 8px 12px; } #filter-banner strong, .filter-chip, .filter-chip-clear { color: var(--color-accent); } #filter-chips { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 6px; } .filter-chip { align-items: center; background: var(--color-surface); border: 1px solid var(--color-accent); border-radius: 12px; display: inline-flex; font-size: 0.85em; gap: 6px; padding: 3px 8px; } .filter-chip-clear { background: transparent; border: 0; cursor: pointer; font-size: 1.1em; font-weight: 700; line-height: 1; padding: 0 2px; } #filter-banner-clear { background: var(--color-surface); border: 1px solid var(--color-accent); border-radius: 3px; color: var(--color-accent); cursor: pointer; font-weight: 600; margin-left: auto; padding: 4px 10px; }
+  @media (max-width: 900px) { #app { grid-template-columns: 1fr; } #sidebar { height: auto; position: relative; } #main { padding: 1em; } .two-col { grid-template-columns: 1fr; } .route-header { align-items: flex-start; flex-direction: column; gap: 0.5em; } .route-header .meta { text-align: left; } }
 
-  /* ===== Layout: sidebar + content ===== */
-  #app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
-  #sidebar {
-    background: linear-gradient(180deg, #0a1a3a 0%, #003a70 100%);
-    color: #fff;
-    padding: 0;
-    overflow-y: auto;
-    position: sticky; top: 0; height: 100vh;
-  }
-  .sidebar-brand {
-    padding: 1.4em 1.2em; border-bottom: 1px solid rgba(255,255,255,0.1);
-  }
-  .sidebar-brand h1 { color: #fff; font-size: 1.3em; margin: 0; line-height: 1.1; }
-  .sidebar-brand .subtitle { font-size: 0.78em; color: #a8c0e0; margin-top: 4px; }
-  nav.sidebar-nav { padding: 0.6em 0; }
-  nav.sidebar-nav a {
-    display: flex; align-items: center; gap: 10px;
-    padding: 0.7em 1.2em; color: #d0d6e0; font-weight: 500;
-    border-left: 3px solid transparent; transition: all 0.12s;
-  }
-  nav.sidebar-nav a:hover { background: rgba(255,255,255,0.05); color: #fff; text-decoration: none; }
-  nav.sidebar-nav a.active {
-    background: rgba(255,255,255,0.10); color: #fff;
-    border-left-color: #4f9eff;
-  }
-  nav.sidebar-nav a .icon { font-size: 1.05em; width: 18px; display: inline-block; text-align: center; }
-  nav.sidebar-nav a .badge {
-    margin-left: auto; background: #c00; color: #fff;
-    border-radius: 10px; padding: 1px 7px; font-size: 0.7em; font-weight: 700;
-  }
-  nav.sidebar-nav a .badge.ok { background: #2a8c4a; }
-  nav.sidebar-nav a .badge.warn { background: #c80; }
-  .sidebar-footer {
-    padding: 1em 1.2em; border-top: 1px solid rgba(255,255,255,0.1);
-    font-size: 0.78em; color: #a8c0e0; line-height: 1.4;
-  }
-
-  /* ===== Main content ===== */
-  #main { padding: 1.4em 2em 4em; overflow-x: auto; }
-  .route { display: none; }
-  .route.active { display: block; }
-  .route-header { display: flex; justify-content: space-between; align-items: flex-end;
-                  margin-bottom: 1.4em; padding-bottom: 1em;
-                  border-bottom: 1px solid #d0d6e0; }
-  .route-header h1 { margin: 0; }
-  .route-header .meta { font-size: 0.85em; color: #5a6878; text-align: right; line-height: 1.5; }
-
-  /* ===== KPI cards ===== */
-  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-              gap: 1em; margin: 1em 0 1.4em; }
-  .kpi {
-    background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-    padding: 1.2em 1.4em; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-    position: relative; overflow: hidden;
-  }
-  .kpi::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0;
-                 width: 4px; background: #003a70; }
-  .kpi.kpi-high::before { background: #c00; }
-  .kpi.kpi-medium::before { background: #c80; }
-  .kpi.kpi-low::before { background: #888; }
-  .kpi.kpi-ok::before { background: #2a8c4a; }
-  .kpi-label { font-size: 0.78em; color: #5a6878; text-transform: uppercase;
-                letter-spacing: 0.06em; margin-bottom: 6px; }
-  .kpi-value { font-size: 2.2em; font-weight: 700; line-height: 1; color: #0a1a3a; }
-  .kpi-sub { font-size: 0.85em; color: #5a6878; margin-top: 6px; }
-
-  /* ===== Severity donut ===== */
-  .donut-wrap { display: flex; gap: 1.4em; align-items: center; margin: 1em 0; }
-  .donut-legend { display: flex; flex-direction: column; gap: 0.5em; }
-  .donut-legend-row { display: flex; align-items: center; gap: 0.6em; font-size: 0.9em; }
-  .donut-legend-swatch { width: 14px; height: 14px; border-radius: 3px; }
-
-  /* ===== Env health bars ===== */
-  .env-bar-row { display: flex; align-items: center; gap: 0.8em; margin: 0.4em 0;
-                 padding: 0.4em 0.6em; background: #fff; border-radius: 4px;
-                 border: 1px solid #e5e8ef; }
-  .env-bar-name { width: 260px; font-weight: 600; font-size: 0.92em; }
-  .env-bar-track { flex: 1; height: 22px; background: #eef2f8; border-radius: 3px;
-                   overflow: hidden; display: flex; }
-  .env-bar-segment { height: 100%; transition: width 0.3s; }
-  .env-bar-segment.high { background: #c00; }
-  .env-bar-segment.medium { background: #c80; }
-  .env-bar-segment.low { background: #888; }
-  .env-bar-count { width: 80px; text-align: right; font-weight: 600; font-size: 0.9em; }
-
-  /* ===== Top-N lists ===== */
-  .top-list { background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-              padding: 0.8em 1em; margin: 0.6em 0; }
-  .top-list h3 { margin: 0 0 0.6em; font-size: 1em; }
-  .top-list-row { display: flex; justify-content: space-between; padding: 0.3em 0;
-                  border-bottom: 1px solid #f0f2f5; font-size: 0.9em; }
-  .top-list-row:last-child { border-bottom: 0; }
-  .top-list-row .count-pill { background: #eef2f8; padding: 1px 8px;
-                              border-radius: 10px; font-weight: 600; }
-  .top-list-row .count-pill.high { background: #fde; color: #c00; }
-  .top-list-row .count-pill.medium { background: #ffd; color: #a60; }
-
-  /* ===== Two-column layout ===== */
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4em; margin: 1em 0; }
-  .panel { background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-           padding: 1em 1.2em; }
-  .panel h3 { margin-top: 0; }
-
-  /* ===== Findings ===== */
-  .finding { margin: 0.5em 0; padding: 0.8em 1em; background: #fafafa;
-             border-left: 4px solid #888; border-radius: 0 4px 4px 0; }
-  .finding.HIGH { border-left-color: #c00; background: #fff8f8; }
-  .finding.CRITICAL { border-left-color: #c00; background: #fee; }
-  .finding.MEDIUM { border-left-color: #c80; background: #fffaf0; }
-  .finding.LOW { border-left-color: #888; }
-  .suppressed { opacity: 0.5; text-decoration: line-through; }
-  .req-coverage { font-size: 0.9em; color: #555; }
-
-  .finding-row { margin: 0; padding: 0; }
-  .finding-body { margin: 0.5em 0; padding: 0.8em 1em; background: #fafafa;
-                  border-left: 4px solid #888; border-radius: 0 4px 4px 0; }
-  .finding-body.HIGH { border-left-color: #c00; background: #fff8f8; }
-  .finding-body.CRITICAL { border-left-color: #c00; background: #fee; }
-  .finding-body.MEDIUM { border-left-color: #c80; background: #fffaf0; }
-  .finding-body.LOW { border-left-color: #888; }
-
-  /* ===== Filter UI ===== */
-  #filter-ui { background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-               padding: 12px; margin: 1em 0;
-               display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-               box-shadow: 0 1px 3px rgba(0,0,0,0.04); position: sticky; top: 0; z-index: 10; }
-  #filter-ui input[type="search"] { width: 240px; padding: 6px 10px;
-                                     border: 1px solid #d0d6e0; border-radius: 4px; }
-  #filter-ui button { padding: 6px 12px; border: 1px solid #d0d6e0;
-                      background: #fff; cursor: pointer; border-radius: 4px;
-                      font-weight: 500; transition: all 0.12s; }
-  #filter-ui button:hover { background: #f5f6fa; }
-  #filter-ui button.active { background: #003a70; color: #fff; border-color: #003a70; }
-  #filter-ui select { padding: 6px 10px; border: 1px solid #d0d6e0; border-radius: 4px; }
-  #finding-count { margin-left: auto; font-weight: 700; color: #003a70; font-size: 0.95em; }
-
-  /* ===== Severity badges ===== */
-  .count-high { color: #c00; font-weight: 700; }
-  .count-medium { color: #a60; font-weight: 600; }
-  .count-low { color: #888; }
-  .badge-row { display: inline-block; padding: 2px 8px; border-radius: 12px;
-               font-size: 0.78em; font-weight: 600; }
-  .badge-row.NON-COMPLIANT { background: #fde; color: #c00; }
-  .badge-row.NOT-SCANNED { background: #eee; color: #555; }
-  .badge-row.COMPLIANT { background: #dfd; color: #2a8c4a; }
-  .badge-row.STALE { background: #fbb; color: #800; }
-  .badge-row.OUT-OF-SCOPE { background: #cdf; color: #006; }
-  .badge-row.NO-MATCHING-RESOURCES { background: #ffe; color: #a60; }
-
-  /* ===== Heatmap (PCI coverage) ===== */
-  .heatmap { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-             gap: 6px; margin: 1em 0; }
-  .heatmap-cell { background: #fff; border: 1px solid #d0d6e0; border-radius: 4px;
-                  padding: 8px 10px; text-align: center; font-size: 0.85em;
-                  cursor: pointer; transition: transform 0.1s, box-shadow 0.1s, border-color 0.1s; }
-  .heatmap-cell:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.08); border-color: #4f9eff; }
-  .heatmap-cell:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.08); }
-  .heatmap-cell .req-id { font-weight: 700; color: #003a70; }
-  .heatmap-cell .req-count { font-size: 0.75em; color: #5a6878; margin-top: 4px; }
-  .heatmap-cell.kpi-high { background: #fde; border-color: #c00; }
-  .heatmap-cell.kpi-high .req-id { color: #c00; }
-  .heatmap-cell.kpi-ok { background: #dfd; border-color: #2a8c4a; }
-  .heatmap-cell.kpi-ok .req-id { color: #2a8c4a; }
-  .heatmap-cell.kpi-medium { background: #ffd; border-color: #c80; }
-  .heatmap-cell.kpi-warn { background: #ffe; border-color: #c80; }
-  .heatmap-cell.filtered { border-color: #4f9eff; box-shadow: 0 0 0 3px #4f9eff, 0 4px 12px rgba(79,158,255,0.3); transform: translateY(-2px); background: #eaf3ff; }
-  .heatmap-cell.filtered .req-id { color: #0050b3; }
-  .heatmap-cell.dimmed { opacity: 0.25; }
-  .heatmap-cell.dimmed:hover { opacity: 0.6; transform: translateY(-2px); }
-
-  /* ===== Remediation block ===== */
-  .remediation { background: #f0f7ff; border: 1px solid #b8d4ff; border-radius: 4px;
-                 padding: 8px 12px; margin: 8px 0; }
-  .remediation h4 { margin: 0 0 6px 0; color: #003a70; font-size: 0.95em; }
-  .remediation-hcl { background: #0a1a3a; color: #d0e8ff; padding: 12px;
-                     border-radius: 4px; overflow-x: auto; font-size: 0.85em;
-                     line-height: 1.5; white-space: pre; }
-  .chain-of-custody { font-size: 0.85em; color: #5a6878; margin: 4px 0;
-                      padding: 4px 8px; background: #eef2f8;
-                      border-left: 3px solid #4f9eff; border-radius: 0 3px 3px 0; }
-  .coc-true { color: #2a8c4a; font-weight: 600; }
-  .coc-partial { color: #c80; font-weight: 600; }
-
-  /* ===== Banner ===== */
-  .banner-error { background: #c00; color: #fff; padding: 1em 1.4em; margin: 0 0 1em;
-                  border-left: 6px solid #800; font-weight: 600; border-radius: 4px; }
-  .banner-info { background: #eef2f8; color: #003a70; padding: 0.8em 1.2em; margin: 0 0 1em;
-                  border-left: 4px solid #4f9eff; border-radius: 4px; }
-
-  /* ===== Sparkline / activity pulse ===== */
-  .pulse-bar { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-               margin-right: 4px; vertical-align: middle; }
-  .pulse-bar.hot { background: #c00; box-shadow: 0 0 8px #c00; }
-  .pulse-bar.warm { background: #c80; }
-  .pulse-bar.cool { background: #2a8c4a; }
-
-  /* ===== Responsive ===== */
-  @media (max-width: 900px) {
-    #app { grid-template-columns: 1fr; }
-    #sidebar { position: relative; height: auto; }
-    #main { padding: 1em; }
-    .two-col { grid-template-columns: 1fr; }
-  }
 """
 
     # Compute per-environment aggregate stats for the dashboard route.
@@ -2293,10 +2195,27 @@ def write_html_report(
     # views without rewriting the renderer.
     generated_at = datetime.now(timezone.utc).isoformat()
     run_dir_disp = html.escape(str(out.parent))
+    theme_bootstrap = """<script>
+(function () {
+  var key = 'pacioli.report.theme';
+  var valid = { dark: true, light: true, system: true };
+  var theme = 'dark';
+  try {
+    var stored = localStorage.getItem(key);
+    if (stored && valid[stored]) theme = stored;
+  } catch (error) {
+    theme = 'dark';
+  }
+  document.documentElement.dataset.theme = theme;
+}());
+</script>"""
     body = f"""<!doctype html>
-<html lang="en"><head>
+<html lang="en" data-theme="dark"><head>
 <meta charset="utf-8">
+<meta name="color-scheme" content="dark light">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pacioli {framework_full} Compliance Report</title>
+{theme_bootstrap}
 <style>
 {CSS_STYLE}</style>
 </head>
@@ -2307,28 +2226,29 @@ def write_html_report(
     <h1>Pacioli</h1>
     <div class="subtitle">{framework_full} Compliance Report</div>
   </div>
-  <nav class="sidebar-nav">
-    <a href="#dashboard" data-route="dashboard" class="active">
-      <span class="icon">▣</span>Dashboard</a>
-    <a href="#findings" data-route="findings">
-      <span class="icon">≡</span>Findings
-      <span class="badge" id="badge-findings">{total_findings}</span></a>
-    <a href="#environments" data-route="environments">
-      <span class="icon">▦</span>Environments
-      <span class="badge" id="badge-envs">{len(env_results)}</span></a>
-    <a href="#coverage" data-route="coverage">
-      <span class="icon">⬚</span>PCI Coverage
-      <span class="badge {'warn' if pending_gaps else 'ok'}" id="badge-gaps">{pending_gaps}</span></a>
-    <a href="#remediation" data-route="remediation">
-      <span class="icon">⚙</span>Remediation</a>
-    <a href="#oos" data-route="oos">
-      <span class="icon">⌧</span>Out-of-Scope
-      <span class="badge {'warn' if stale_oos else ''}">{len(out_of_scope)}</span></a>
-    <a href="#drift" data-route="drift">
-      <span class="icon">⇄</span>Drift
-      <span class="badge {'warn' if drift_findings else 'ok'}">{len(drift_findings)}</span></a>
-  </nav>
-  <div class="sidebar-footer">
+   <nav class="sidebar-nav" aria-label="Report sections">
+    <a href="#dashboard" data-route="dashboard" class="active">Dashboard</a>
+    <a href="#findings" data-route="findings">Findings
+       <span class="badge" id="badge-findings">{total_findings}</span></a>
+    <a href="#environments" data-route="environments">Environments
+       <span class="badge" id="badge-envs">{len(env_results)}</span></a>
+    <a href="#coverage" data-route="coverage">PCI Coverage
+       <span class="badge {'warn' if pending_gaps else 'ok'}" id="badge-gaps">{pending_gaps}</span></a>
+    <a href="#remediation" data-route="remediation">Remediation</a>
+    <a href="#oos" data-route="oos">Out-of-Scope
+       <span class="badge {'warn' if stale_oos else ''}">{len(out_of_scope)}</span></a>
+    <a href="#drift" data-route="drift">Drift
+       <span class="badge {'warn' if drift_findings else 'ok'}">{len(drift_findings)}</span></a>
+   </nav>
+   <div class="theme-control">
+     <label for="theme-select">Theme</label>
+     <select id="theme-select" name="theme">
+       <option value="dark">Dark</option>
+       <option value="light">Light</option>
+       <option value="system">System</option>
+     </select>
+   </div>
+   <div class="sidebar-footer">
     Generated {generated_at}<br>
     <code>{run_dir_disp}</code>
   </div>
@@ -2365,23 +2285,23 @@ def write_html_report(
       <h3>Severity Distribution</h3>
       <div class="donut-wrap">
         <svg width="160" height="160" viewBox="0 0 160 160" id="severity-donut">
-          <circle cx="80" cy="80" r="60" fill="none" stroke="#eef2f8" stroke-width="24"/>
+          <circle cx="80" cy="80" r="60" fill="none" stroke="var(--color-surface-subtle)" stroke-width="24"/>
         </svg>
         <div class="donut-legend">
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#c00"></span>
+            <span class="donut-legend-swatch swatch-high"></span>
             <strong>{high_critical}</strong> High / Critical
           </div>
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#c80"></span>
+            <span class="donut-legend-swatch swatch-medium"></span>
             <strong>{medium}</strong> Medium
           </div>
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#888"></span>
+            <span class="donut-legend-swatch swatch-low"></span>
             <strong>{low}</strong> Low
           </div>
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#2a8c4a"></span>
+            <span class="donut-legend-swatch swatch-ok"></span>
             <strong>{suppressed_count}</strong> Suppressed
           </div>
         </div>
@@ -2399,15 +2319,15 @@ def write_html_report(
             w_med = e["medium"] / max_total * 100
             w_low = e["low"] / max_total * 100
             status_class = "kpi-high" if e["high"] > 0 else ("kpi-medium" if e["medium"] > 0 else "kpi-ok")
-            body += f"""        <div class="env-bar-row" data-env-bar="{html.escape(e['label'])}" style="cursor:pointer;">
-           <div class="env-bar-name">{html.escape(e['label'])} <span class="badge-row {status_class.upper().replace('KPI-','')}">{e['scan_status']}</span></div>
-          <div class="env-bar-track">
-            <div class="env-bar-segment high" style="width:{w_high:.1f}%" title="HIGH: {e['high']}"></div>
-            <div class="env-bar-segment medium" style="width:{w_med:.1f}%" title="MEDIUM: {e['medium']}"></div>
-            <div class="env-bar-segment low" style="width:{w_low:.1f}%" title="LOW: {e['low']}"></div>
-          </div>
-          <div class="env-bar-count">{e['total']}</div>
-        </div>
+        body += f"""        <div class="env-bar-row" data-env-bar="{html.escape(e['label'])}">
+          <div class="env-bar-name">{html.escape(e['label'])} <span class="badge-row {status_class.upper().replace('KPI-','')}">{e['scan_status']}</span></div>
+         <div class="env-bar-track">
+           <div class="env-bar-segment high" style="width:{w_high:.1f}%" title="HIGH: {e['high']}"></div>
+           <div class="env-bar-segment medium" style="width:{w_med:.1f}%" title="MEDIUM: {e['medium']}"></div>
+           <div class="env-bar-segment low" style="width:{w_low:.1f}%" title="LOW: {e['low']}"></div>
+         </div>
+         <div class="env-bar-count">{e['total']}</div>
+       </div>
 """
     else:
         body += "        <em>No environments scanned.</em>\n"
@@ -2515,11 +2435,11 @@ def write_html_report(
     else:
         body += "    <div class=\"meta\">&nbsp;</div>\n"
     body += "  </div>\n"
-    body += f"  <h3>Coverage Heatmap <small style=\"font-weight:400;color:#5a6878;font-size:0.7em;\">— click any cell to filter to that {html.escape(framework_name)} req</small></h3>\n"
-    body += "  <div id=\"heatmap-active-filter\" style=\"display:none;margin:0.4em 0 0.8em;padding:8px 12px;background:#eaf3ff;border:1px solid #4f9eff;border-radius:4px;font-size:0.9em;\">\n"
+    body += f"  <h3>Coverage Heatmap <small class=\"inline-muted\">— click any cell to filter to that {html.escape(framework_name)} req</small></h3>\n"
+    body += "  <div id=\"heatmap-active-filter\" class=\"filter-notice\">\n"
     body += "    <strong>Filtered:</strong> <span id=\"heatmap-active-req\"></span>\n"
-    body += "    <button id=\"heatmap-clear-btn\" style=\"margin-left:8px;padding:2px 8px;background:#fff;border:1px solid #4f9eff;color:#0050b3;border-radius:3px;cursor:pointer;font-size:0.85em;\">Clear</button>\n"
-    body += "    <button id=\"heatmap-view-findings\" style=\"margin-left:4px;padding:2px 8px;background:#4f9eff;border:1px solid #4f9eff;color:#fff;border-radius:3px;cursor:pointer;font-size:0.85em;\">View findings →</button>\n"
+    body += "    <button id=\"heatmap-clear-btn\" class=\"filter-notice-clear\">Clear</button>\n"
+    body += "    <button id=\"heatmap-view-findings\" class=\"filter-notice-view\">View findings →</button>\n"
     body += "  </div>\n"
     body += "  <div class=\"heatmap\">\n"
     # Build heatmap cells -- one per in-scope req
@@ -2603,7 +2523,7 @@ def write_html_report(
                 if missing_ids and missing_count:
                     missing_inline = " ".join(html.escape(x) for x in missing_ids)
                     tip = (
-                        ' <span style="color:#a80" '
+                        ' <span class="inline-warning" '
                         f'title="missing: {missing_inline}">'
                         f"({missing_count}/{expected_count} mapped checks absent)"
                         "</span>"
@@ -2622,14 +2542,14 @@ def write_html_report(
                             break
                     if note_text:
                         tip = (
-                            ' <span style="color:#555" '
+                            ' <span class="inline-muted" '
                             f'title="{html.escape(note_text)}">'
                             f"[note: {html.escape(note_text)}]"
                             "</span>"
                         )
                     else:
                         tip = (
-                            ' <span style="color:#888" '
+                            ' <span class="inline-muted" '
                             'title="no working Checkov coverage; '
                             'see pci_mapping.yaml note">'
                             "(no working Checkov coverage)"
@@ -2637,7 +2557,7 @@ def write_html_report(
                         )
                 elif missing_count == 0 and expected_count > 0:
                     tip = (
-                        ' <span style="color:#888" '
+                        ' <span class="inline-muted" '
                         "title=\"every mapped check fired at least once - "
                         'all findings compliant (accepted)">'
                         "(all mapped checks ran)</span>"
@@ -2705,21 +2625,17 @@ def write_html_report(
         # must NOT trust an expired exclusion.
         if stale:
             badge = (
-                f'<span style="background:#fbb; color:#800; padding:2px 6px; '
-                f'border-radius:3px; font-weight:bold;">OUT OF SCOPE -- '
+                f'<span class="oos-badge stale">OUT OF SCOPE -- '
                 f'STALE (expired {-days_to_expiry}d ago)</span>'
             )
         else:
-            badge = (
-                '<span style="background:#cdf; color:#006; padding:2px 6px; '
-                'border-radius:3px; font-weight:bold;">OUT OF SCOPE</span>'
-            )
+            badge = '<span class="oos-badge">OUT OF SCOPE</span>'
 
         # Build the audit-trail details: every field below MUST be
         # present for the exclusion to be defensible. They are rendered
         # as a definition list so an auditor can read all of them in
         # one glance.
-        details = "<dl style='margin:6px 0 0 1em; font-size:0.9em;'>"
+        details = "<dl class='oos-details'>"
         for label, value in [
             ("Title", title),
             ("Rationale", rationale),
@@ -2739,7 +2655,7 @@ def write_html_report(
                 display = f'<a href="{html.escape(value)}">{html.escape(value)}</a>'
             details += (
                 f"<dt><strong>{label}:</strong></dt>"
-                f"<dd style='margin:0 0 4px 0;'>{display or '<em style=\"color:#999\">missing</em>'}</dd>"
+                f"<dd>{display or '<em class=\"missing-value\">missing</em>'}</dd>"
             )
         details += "</dl>"
 
@@ -2778,16 +2694,18 @@ def write_html_report(
     # Per-environment drill-down: view switcher that lets the operator
     # narrow the findings list to a single project/env without paging.
     # Click an env card to filter; "ALL" restores the full view.
-    body += '  <div id="env-summary-cards" style="display:flex;flex-wrap:wrap;gap:0.6em;margin:0.6em 0 1em;"></div>\n'
+    body += '  <div id="env-summary-cards" class="env-summary-cards"></div>\n'
     body += '  <script>window.__envStats = ' + json.dumps(env_stats) + ';</script>\n'
     body += (
         '<div id="filter-ui">\n'
+        '  <label class="visually-hidden" for="finding-search">Search findings</label>\n'
         '  <input type="search" id="finding-search" '
         'placeholder="Search check_id, resource, file, message…">\n'
-        '  <button data-severity-filter="ALL" class="active">ALL</button>\n'
-        '  <button data-severity-filter="HIGH">HIGH</button>\n'
-        '  <button data-severity-filter="MEDIUM">MEDIUM</button>\n'
-        '  <button data-severity-filter="LOW">LOW</button>\n'
+        '  <button type="button" data-severity-filter="ALL" class="active">ALL</button>\n'
+        '  <button type="button" data-severity-filter="HIGH">HIGH</button>\n'
+        '  <button type="button" data-severity-filter="MEDIUM">MEDIUM</button>\n'
+        '  <button type="button" data-severity-filter="LOW">LOW</button>\n'
+        f'  <label class="visually-hidden" for="{REQUIREMENT_FILTER_ID}">Filter findings by requirement</label>\n'
         f'  <select id="{REQUIREMENT_FILTER_ID}">\n'
         f'    <option value="">All {html.escape(framework_name)} reqs</option>\n'
         f'  </select>\n'
@@ -2858,7 +2776,7 @@ def write_html_report(
             # message + file:line)" so the row never prints a blank
             # <code> again.
             resource_disp = html.escape(f.resource) if f.resource else (
-                '<em style="color:#a80">(resource address unresolved -- see message + file:line)</em>'
+                '<em class="inline-warning">(resource address unresolved -- see message + file:line)</em>'
             )
             body += f"<code>{resource_disp}</code><br>"
             file_loc = f.file_path or ""
@@ -3027,16 +2945,16 @@ def write_html_report(
     if (!svg) return;
     const total = """ + str(total_findings) + """;
     const slices = [
-      { v: """ + str(high_critical) + """, color: '#c00', label: 'HIGH' },
-      { v: """ + str(medium) + """, color: '#c80', label: 'MEDIUM' },
-      { v: """ + str(low) + """, color: '#888', label: 'LOW' },
-      { v: """ + str(suppressed_count) + """, color: '#2a8c4a', label: 'SUPPRESSED' },
+      { v: """ + str(high_critical) + """, color: 'var(--color-danger)', label: 'HIGH' },
+      { v: """ + str(medium) + """, color: 'var(--color-warning)', label: 'MEDIUM' },
+      { v: """ + str(low) + """, color: 'var(--color-neutral)', label: 'LOW' },
+      { v: """ + str(suppressed_count) + """, color: 'var(--color-success)', label: 'SUPPRESSED' },
     ];
     if (total === 0) {
       const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       t.setAttribute('x', '80'); t.setAttribute('y', '85');
       t.setAttribute('text-anchor', 'middle');
-      t.setAttribute('font-size', '14'); t.setAttribute('fill', '#5a6878');
+      t.setAttribute('font-size', '14'); t.setAttribute('fill', 'var(--color-fg-muted)');
       t.textContent = 'No data';
       svg.appendChild(t);
       return;
@@ -3064,13 +2982,13 @@ def write_html_report(
     t.setAttribute('x', '80'); t.setAttribute('y', '78');
     t.setAttribute('text-anchor', 'middle');
     t.setAttribute('font-size', '26'); t.setAttribute('font-weight', '700');
-    t.setAttribute('fill', '#0a1a3a');
+    t.setAttribute('fill', 'var(--color-fg)');
     t.textContent = total;
     svg.appendChild(t);
     const t2 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     t2.setAttribute('x', '80'); t2.setAttribute('y', '95');
     t2.setAttribute('text-anchor', 'middle');
-    t2.setAttribute('font-size', '9'); t2.setAttribute('fill', '#5a6878');
+    t2.setAttribute('font-size', '9'); t2.setAttribute('fill', 'var(--color-fg-muted)');
     t2.textContent = 'findings';
     svg.appendChild(t2);
   })();
@@ -3085,8 +3003,7 @@ def write_html_report(
     const all = document.createElement('button');
     all.type = 'button';
     all.dataset.env = '__all__';
-    all.className = 'kpi';
-    all.style.cssText = 'cursor:pointer;border:2px solid #003a70;text-align:left;';
+    all.className = 'kpi env-card is-selected';
     all.innerHTML = '<div class="kpi-label">All environments</div><div class="kpi-value">' +
       window.__envStats.reduce((a, e) => a + e.total, 0) + '</div>';
     container.appendChild(all);
@@ -3094,8 +3011,7 @@ def write_html_report(
       const card = document.createElement('button');
       card.type = 'button';
       card.dataset.env = e.label;
-      card.className = 'kpi';
-      card.style.cssText = 'cursor:pointer;text-align:left;border:1px solid #d0d6e0;';
+      card.className = 'kpi env-card';
       const klass = e.high > 0 ? 'kpi-high' : (e.medium > 0 ? 'kpi-medium' : 'kpi-ok');
       card.classList.add(klass);
       card.innerHTML = '<div class="kpi-label">' + e.label + '</div>' +
@@ -3132,6 +3048,36 @@ def write_html_report(
   const countBadge = document.getElementById('finding-count');
   const heatmapCells = document.querySelectorAll('.heatmap-cell');
   const envBars = document.querySelectorAll('[data-env-bar]');
+  const themeSelect = document.getElementById('theme-select');
+  const themeStorage = {
+    get: function () {
+      try { return localStorage.getItem('pacioli.report.theme'); } catch (error) { return null; }
+    },
+    set: function (value) {
+      try { localStorage.setItem('pacioli.report.theme', value); } catch (error) { /* storage is optional */ }
+    },
+  };
+  const validThemes = { dark: true, light: true, system: true };
+  const systemTheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function applyTheme(value) {
+    const theme = validThemes[value] ? value : 'dark';
+    document.documentElement.dataset.theme = theme;
+    if (themeSelect) themeSelect.value = theme;
+  }
+  const initialTheme = themeStorage.get();
+  applyTheme(initialTheme && validThemes[initialTheme] ? initialTheme : 'dark');
+  if (themeSelect) themeSelect.addEventListener('change', function () {
+    const selected = themeSelect.value;
+    applyTheme(selected);
+    if (validThemes[selected]) themeStorage.set(selected);
+  });
+  if (systemTheme) {
+    const onSystemThemeChange = function () {
+      if (document.documentElement.dataset.theme === 'system') applyTheme('system');
+    };
+    if (systemTheme.addEventListener) systemTheme.addEventListener('change', onSystemThemeChange);
+    else if (systemTheme.addListener) systemTheme.addListener(onSystemThemeChange);
+  }
 
   // ----- Cookie helpers (persist filter across page reloads) -----
   function cookieGet(k) {
@@ -3145,22 +3091,22 @@ def write_html_report(
   // ---- Filter row in the sidebar (always visible, cross-route) -----
   const sidebarFilter = document.createElement('div');
   sidebarFilter.id = 'sidebar-filter';
-  sidebarFilter.style.cssText = 'padding: 0.8em 1.2em; border-top: 1px solid rgba(255,255,255,0.1); border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.85em;';
   sidebarFilter.innerHTML = `
-    <div style="color:#a8c0e0;font-size:0.75em;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Global Filter</div>
-    <input type="search" id="global-search" placeholder="Search all…"
-      style="width:100%;padding:5px 8px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.08);color:#fff;border-radius:3px;margin-bottom:6px;">
-    <div style="display:flex;gap:4px;flex-wrap:wrap;">
-      <button data-sev="ALL"   class="gsev-btn active">All</button>
-      <button data-sev="HIGH"  class="gsev-btn">High</button>
-      <button data-sev="MEDIUM" class="gsev-btn">Med</button>
-      <button data-sev="LOW"   class="gsev-btn">Low</button>
+    <div class="sidebar-filter-label">Global Filter</div>
+    <label class="visually-hidden" for="global-search">Search all findings</label>
+    <input type="search" id="global-search" class="sidebar-filter-input" placeholder="Search all…">
+    <div class="sidebar-filter-cluster">
+      <button type="button" data-sev="ALL" class="gsev-btn active">All</button>
+      <button type="button" data-sev="HIGH" class="gsev-btn">High</button>
+      <button type="button" data-sev="MEDIUM" class="gsev-btn">Med</button>
+      <button type="button" data-sev="LOW" class="gsev-btn">Low</button>
     </div>
-    <select id="global-req" style="width:100%;padding:4px;margin-top:6px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:3px;">
+    <label class="visually-hidden" for="global-req">Filter by __FRAMEWORK_NAME__ requirement</label>
+    <select id="global-req" class="sidebar-filter-select">
       <option value="">__FRAMEWORK_NAME__ reqs</option>
     </select>
-    <button id="reset-filter" style="width:100%;margin-top:6px;padding:4px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:3px;cursor:pointer;">Reset filter</button>
-    <div id="filter-summary" style="margin-top:8px;color:#a8c0e0;font-size:0.8em;"></div>
+    <button type="button" id="reset-filter" class="sidebar-filter-reset">Reset filter</button>
+    <div id="filter-summary"></div>
   `;
 
   // ---- "FILTERING BY" top banner (visible on every route) ----
@@ -3171,26 +3117,11 @@ def write_html_report(
   // every dimension. The banner is hidden when no filter is active.
   const filterBanner = document.createElement('div');
   filterBanner.id = 'filter-banner';
-  filterBanner.style.cssText = 'display:none;margin:0.6em 0;padding:8px 12px;background:#eaf3ff;border:1px solid #4f9eff;border-radius:4px;font-size:0.9em;align-items:center;gap:8px;flex-wrap:wrap;';
   filterBanner.innerHTML = `
-    <strong style="color:#003a70;">Filtering by:</strong>
-    <span id="filter-chips" style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center;"></span>
-    <button id="filter-banner-clear" style="margin-left:auto;padding:4px 10px;background:#fff;border:1px solid #4f9eff;color:#003a70;border-radius:3px;cursor:pointer;font-weight:600;">Clear all</button>
+    <strong>Filtering by:</strong>
+    <span id="filter-chips"></span>
+    <button type="button" id="filter-banner-clear">Clear all</button>
   `;
-  // Sidebar buttons need similar styling to the in-page filter buttons
-  const style = document.createElement('style');
-  style.textContent = `
-    .gsev-btn { padding: 3px 8px; background: rgba(255,255,255,0.08); color: #d0d6e0;
-                 border: 1px solid rgba(255,255,255,0.2); border-radius: 3px;
-                 cursor: pointer; font-size: 0.85em; flex: 1; }
-    .gsev-btn.active { background: #4f9eff; color: #fff; border-color: #4f9eff; }
-    .gsev-btn:hover { background: rgba(255,255,255,0.15); }
-    .heatmap-cell.dimmed { opacity: 0.25; }
-    .heatmap-cell.dimmed:hover { opacity: 0.6; transform: translateY(-2px); }
-    .heatmap-cell.filtered { box-shadow: 0 0 0 3px #4f9eff; background: #eaf3ff; }
-    .env-bar-row.dimmed { opacity: 0.3; }
-  `;
-  document.head.appendChild(style);
 
   // Find the sidebar-brand div and insert the filter after it
   const sidebarBrand = document.querySelector('.sidebar-brand');
@@ -3250,8 +3181,7 @@ def write_html_report(
 
     // 4. Env summary cards on Findings route: highlight selected env
     document.querySelectorAll('#env-summary-cards button').forEach(btn => {
-      const label = btn.dataset.env;
-      btn.style.border = (label === FILTER.env) ? '2px solid #003a70' : '';
+      btn.classList.toggle('is-selected', btn.dataset.env === FILTER.env);
     });
 
     // 5. Filter chip summary in sidebar
@@ -3340,12 +3270,12 @@ def write_html_report(
     chips.innerHTML = '';
     active.forEach(c => {
       const chip = document.createElement('span');
-      chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:3px 8px;background:#fff;border:1px solid #4f9eff;border-radius:12px;font-size:0.85em;color:#003a70;';
+      chip.className = 'filter-chip';
       chip.innerHTML = '<span>' + c.label + '</span>';
       const x = document.createElement('button');
       x.textContent = '×';
       x.title = 'Clear ' + c.dim + ' filter';
-      x.style.cssText = 'border:none;background:transparent;color:#003a70;font-weight:700;cursor:pointer;padding:0 2px;font-size:1.1em;line-height:1;';
+      x.className = 'filter-chip-clear';
       x.addEventListener('click', () => {
         if (c.dim === 'q') FILTER.q = '';
         else if (c.dim === 'sev') FILTER.sev = 'ALL';
@@ -3386,7 +3316,7 @@ def write_html_report(
     if (search) search.value = '';
     if (reqFilter) reqFilter.value = '';
     sevBtns.forEach(x => x.classList.toggle('active', x.dataset.severityFilter === 'ALL'));
-    document.querySelectorAll('#env-summary-cards button').forEach(b => b.style.border = '');
+    document.querySelectorAll('#env-summary-cards button').forEach(b => b.classList.remove('is-selected'));
     applyAll();
   });
 
@@ -3468,7 +3398,6 @@ def write_html_report(
 
   // ---- Env table rows: click sets env filter ----
   document.querySelectorAll('#route-environments tr[data-project]').forEach(row => {
-    row.style.cursor = 'pointer';
     row.addEventListener('click', () => {
       const label = row.dataset.project + '/' + row.dataset.env;
       FILTER.env = (FILTER.env === label) ? '__all__' : label;
