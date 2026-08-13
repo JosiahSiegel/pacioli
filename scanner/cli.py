@@ -96,6 +96,7 @@ from __future__ import annotations
 import scanner._utf8  # noqa: F401  -- side-effect import
 
 import argparse
+import importlib.metadata
 import json
 import os
 import re
@@ -1596,6 +1597,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "Disable the interactive mapping picker. "
             "Sets the same condition as PACIOLI_NON_INTERACTIVE=1 or CI=1."
         ),
+    )
+
+    # HOTFIX 1.1.2: --version exits 0 and prints the installed wheel
+    # version. The version is read from importlib.metadata so the
+    # printed value is always the actually-installed package, never
+    # a hardcoded constant that could drift from pyproject.toml.
+    # argparse's built-in action='version' handles the exit-0 +
+    # stdout print + argparse-error-on-conflict semantics for us.
+    try:
+        __pacioli_version = importlib.metadata.version("pacioli")
+    except importlib.metadata.PackageNotFoundError:
+        # Editable install without installed metadata (e.g. running
+        # ``python -m scanner.cli`` from a clone without ``pip install -e``).
+        # Fall back to a clear marker rather than crashing.
+        __pacioli_version = "0.0.0+unknown (not installed via pip)"
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"pacioli {__pacioli_version}",
     )
 
     subparsers = parser.add_subparsers(
