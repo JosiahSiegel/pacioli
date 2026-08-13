@@ -449,7 +449,7 @@ env paths.
     for env_dir, out_dir in [(env_a, out_a), (env_b, out_b)]:
         tmp_sarif = out_dir / 'pacioli_ckv'
         tmp_sarif.mkdir()
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, '-m', 'checkov.main',
              '-d', str(env_dir), '--framework', 'terraform',
              '--output', 'sarif', '--output-file-path', str(tmp_sarif),
