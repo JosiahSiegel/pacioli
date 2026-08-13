@@ -31,6 +31,7 @@ pacioli scan [--mode MODE] [--project P] [--env E]
 | `--verbose` | flag | off | Enable INFO-level logging. Same as `PACIOLI_VERBOSE=1`. |
 | `--label` | `<text>` | (derived from scope) | Custom slug for the run-dir name. Sanitized to `[A-Za-z0-9_.-]`. Suffixes the UTC date. |
 | `--no-open` | flag | off | Do not auto-open `report.html` after a successful aggregate. |
+| `--non-interactive` | flag | off | Disable the interactive mapping picker. Same as `PACIOLI_NON_INTERACTIVE=1` or `CI=1`. |
 | `--help` / `-h` | flag | — | Show usage and exit. |
 
 ### Exit codes
@@ -54,6 +55,7 @@ pacioli scan [--mode MODE] [--project P] [--env E]
 | `PACIOLI_REPORTS_CONTAINER` | (empty) | Azure storage container for the `pacioli-reports` archive. **Required** for `pacioli audit`; refused if unset. |
 | `PACIOLI_VERBOSE` | unset | Same as `--verbose`. |
 | `CI` | unset | If set, `--mode report` is auto-promoted to `--mode gate`. |
+| `PACIOLI_NON_INTERACTIVE` | unset | When truthy, suppress the interactive mapping picker. Same as `--non-interactive`. |
 | `PYTHONIOENCODING` | `utf-8` | Forced by `scanner/_utf8.py` to avoid Windows cp1252 crashes. |
 | `PYTHONUTF8` | `1` | Same. |
 | `LC_ALL` / `LANG` | `C.UTF-8` | Same. |
@@ -73,6 +75,22 @@ Auto-open is suppressed when:
 
 To save the report into the scanned repo, use `--output-dir .`. The
 report lands at `./aggregate/report.html` and is auto-opened.
+
+### Interactive mapping picker
+
+When `pacioli scan` is invoked in an interactive shell with no `--mapping`
+and no `PACIOLI_MAPPING` set, and the run is interactive (no `CI=1`,
+no `--non-interactive`, no `PACIOLI_NON_INTERACTIVE=1`, stdin is a TTY),
+the scanner prints a numbered list of installed mapping packs and waits
+for a selection. Each row shows the filename, framework name, and
+framework version parsed from the YAML header (e.g. `1. pci_dss_4.0.1.yaml - PCI DSS 4.0.1`).
+
+Pressing Esc, sending blank input, or selecting a number out of range
+all raise the same `PathResolutionError` resolve_mapping raises — the
+CLI exits with code 2, mirroring the existing "Mapping pack does not
+exist" recovery path. To force a specific mapping without being
+prompted, pass `--mapping <path>` or set `PACIOLI_MAPPING=<path>`.
+See `scanner/mapping_picker.py` for the full contract.
 
 ### Examples
 

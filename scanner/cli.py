@@ -115,6 +115,7 @@ from scanner.frameworks import (  # noqa: E402
     SUPPORTED_FRAMEWORKS,
     is_terraform_family,
 )
+from scanner import mapping_picker  # noqa: E402
 from scanner.orchestrator import OrchestratorError  # noqa: E402
 from scanner.safety import MutatingOperationRefused  # noqa: E402
 
@@ -340,7 +341,10 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Disable the first-run interactive picker (for CI / scripts).",
+        help=(
+            "Disable the interactive mapping picker. "
+            "Sets the same condition as PACIOLI_NON_INTERACTIVE=1 or CI=1."
+        ),
     )
     parser.add_argument(
         "--no-open",
@@ -1013,6 +1017,18 @@ def _handle_scan(args: argparse.Namespace) -> int:
         framework=getattr(args, "framework", None),
     )
 
+    # Interactive mapping picker. Resolves when both --mapping AND
+    # PACIOLI_MAPPING are unset AND the run is interactive. The chosen
+    # pack is set on args.mapping so the orchestrator sees it as if the
+    # user had typed --mapping explicitly (preserves the "explicit never
+    # silently swaps" contract). Cancellation (Esc / blank / Ctrl-C /
+    # non-TTY) raises PathResolutionError which the existing exit-code-2
+    # path handles.
+    if not args.mapping and not os.environ.get("PACIOLI_MAPPING"):
+        if mapping_picker.is_interactive(args):
+            chosen = mapping_picker.pick_mapping_pack(args)
+            args.mapping = str(chosen.path)
+
     from scanner import orchestrator as _orchestrator
 
     argv = _build_orchestrator_argv(args)
@@ -1040,6 +1056,12 @@ def _handle_gate(args: argparse.Namespace) -> int:
         tier=args.tier,
         framework=getattr(args, "framework", None),
     )
+
+    # Interactive mapping picker (same gate as _handle_scan).
+    if not args.mapping and not os.environ.get("PACIOLI_MAPPING"):
+        if mapping_picker.is_interactive(args):
+            chosen = mapping_picker.pick_mapping_pack(args)
+            args.mapping = str(chosen.path)
 
     from scanner import orchestrator as _orchestrator
 
@@ -1540,7 +1562,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Disable the first-run interactive picker (global; honoured by `pacioli scan`).",
+        help=(
+            "Disable the interactive mapping picker. "
+            "Sets the same condition as PACIOLI_NON_INTERACTIVE=1 or CI=1."
+        ),
     )
 
     subparsers = parser.add_subparsers(
