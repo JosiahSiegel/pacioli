@@ -21,6 +21,33 @@ once it reaches 1.0.
 * CLI_REFERENCE entries for --non-interactive and picker ([193c92c](https://github.com/JosiahSiegel/pacioli/commit/193c92c7e14e81e4ae0b1852c61eb4e14ba4c888))
 * README quickstart reword for mapping picker ([c4ad9bc](https://github.com/JosiahSiegel/pacioli/commit/c4ad9bc25769e0c30c944c38e8c0734440b74f40))
 
+## [1.1.1](https://github.com/JosiahSiegel/pacioli/compare/v1.1.0...v1.1.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **mapping_picker:** distinguish "no packs installed" from "user cancelled"
+
+  1.1.0 raised `PathResolutionError("<picker cancelled>")` with a leaked
+  traceback when no mapping packs were installed (e.g. fresh wheel install
+  with no editable mappings). The user was told to pass `--mapping`, but
+  the actual problem was that nothing was installed to point at.
+
+  Fix:
+  * `is_interactive()` now returns `False` when `_discover_packs()` is
+    empty, so the picker is never invoked in the zero-pack case.
+  * `pick_mapping_pack()` raises a distinct `_NO_PACKS_MESSAGE` ("No
+    mapping packs installed. Run 'pacioli init' to install one, or
+    pass --mapping <path>.") when zero packs are found.
+  * `cli.py` now routes both `scan` and `gate` through a shared
+    `_maybe_prompt_for_mapping_pack()` helper that catches every
+    `PathResolutionError` from the picker and converts it to a clean
+    exit-2 with the friendly message on stderr. No more stack traces.
+
+  Coverage: 2 new tests in `scanner/tests/test_mapping_picker.py` pin
+  both the message and the `is_interactive` gate.
+
+
 ## [Unreleased]
 
 
