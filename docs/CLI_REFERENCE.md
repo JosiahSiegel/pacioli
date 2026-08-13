@@ -51,6 +51,7 @@ pacioli scan [--mode MODE] [--project P] [--env E]
 | `--verbose` | flag | off | Enable INFO-level logging. Same as `PACIOLI_VERBOSE=1`. |
 | `--label` | `<text>` | (derived from scope) | Custom slug for the run-dir name. Sanitized to `[A-Za-z0-9_.-]`. Suffixes the UTC date. |
 | `--no-open` | flag | off | Do not auto-open `report.html` after a successful aggregate. |
+| `--init` | flag | off | Auto-create missing `pci_scope.yaml` and `pci_baseline.yaml` without prompting. Works in non-interactive environments (CI). |
 | `--non-interactive` | flag | off | Disable the interactive mapping picker. Same as `PACIOLI_NON_INTERACTIVE=1` or `CI=1`. |
 | `--help` / `-h` | flag | — | Show usage and exit. |
 
@@ -116,6 +117,26 @@ CLI exits with code 2, mirroring the existing "Mapping pack does not
 exist" recovery path. To force a specific mapping without being
 prompted, pass `--mapping <path>` or set `PACIOLI_MAPPING=<path>`.
 See `scanner/mapping_picker.py` for the full contract.
+
+### First-run scope+baseline bootstrap
+
+When `pacioli scan` or `pacioli gate` is run and either `pci_scope.yaml`
+or `pci_baseline.yaml` is missing, the CLI prompts you to create both
+files (interactive shells only). The generated files use auto-discovered
+IaC projects and environments across all Checkov-supported frameworks
+(Terraform, CloudFormation, Kubernetes, Dockerfile, Bicep, Helm, OpenAPI,
+etc.).
+
+Pass `--init` to auto-create the files without prompting (works in CI):
+
+```bash
+pacioli scan --init .
+```
+
+Existing files are never overwritten. The bootstrap is skipped entirely
+when stdin is not a TTY, `--non-interactive` is set,
+`PACIOLI_NON_INTERACTIVE=1` is set, or `CI` is set (unless `--init` is
+also passed).
 
 ### Examples
 
