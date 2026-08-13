@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from scanner.aggregate import EnvResultFull, Finding, write_html_report
 from test_aggregate_html import _build_run_dir, _invoke_aggregate_main
 
 if TYPE_CHECKING:
@@ -44,6 +45,73 @@ def static_report_url(
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.fixture
+def exclusion_report_url(tmp_path: Path) -> Iterator[str]:
+    """Render three stack identities and serve them from loopback."""
+    findings = [
+        Finding(project="payments", env="prod", check_id="CKV_AZURE_44", severity="HIGH", resource="blue", file_path="blue.tf", line=1, message="blue", framework="terraform", requirements=["1.2.1"]),
+        Finding(project="payments", env="prod", check_id="CKV_AZURE_3", severity="MEDIUM", resource="green", file_path="green.tf", line=1, message="green", framework="terraform", requirements=["1.2.1"]),
+        Finding(project="orders", env="dev", check_id="CKV_AZURE_70", severity="LOW", resource="dev", file_path="dev.tf", line=1, message="dev", framework="terraform", requirements=["1.2.1"]),
+    ]
+    environments = [
+        EnvResultFull(project="payments", env="prod", stack_label="blue", scan_status="ok", findings=findings[:1]),
+        EnvResultFull(project="payments", env="prod", stack_label="green", scan_status="ok", findings=findings[1:2]),
+        EnvResultFull(project="orders", env="dev", scan_status="ok", findings=findings[2:]),
+    ]
+    mapping = {"framework_name": "PCI DSS", "framework_version": "4.0.1", "requirements": [{"id": "1.2.1", "title": "Network", "checks": ["CKV_AZURE_44", "CKV_AZURE_3", "CKV_AZURE_70"]}]}
+    output_dir = tmp_path / "aggregate"
+    output_dir.mkdir()
+    write_html_report(output_dir / "report.html", environments, tmp_path / "mapping.yaml", mapping, {}, [], 0)
+    handler = partial(SimpleHTTPRequestHandler, directory=str(output_dir))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/report.html"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.mark.browser
+def test_environment_exclusions_recompute_and_persist(
+    page: Page,
+    exclusion_report_url: str,
+) -> None:
+    """Native checkboxes project the immutable model and survive a reload."""
+    page.goto(exclusion_report_url, wait_until="domcontentloaded")
+    checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
+    assert checkboxes.count() == 3
+
+    checkboxes.nth(0).focus()
+    page.keyboard.press("Space")
+    checkboxes.nth(1).check()
+
+    assert "2 environments excluded; viewing 1 of 3 environments." in page.locator("#environment-exclusion-status").inner_text()
+    assert page.locator("#kpi-total").inner_text() == "1"
+    assert page.locator("#badge-envs").inner_text() == "1"
+    assert page.locator("#environment-table-body tr").count() == 1
+    assert page.locator("#env-health-list .env-bar-row").count() == 1
+    assert page.locator("#top-resources").inner_text().find("dev") >= 0
+    assert page.locator("#top-resources").inner_text().find("blue") == -1
+
+    page.reload(wait_until="domcontentloaded")
+    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 2
+    assert page.locator("#kpi-total").inner_text() == "1"
+
+    page.get_by_role("button", name="Full-report reset").click()
+    assert page.locator("#environment-exclusion-status").inner_text() == "Full scan: viewing all 3 environments."
+    assert page.locator("#kpi-total").inner_text() == "3"
+
+    checkboxes.nth(0).check()
+    checkboxes.nth(1).check()
+    checkboxes.nth(2).check()
+    assert page.locator("#kpi-total").inner_text() == "0"
+    assert page.locator("#env-health-list .empty-view").count() == 1
+    assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
 
 
 @pytest.mark.browser

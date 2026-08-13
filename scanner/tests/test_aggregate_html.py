@@ -849,6 +849,36 @@ class TestHtmlReport:
         assert "textContent" in report
         assert "pacioli-report-model" in report
 
+    def test_html_report_exposes_accessible_environment_exclusions(self, tmp_path: Path) -> None:
+        """Given labeled stacks, the static report exposes native exclusion controls."""
+        findings = [
+            Finding(
+                project="payments", env="prod", check_id="CKV_AZURE_44",
+                severity="HIGH", resource="storage.blue", file_path="blue.tf", line=1,
+                message="blue finding", framework="terraform", requirements=["1.2.1"],
+            ),
+            Finding(
+                project="payments", env="prod", check_id="CKV_AZURE_3",
+                severity="MEDIUM", resource="storage.green", file_path="green.tf", line=1,
+                message="green finding", framework="terraform", requirements=["1.2.1"],
+            ),
+        ]
+        environments = [
+            EnvResultFull(project="payments", env="prod", stack_label="blue", scan_status="ok", findings=findings[:1]),
+            EnvResultFull(project="payments", env="prod", stack_label="green", scan_status="ok", findings=findings[1:]),
+        ]
+        mapping = {"framework_name": "PCI DSS", "framework_version": "4.0.1", "requirements": [{"id": "1.2.1", "title": "Network", "checks": ["CKV_AZURE_44", "CKV_AZURE_3"]}]}
+        report_path = tmp_path / "report.html"
+
+        write_html_report(report_path, environments, tmp_path / "mapping.yaml", mapping, {}, [], 0)
+
+        report = report_path.read_text(encoding="utf-8")
+        assert '<fieldset id="environment-exclusions"' in report
+        assert "<legend>Hide environments</legend>" in report
+        assert "pacioli.report.filters" in report
+        assert "pacioli_req" in report
+        assert "localStorage.setItem" in report
+
     def test_html_report_renders_pci_anchor_in_coverage_route(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

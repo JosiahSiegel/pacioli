@@ -1,0 +1,15 @@
+2177:    CSS_STYLE = """\
+2303:  .env-summary-cards { display: flex; flex-wrap: wrap; gap: 0.6em; margin: 0.6em 0 1em; } .env-card { cursor: pointer; text-align: left; } .env-card.is-selected { border: 2px solid var(--color-accent); } .env-bar-row.interactive, #route-environments tr[data-project] { cursor: pointer; } .env-bar-row { cursor: pointer; }
+2361:{CSS_STYLE}</style>
+2429:        <svg width="160" height="160" viewBox="0 0 160 160" id="severity-donut">
+2846:    body += '  <div id="env-summary-cards" class="env-summary-cards"></div>\n'
+3053:    FILTER_JS = ("""\
+3110:    const svg = document.getElementById('severity-donut');
+3164:  // aware handler (registered further down) attaches to #env-summary-cards
+3167:    const container = document.getElementById('env-summary-cards');
+3304:    try { return JSON.parse(cookieGet('pacioli_req') || '{}'); } catch(e) { return {}; }
+3349:    document.querySelectorAll('#env-summary-cards button').forEach(btn => {
+3363:    cookieSet('pacioli_req', JSON.stringify(FILTER));
+3485:    document.querySelectorAll('#env-summary-cards button').forEach(b => b.classList.remove('is-selected'));
+3556:  document.querySelectorAll('#env-summary-cards button').forEach(btn => {
+3641:    body += FILTER_JS

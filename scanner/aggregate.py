@@ -1945,6 +1945,7 @@ def _build_report_model(
         environment_findings = []
         for finding in result.findings:
             finding_model = {
+                "identity_label": identity["display_label"],
                 "project": finding.project,
                 "env": finding.env,
                 "stack_label": result.stack_label,
@@ -1963,7 +1964,8 @@ def _build_report_model(
             environment_findings.append(finding_model)
             if finding.resource and not finding.suppressed:
                 resource_counts[finding.resource] = resource_counts.get(finding.resource, 0) + 1
-                prior_severity = resource_severity.get(finding.resource, "LOW")
+                resource_severity.setdefault(finding.resource, "LOW")
+                prior_severity = resource_severity[finding.resource]
                 if finding.severity == "CRITICAL" or (
                     finding.severity == "HIGH" and prior_severity != "CRITICAL"
                 ):
@@ -2300,7 +2302,7 @@ def write_html_report(
   .inline-muted { color: var(--color-fg-muted); } .inline-warning { color: var(--color-warning); } .oos-badge { background: var(--color-accent-surface); border-radius: 3px; color: var(--color-accent); font-weight: 700; padding: 2px 6px; } .oos-badge.stale { background: var(--color-danger-surface); color: var(--color-danger); } .oos-details { font-size: 0.9em; margin: 6px 0 0 1em; } .oos-details dd { margin: 0 0 4px; } .missing-value { color: var(--color-fg-muted); }
   .visually-hidden { height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; width: 1px; clip: rect(0 0 0 0); white-space: nowrap; }
   .filter-notice { align-items: center; background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; display: none; font-size: 0.9em; margin: 0.4em 0 0.8em; padding: 8px 12px; } .filter-notice-clear, .filter-notice-view { border: 1px solid var(--color-accent); border-radius: 3px; cursor: pointer; font-size: 0.85em; margin-left: 8px; padding: 2px 8px; } .filter-notice-clear { background: var(--color-surface); color: var(--color-accent); } .filter-notice-view { background: var(--color-accent); color: var(--color-bg); margin-left: 4px; }
-  .env-summary-cards { display: flex; flex-wrap: wrap; gap: 0.6em; margin: 0.6em 0 1em; } .env-card { cursor: pointer; text-align: left; } .env-card.is-selected { border: 2px solid var(--color-accent); } .env-bar-row.interactive, #route-environments tr[data-project] { cursor: pointer; } .env-bar-row { cursor: pointer; }
+  .environment-exclusions { border: 1px solid var(--color-border); border-radius: 4px; margin: 0.8em 0; padding: 0.6em 0.8em; } .environment-exclusions legend { font-weight: 700; padding: 0 0.3em; } .environment-exclusion-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 0.5em; margin-bottom: 0.5em; } .environment-exclusion-options { display: grid; gap: 0.35em; } .environment-exclusion-option { align-items: center; display: flex; gap: 0.45em; } .environment-exclusion-option input { accent-color: var(--color-accent); } .environment-exclusion-status { color: var(--color-fg-muted); font-size: 0.85em; } .empty-view { background: var(--color-surface-subtle); border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg-muted); font-style: italic; padding: 0.8em; }
   #sidebar-filter { border-bottom: 1px solid var(--color-nav-divider); border-top: 1px solid var(--color-nav-divider); font-size: 0.85em; padding: 0.8em 1.2em; } .sidebar-filter-label, #filter-summary { color: var(--color-nav-muted); font-size: 0.8em; } .sidebar-filter-label { font-size: 0.75em; letter-spacing: 0.06em; margin-bottom: 6px; text-transform: uppercase; } .sidebar-filter-input, .sidebar-filter-select, .sidebar-filter-reset, .gsev-btn { background: var(--color-nav-field); border: 1px solid var(--color-nav-divider); border-radius: 3px; color: var(--color-nav-fg); } .sidebar-filter-input, .sidebar-filter-select { padding: 5px 8px; width: 100%; } .sidebar-filter-input { margin-bottom: 6px; } .sidebar-filter-cluster { display: flex; flex-wrap: wrap; gap: 4px; } .gsev-btn { cursor: pointer; flex: 1; font-size: 0.85em; padding: 3px 8px; } .gsev-btn.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); } .gsev-btn:hover, .sidebar-filter-reset:hover { background: var(--color-nav-field-hover); } .sidebar-filter-select, .sidebar-filter-reset { margin-top: 6px; } .sidebar-filter-reset { cursor: pointer; padding: 4px; width: 100%; } #filter-summary { margin-top: 8px; }
   #filter-banner { align-items: center; background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; display: none; flex-wrap: wrap; font-size: 0.9em; gap: 8px; margin: 0.6em 0; padding: 8px 12px; } #filter-banner strong, .filter-chip, .filter-chip-clear { color: var(--color-accent); } #filter-chips { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 6px; } .filter-chip { align-items: center; background: var(--color-surface); border: 1px solid var(--color-accent); border-radius: 12px; display: inline-flex; font-size: 0.85em; gap: 6px; padding: 3px 8px; } .filter-chip-clear { background: transparent; border: 0; cursor: pointer; font-size: 1.1em; font-weight: 700; line-height: 1; padding: 0 2px; } #filter-banner-clear { background: var(--color-surface); border: 1px solid var(--color-accent); border-radius: 3px; color: var(--color-accent); cursor: pointer; font-weight: 600; margin-left: auto; padding: 4px 10px; }
   @media (max-width: 900px) { #app { grid-template-columns: 1fr; } #sidebar { height: auto; position: relative; } #main { padding: 1em; } .two-col { grid-template-columns: 1fr; } .route-header { align-items: flex-start; flex-direction: column; gap: 0.5em; } .route-header .meta { text-align: left; } }
@@ -2364,11 +2366,20 @@ def write_html_report(
 <script type="application/json" id="pacioli-report-model">{report_model_json}</script>
 <div id="app">
 <aside id="sidebar">
-  <div class="sidebar-brand">
-    <h1>Pacioli</h1>
-    <div class="subtitle">{framework_full} Compliance Report</div>
-  </div>
-   <nav class="sidebar-nav" aria-label="Report sections">
+   <div class="sidebar-brand">
+     <h1>Pacioli</h1>
+     <div class="subtitle">{framework_full} Compliance Report</div>
+   </div>
+   <fieldset id="environment-exclusions" class="environment-exclusions">
+     <legend>Hide environments</legend>
+     <div class="environment-exclusion-actions">
+       <button type="button" id="environment-select-visible">Select all visible</button>
+       <button type="button" id="environment-reset">Full-report reset</button>
+     </div>
+     <div id="environment-exclusion-status" class="environment-exclusion-status" role="status" aria-live="polite"></div>
+     <div id="environment-exclusion-options" class="environment-exclusion-options"></div>
+   </fieldset>
+    <nav class="sidebar-nav" aria-label="Report sections">
     <a href="#dashboard" data-route="dashboard" class="active">Dashboard</a>
     <a href="#findings" data-route="findings">Findings
        <span class="badge" id="badge-findings">{total_findings}</span></a>
@@ -2407,20 +2418,20 @@ def write_html_report(
   </div>
   <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Total Findings</div>
-      <div class="kpi-value">{total_findings}</div>
-      <div class="kpi-sub">across {len(env_results)} environment{'' if len(env_results)==1 else 's'}</div></div>
+      <div class="kpi-value" id="kpi-total">{total_findings}</div>
+       <div class="kpi-sub" id="kpi-total-sub">across {len(env_results)} environment{'' if len(env_results)==1 else 's'}</div></div>
     <div class="kpi kpi-high"><div class="kpi-label">High / Critical</div>
-      <div class="kpi-value">{high_critical}</div>
-      <div class="kpi-sub">{pct_high:.1f}% of total</div></div>
+      <div class="kpi-value" id="kpi-high">{high_critical}</div>
+       <div class="kpi-sub" id="kpi-high-sub">{pct_high:.1f}% of total</div></div>
     <div class="kpi kpi-medium"><div class="kpi-label">Medium</div>
-      <div class="kpi-value">{medium}</div>
-      <div class="kpi-sub">{pct_med:.1f}% of total</div></div>
+      <div class="kpi-value" id="kpi-medium">{medium}</div>
+       <div class="kpi-sub" id="kpi-medium-sub">{pct_med:.1f}% of total</div></div>
     <div class="kpi kpi-low"><div class="kpi-label">Low</div>
-      <div class="kpi-value">{low}</div>
-      <div class="kpi-sub">{pct_low:.1f}% of total</div></div>
+      <div class="kpi-value" id="kpi-low">{low}</div>
+       <div class="kpi-sub" id="kpi-low-sub">{pct_low:.1f}% of total</div></div>
     <div class="kpi kpi-ok"><div class="kpi-label">Suppressed</div>
-      <div class="kpi-value">{suppressed_count}</div>
-      <div class="kpi-sub">{pct_sup:.1f}% of total · baseline waivers</div></div>
+      <div class="kpi-value" id="kpi-suppressed">{suppressed_count}</div>
+       <div class="kpi-sub" id="kpi-suppressed-sub">{pct_sup:.1f}% of total · baseline waivers</div></div>
   </div>
   <div class="two-col">
     <div class="panel">
@@ -2429,7 +2440,7 @@ def write_html_report(
         <svg width="160" height="160" viewBox="0 0 160 160" id="severity-donut">
           <circle cx="80" cy="80" r="60" fill="none" stroke="var(--color-surface-subtle)" stroke-width="24"/>
         </svg>
-        <div class="donut-legend">
+        <div class="donut-legend" id="severity-donut-legend">
           <div class="donut-legend-row">
             <span class="donut-legend-swatch swatch-high"></span>
             <strong>{high_critical}</strong> High / Critical
@@ -2451,7 +2462,8 @@ def write_html_report(
     </div>
     <div class="panel">
       <h3>Environment Health</h3>
-      <div class="env-bar-list">
+          <div class="env-bar-list" id="env-health-list">
+
 """
     # Build env health bars
     if env_stats:
@@ -2461,7 +2473,7 @@ def write_html_report(
             w_med = e["medium"] / max_total * 100
             w_low = e["low"] / max_total * 100
             status_class = "kpi-high" if e["high"] > 0 else ("kpi-medium" if e["medium"] > 0 else "kpi-ok")
-        body += f"""        <div class="env-bar-row" data-env-bar="{html.escape(e['label'])}">
+        body += f"""        <div class="env-bar-row" data-env-bar="{html.escape(e['label'])}" data-identity-label="{html.escape(e['label'])}">
           <div class="env-bar-name">{html.escape(e['label'])} <span class="badge-row {status_class.upper().replace('KPI-','')}">{e['scan_status']}</span></div>
          <div class="env-bar-track">
            <div class="env-bar-segment high" style="width:{w_high:.1f}%" title="HIGH: {e['high']}"></div>
@@ -2477,8 +2489,8 @@ def write_html_report(
     </div>
   </div>
   <div class="two-col">
-    <div class="top-list">
-      <h3>Top Vulnerable Resources</h3>
+    <div class="top-list" id="top-resources">
+       <h3>Top Vulnerable Resources</h3>
 """
     for resource_entry in top_resources:
         resource = resource_entry["resource"]
@@ -2487,8 +2499,8 @@ def write_html_report(
         severity_class = "high" if severity in ("HIGH", "CRITICAL") else ("medium" if severity == "MEDIUM" else "")
         body += f'      <div class="top-list-row"><code>{html.escape(resource)}</code><span class="count-pill {severity_class}">{count}</span></div>\n'
     body += """    </div>
-    <div class="top-list">
-      <h3>Top Fired Rules</h3>
+    <div class="top-list" id="top-rules">
+       <h3>Top Fired Rules</h3>
 """
     for rule_entry in top_rules:
         body += f'      <div class="top-list-row"><code>{html.escape(rule_entry["check_id"])}</code><span class="count-pill">{rule_entry["count"]}</span></div>\n'
@@ -2526,8 +2538,8 @@ def write_html_report(
     body += f"<div class=\"meta\">{len(env_stats)} environment{'' if len(env_stats)==1 else 's'} scanned</div></div>\n"
     body += "  <h3>Per-Environment Summary</h3>\n"
     body += "  <table>\n"
-    body += "    <tr><th>Project</th><th>Env</th><th>Status</th><th>Total</th><th>High</th><th>Medium</th><th>Low</th></tr>\n"
-    body += "    " + "\n    ".join(_env_table_rows) + "\n"
+    body += "    <thead><tr><th>Project</th><th>Env</th><th>Status</th><th>Total</th><th>High</th><th>Medium</th><th>Low</th></tr></thead>\n"
+    body += "    <tbody id=\"environment-table-body\">" + "\n    ".join(_env_table_rows) + "</tbody>\n"
     body += "  </table>\n"
     body += "</section>  <!-- /route-environments -->\n"
 
@@ -2590,7 +2602,7 @@ def write_html_report(
     body += "    <button id=\"heatmap-clear-btn\" class=\"filter-notice-clear\">Clear</button>\n"
     body += "    <button id=\"heatmap-view-findings\" class=\"filter-notice-view\">View findings →</button>\n"
     body += "  </div>\n"
-    body += "  <div class=\"heatmap\">\n"
+    body += "  <div class=\"heatmap\" id=\"coverage-heatmap\">\n"
     # Build heatmap cells -- one per in-scope req
     for req in mapping_data.get("requirements", []):
         rid = req["id"]
@@ -2614,8 +2626,9 @@ def write_html_report(
         body += f'    <div class="heatmap-cell {klass}" title="{html.escape(title)}"><div class="req-id">{html.escape(rid)}</div><div class="req-count">{finding_count} finding{"" if finding_count == 1 else "s"} · {label}</div></div>\n'
     body += f"""  </div>
   <h3>{html.escape(framework_name)} Requirement Status</h3>
-  <table>
-    <tr><th>{html.escape(framework_name)} Requirement</th><th>Status</th></tr>
+   <table id="coverage-status-table">
+     <tr><th>{html.escape(framework_name)} Requirement</th><th>Status</th></tr>
+
 """
 
     for req in mapping_data.get("requirements", []):
@@ -2867,9 +2880,9 @@ def write_html_report(
             er.project, er.env, er.stack_label
         )
         if er.scan_status != "ok":
-            body += f"<h3>{html.escape(environment_label)} <em>(scan failed: {html.escape(er.error or 'unknown')})</em></h3>\n"
+            body += f"<h3 class=\"finding-environment-heading\" data-identity-label=\"{html.escape(environment_label, quote=True)}\">{html.escape(environment_label)} <em>(scan failed: {html.escape(er.error or 'unknown')})</em></h3>\n"
             continue
-        body += f"<h3>{html.escape(environment_label)} ({len(er.findings)} findings)</h3>\n"
+        body += f"<h3 class=\"finding-environment-heading\" data-identity-label=\"{html.escape(environment_label, quote=True)}\">{html.escape(environment_label)} ({len(er.findings)} findings)</h3>\n"
         for f in er.findings:
             classes = f"finding-body finding {f.severity}"
             if f.suppressed:
@@ -2909,6 +2922,7 @@ def write_html_report(
                 f'data-project="{html.escape(f.project or "", quote=True)}" '
                 f'data-env="{html.escape(f.env or "", quote=True)}" '
                 f'data-stack-label="{html.escape(er.stack_label or "", quote=True)}" '
+                f'data-identity-label="{html.escape(environment_label, quote=True)}" '
                 f'data-suppressed="{"true" if f.suppressed else "false"}" '
                 f'data-message="{html.escape(msg_attr, quote=True)}"'
             )
@@ -3051,7 +3065,7 @@ def write_html_report(
     # remaining JS keeps its literal braces: ``__FRAMEWORK_NAME__`` and
     # ``__FRAMEWORK_NAME__ reqs``.
     FILTER_JS = ("""\
-<script>
+<template id="retired-single-environment-filter">
 /* ============================================================
    Pacioli SPA router + findings filter + chart (vanilla JS)
    ============================================================ */
@@ -3634,6 +3648,144 @@ def write_html_report(
     a.title = a.textContent.trim().split(/\\s+/).slice(1).join(' ') || a.textContent;
   });
 })();
+</template>
+<script>
+(function () {
+  'use strict';
+  const modelElement = document.getElementById('pacioli-report-model');
+  let model;
+  try { model = JSON.parse(modelElement.textContent); } catch (error) { return; }
+  const storageKey = 'pacioli.report.filters';
+  const validSeverities = new Set(['ALL', 'HIGH', 'MEDIUM', 'LOW']);
+  const identities = model.environments.map(function (environment) { return environment.identity.display_label; });
+  const state = { q: '', sev: 'ALL', req: '', excluded: new Set() };
+  const storage = {
+    get: function () { try { return localStorage.getItem(storageKey); } catch (error) { return null; } },
+    set: function (value) { try { localStorage.setItem(storageKey, value); } catch (error) { return; } },
+    clearLegacy: function () { try { document.cookie = 'pacioli_req=; path=/; max-age=0'; } catch (error) { return; } },
+    legacy: function () { try { const match = document.cookie.match(/(?:^|; )pacioli_req=([^;]*)/); return match ? decodeURIComponent(match[1]) : null; } catch (error) { return null; } },
+  };
+  function parseState(value) {
+    try {
+      const candidate = JSON.parse(value);
+      if (!candidate || typeof candidate !== 'object') return null;
+      return candidate;
+    } catch (error) { return null; }
+  }
+  function restore() {
+    const saved = parseState(storage.get());
+    if (saved) {
+      state.q = typeof saved.q === 'string' ? saved.q : '';
+      state.sev = validSeverities.has(saved.sev) ? saved.sev : 'ALL';
+      state.req = typeof saved.req === 'string' ? saved.req : '';
+      if (Array.isArray(saved.excluded)) saved.excluded = saved.excluded.filter(function (label) { return typeof label === 'string' && identities.includes(label); });
+      state.excluded = new Set(saved.excluded || []);
+      return;
+    }
+    const legacyValue = storage.legacy();
+    const legacy = legacyValue ? parseState(legacyValue) : null;
+    if (legacy) {
+      state.q = typeof legacy.q === 'string' ? legacy.q : '';
+      state.sev = validSeverities.has(legacy.sev) ? legacy.sev : 'ALL';
+      state.req = typeof legacy.req === 'string' ? legacy.req : '';
+      if (typeof legacy.env === 'string' && identities.includes(legacy.env)) state.excluded.add(legacy.env);
+    }
+    storage.clearLegacy();
+  }
+  function persist() { storage.set(JSON.stringify({ q: state.q, sev: state.sev, req: state.req, excluded: Array.from(state.excluded).sort() })); }
+  function make(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
+  function visibleEnvironments() { return model.environments.filter(function (environment) { return !state.excluded.has(environment.identity.display_label); }); }
+  function filteredFindings(environments) {
+    const visible = new Set(environments.map(function (environment) { return environment.identity.display_label; }));
+    return model.findings.filter(function (finding) {
+      const search = [finding.check_id, finding.resource, finding.file_path, finding.message].join(' ').toLowerCase();
+      return visible.has(finding.identity_label) && (!state.q || search.includes(state.q)) && (state.sev === 'ALL' || finding.severity === state.sev) && (!state.req || finding.requirements.includes(state.req));
+    });
+  }
+  function counts(findings) {
+    return findings.reduce(function (total, finding) {
+      total.total += 1;
+      if (finding.suppressed) total.suppressed += 1;
+      else if (finding.severity === 'HIGH' || finding.severity === 'CRITICAL') total.high += 1;
+      else if (finding.severity === 'MEDIUM') total.medium += 1;
+      else total.low += 1;
+      return total;
+    }, { total: 0, high: 0, medium: 0, low: 0, suppressed: 0 });
+  }
+  function replaceChildren(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function renderDonut(summary) {
+    const svg = document.getElementById('severity-donut');
+    const legend = document.getElementById('severity-donut-legend');
+    replaceChildren(svg); replaceChildren(legend);
+    const slices = [['High / Critical', summary.high, 'var(--color-danger)', 'swatch-high'], ['Medium', summary.medium, 'var(--color-warning)', 'swatch-medium'], ['Low', summary.low, 'var(--color-neutral)', 'swatch-low'], ['Suppressed', summary.suppressed, 'var(--color-success)', 'swatch-ok']];
+    const base = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); base.setAttribute('cx', '80'); base.setAttribute('cy', '80'); base.setAttribute('r', '60'); base.setAttribute('fill', 'none'); base.setAttribute('stroke', 'var(--color-surface-subtle)'); base.setAttribute('stroke-width', '24'); svg.appendChild(base);
+    const circumference = 2 * Math.PI * 60; let offset = 0;
+    slices.forEach(function (slice) {
+      const row = make('div', undefined, 'donut-legend-row'); row.appendChild(make('span', '', 'donut-legend-swatch ' + slice[3])); row.appendChild(make('strong', String(slice[1]))); row.appendChild(document.createTextNode(' ' + slice[0])); legend.appendChild(row);
+      if (!summary.total || !slice[1]) return;
+      const length = slice[1] / summary.total * circumference; const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); circle.setAttribute('cx', '80'); circle.setAttribute('cy', '80'); circle.setAttribute('r', '60'); circle.setAttribute('fill', 'none'); circle.setAttribute('stroke', slice[2]); circle.setAttribute('stroke-width', '20'); circle.setAttribute('stroke-dasharray', length + ' ' + (circumference - length)); circle.setAttribute('stroke-dashoffset', String(-offset)); circle.setAttribute('transform', 'rotate(-90 80 80)'); svg.appendChild(circle); offset += length;
+    });
+    const center = document.createElementNS('http://www.w3.org/2000/svg', 'text'); center.setAttribute('x', '80'); center.setAttribute('y', '85'); center.setAttribute('text-anchor', 'middle'); center.setAttribute('font-size', '18'); center.setAttribute('fill', 'var(--color-fg)'); center.textContent = summary.total ? String(summary.total) : 'No data'; svg.appendChild(center);
+  }
+  function renderEnvironmentViews(environments) {
+    const health = document.getElementById('env-health-list'); const table = document.getElementById('environment-table-body'); replaceChildren(health); replaceChildren(table);
+    if (!environments.length) { health.appendChild(make('p', 'No environments are visible. Reset exclusions to restore the full scan.', 'empty-view')); }
+    environments.forEach(function (environment) {
+      const summary = counts(environment.findings); const row = make('div', undefined, 'env-bar-row'); row.dataset.identityLabel = environment.identity.display_label; row.appendChild(make('div', environment.identity.display_label + ' (' + environment.scan_status + ')', 'env-bar-name')); const track = make('div', undefined, 'env-bar-track'); const denominator = summary.total || 1; [['high', summary.high], ['medium', summary.medium], ['low', summary.low]].forEach(function (part) { const segment = make('div', '', 'env-bar-segment ' + part[0]); segment.style.width = part[1] / denominator * 100 + '%'; track.appendChild(segment); }); row.appendChild(track); row.appendChild(make('div', String(summary.total), 'env-bar-count')); health.appendChild(row);
+      const tr = document.createElement('tr'); [environment.identity.project, environment.identity.env + (environment.identity.stack_label ? ' [' + environment.identity.stack_label + ']' : ''), environment.scan_status, String(summary.total), String(summary.high), String(summary.medium), String(summary.low)].forEach(function (value, index) { tr.appendChild(make('td', value, index === 4 ? 'count-high' : index === 5 ? 'count-medium' : index === 6 ? 'count-low' : '')); }); table.appendChild(tr);
+    });
+    document.querySelectorAll('.finding-environment-heading').forEach(function (heading) { heading.hidden = state.excluded.has(heading.dataset.identityLabel); });
+  }
+  function renderFindings(environments) {
+    const visible = new Set(environments.map(function (environment) { return environment.identity.display_label; }));
+    document.querySelectorAll('.finding-row').forEach(function (row) {
+      const haystack = [row.dataset.checkId, row.dataset.resource, row.dataset.filePath, row.dataset.message].join(' ').toLowerCase();
+      row.hidden = !visible.has(row.dataset.identityLabel) || !!state.q && !haystack.includes(state.q) || state.sev !== 'ALL' && row.dataset.severity !== state.sev || !!state.req && row.dataset.req !== state.req;
+    });
+    const allVisible = model.findings.filter(function (finding) { return visible.has(finding.identity_label); });
+    document.getElementById('finding-count').textContent = 'Showing ' + filteredFindings(environments).length + ' of ' + allVisible.length;
+    document.getElementById('badge-findings').textContent = String(allVisible.length);
+    document.getElementById('badge-envs').textContent = String(environments.length);
+  }
+  function renderTopLists(findings) {
+    const sources = [['top-resources', 'Top Vulnerable Resources', 'resource'], ['top-rules', 'Top Fired Rules', 'check_id']];
+    sources.forEach(function (source) { const target = document.getElementById(source[0]); replaceChildren(target); target.appendChild(make('h3', source[1])); const entries = {}; findings.filter(function (finding) { return !finding.suppressed && finding[source[2]]; }).forEach(function (finding) { entries[finding[source[2]]] = (entries[finding[source[2]]] || 0) + 1; }); Object.keys(entries).sort(function (left, right) { return entries[right] - entries[left] || left.localeCompare(right); }).slice(0, 15).forEach(function (key) { const row = make('div', undefined, 'top-list-row'); row.appendChild(make('code', key)); row.appendChild(make('span', String(entries[key]), 'count-pill')); target.appendChild(row); }); if (!Object.keys(entries).length) target.appendChild(make('p', 'No visible findings.', 'inline-muted')); });
+  }
+  function requirementStatus(requirement, findings, environments) {
+    if (!environments.length) return 'NO VISIBLE ENVIRONMENTS';
+    const matching = findings.filter(function (finding) { return finding.requirements.includes(requirement.id); });
+    if (matching.some(function (finding) { return !finding.suppressed; })) return 'NON-COMPLIANT';
+    if (matching.length) return 'COMPLIANT (suppressed)';
+    if (environments.some(function (environment) { return environment.scan_status !== 'ok'; })) return 'NOT SCANNED';
+    return 'NO MATCHING RESOURCES IN SCOPE';
+  }
+  function renderCoverage(environments) {
+    const heatmap = document.getElementById('coverage-heatmap'); const table = document.getElementById('coverage-status-table'); replaceChildren(heatmap); while (table.rows.length > 1) table.deleteRow(1);
+    const findings = environments.reduce(function (all, environment) { return all.concat(environment.findings); }, []);
+    if (!environments.length) heatmap.appendChild(make('p', 'No environments are visible. Reset exclusions to inspect coverage.', 'empty-view'));
+    model.requirements.forEach(function (requirement) { const status = requirementStatus(requirement, findings, environments); const cell = make('button', undefined, 'heatmap-cell'); cell.type = 'button'; cell.dataset.req = requirement.id; cell.appendChild(make('div', requirement.id, 'req-id')); cell.appendChild(make('div', findings.filter(function (finding) { return finding.requirements.includes(requirement.id); }).length + ' findings · ' + status, 'req-count')); cell.classList.toggle('filtered', state.req === requirement.id); cell.addEventListener('click', function () { state.req = state.req === requirement.id ? '' : requirement.id; update(); }); heatmap.appendChild(cell); const row = table.insertRow(); row.appendChild(make('td', requirement.id + (requirement.title ? ' ' + requirement.title : ''))); row.appendChild(make('td', status, status === 'NON-COMPLIANT' ? 'count-high' : '')); });
+    const gaps = document.querySelector('#route-coverage h3 + p.req-coverage'); if (gaps) gaps.hidden = environments.length !== identities.length;
+  }
+  function renderDrift(environments) { const visiblePairs = new Set(environments.map(function (environment) { return environment.identity.project + '\u0000' + environment.identity.env; })); document.querySelectorAll('#route-drift tr[data-project]').forEach(function (row) { row.hidden = !visiblePairs.has(row.dataset.project + '\u0000' + row.dataset.env); }); }
+  function renderControls(environments) {
+    const options = document.getElementById('environment-exclusion-options'); replaceChildren(options); identities.forEach(function (identity) { const label = make('label', undefined, 'environment-exclusion-option'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = state.excluded.has(identity); checkbox.value = identity; checkbox.addEventListener('change', function () { checkbox.checked ? state.excluded.add(identity) : state.excluded.delete(identity); update(); }); label.appendChild(checkbox); label.appendChild(document.createTextNode(identity)); options.appendChild(label); }); const hidden = state.excluded.size; document.getElementById('environment-exclusion-status').textContent = hidden ? hidden + ' environment' + (hidden === 1 ? '' : 's') + ' excluded; viewing ' + environments.length + ' of ' + identities.length + ' environments.' : 'Full scan: viewing all ' + identities.length + ' environments.';
+  }
+  function renderSummary(environments, summary) { const pct = function (value) { return summary.total ? (value / summary.total * 100).toFixed(1) : '0.0'; }; [['total', summary.total, 'across ' + environments.length + ' of ' + identities.length + ' environments'], ['high', summary.high, pct(summary.high) + '% of total'], ['medium', summary.medium, pct(summary.medium) + '% of total'], ['low', summary.low, pct(summary.low) + '% of total'], ['suppressed', summary.suppressed, pct(summary.suppressed) + '% of total · baseline waivers']].forEach(function (entry) { document.getElementById('kpi-' + entry[0]).textContent = String(entry[1]); document.getElementById('kpi-' + entry[0] + '-sub').textContent = entry[2]; }); }
+  function renderBanner() { const banner = document.getElementById('filter-banner'); const chips = document.getElementById('filter-chips'); if (!banner || !chips) return; replaceChildren(chips); const labels = []; if (state.q) labels.push('search: ' + state.q); if (state.sev !== 'ALL') labels.push('severity: ' + state.sev); if (state.req) labels.push(model.framework.name + ': ' + state.req); if (state.excluded.size) labels.push(state.excluded.size + ' environment exclusion' + (state.excluded.size === 1 ? '' : 's')); labels.forEach(function (label) { chips.appendChild(make('span', label, 'filter-chip')); }); banner.style.display = labels.length ? 'flex' : 'none'; }
+  function syncInputs() { document.querySelectorAll('#finding-search, #global-search').forEach(function (input) { input.value = state.q; }); document.querySelectorAll('[data-severity-filter], .gsev-btn').forEach(function (button) { button.classList.toggle('active', (button.dataset.severityFilter || button.dataset.sev) === state.sev); }); document.querySelectorAll('#req-filter, #global-req').forEach(function (select) { select.value = state.req; }); }
+  function update() { const environments = visibleEnvironments(); const findings = environments.reduce(function (all, environment) { return all.concat(environment.findings); }, []); const summary = counts(findings); renderControls(environments); renderSummary(environments, summary); renderDonut(summary); renderEnvironmentViews(environments); renderFindings(environments); renderTopLists(findings); renderCoverage(environments); renderDrift(environments); renderBanner(); syncInputs(); persist(); }
+  function reset() { state.q = ''; state.sev = 'ALL'; state.req = ''; state.excluded.clear(); update(); }
+  function addRequirementOptions() { const values = model.requirements.map(function (requirement) { return requirement.id; }); document.querySelectorAll('#req-filter, #global-req').forEach(function (select) { values.forEach(function (value) { const option = make('option', value); option.value = value; select.appendChild(option); }); }); }
+  restore(); addRequirementOptions();
+  document.getElementById('environment-select-visible').addEventListener('click', function () { identities.forEach(function (identity) { state.excluded.add(identity); }); update(); });
+  document.getElementById('environment-reset').addEventListener('click', reset);
+  document.querySelectorAll('#finding-search').forEach(function (input) { input.addEventListener('input', function () { state.q = input.value.toLowerCase(); update(); }); });
+  document.querySelectorAll('[data-severity-filter]').forEach(function (button) { button.addEventListener('click', function () { state.sev = button.dataset.severityFilter; update(); }); });
+  document.querySelectorAll('#req-filter').forEach(function (select) { select.addEventListener('change', function () { state.req = select.value; update(); }); });
+  document.getElementById('heatmap-clear-btn').addEventListener('click', function () { state.req = ''; update(); });
+  document.getElementById('heatmap-view-findings').addEventListener('click', function () { location.hash = '#findings'; });
+  update();
+}());
 </script>
 """).replace("__FRAMEWORK_NAME__ reqs", framework_name + " reqs").replace(
         "__FRAMEWORK_NAME__: ", framework_name + ": "
