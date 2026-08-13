@@ -416,44 +416,56 @@ Python process and therefore its own cache namespace.
     assert full_argv[2] == 'checkov.main'
 
 
-# --- HOTFIX 1.2.1: cross-scan isolation regression -------------------------
-
-
 def test_two_sequential_subprocess_scans_produce_independent_sarifs(tmp_path):
     """
 REGRESSION: two Checkov subprocess scans against different env_dirs
-must produce SARIFs reflecting each env's contents.
+must produce SARIFs that do NOT contaminate each other.
 
 HOTFIX 1.2.1 root cause: Checkov 3.3.9's in-process cache returned the
 first scan's results for every subsequent scan. The fix runs each
-scan as a subprocess so each gets its own Python process.
+scan as a subprocess so each gets its own Python process and cache.
 
-This test exercises the regression at the subprocess level by
-running two real Checkov subprocesses sequentially against
-distinct envs and asserting the SARIFs reference their respective
-env paths.
+This test exercises the regression at the subprocess level: it runs
+two real Checkov subprocesses sequentially against distinct envs and
+asserts the SARIFs reference each env's own resources (not the
+other env's). The test uses ``aws_s3_bucket`` because it triggers
+multiple CKV rules on a minimal resource, so the SARIF result
+payloads reference the offending resource by name and bucket string.
 """
     env_a = tmp_path / 'env_a'
     env_a.mkdir()
-    (env_a / 'main.tf').write_text('resource "null_resource" "a" {}\n', encoding='utf-8')
+    (env_a / 'main.tf').write_text(
+        'resource "aws_s3_bucket" "alpha" {\n'
+        '  bucket = "test-bucket-alpha"\n'
+        '}\n',
+        encoding='utf-8',
+    )
 
     env_b = tmp_path / 'env_b'
     env_b.mkdir()
-    (env_b / 'main.tf').write_text('resource "null_resource" "b" {}\n', encoding='utf-8')
+    (env_b / 'main.tf').write_text(
+        'resource "aws_s3_bucket" "beta" {\n'
+        '  bucket = "test-bucket-beta"\n'
+        '}\n',
+        encoding='utf-8',
+    )
 
     out_a = tmp_path / 'out_a'
     out_b = tmp_path / 'out_b'
     out_a.mkdir()
     out_b.mkdir()
 
+    python_bin = sys.executable
+
     for env_dir, out_dir in [(env_a, out_a), (env_b, out_b)]:
         tmp_sarif = out_dir / 'pacioli_ckv'
         tmp_sarif.mkdir()
         subprocess.run(
-            [sys.executable, '-m', 'checkov.main',
+            [python_bin, '-m', 'checkov.main',
              '-d', str(env_dir), '--framework', 'terraform',
              '--output', 'sarif', '--output-file-path', str(tmp_sarif),
              '--soft-fail'],
+            cwd=str(env_dir),
             capture_output=True, text=True, timeout=120,
         )
         produced = tmp_sarif / 'results_sarif.sarif'
@@ -468,8 +480,39 @@ env paths.
     data_a = json.loads(sarif_a.read_text(encoding='utf-8'))
     data_b = json.loads(sarif_b.read_text(encoding='utf-8'))
 
-    paths_a = json.dumps(data_a)
-    paths_b = json.dumps(data_b)
-    assert 'env_a' in paths_a or "env_a" in paths_a
-    assert 'env_b' in paths_b or "env_b" in paths_b
+    text_a = json.dumps(data_a)
+    text_b = json.dumps(data_b)
 
+    # Each SARIF must reference its own env's resources. The
+    # aws_s3_bucket "alpha" in env_a and "beta" in env_b trigger
+    # multiple CKV rules; the SARIF for each scan names the
+    # resource in both help.text and results[*].locations and shows
+    # the bucket string in snippet.text.
+    assert 'aws_s3_bucket.alpha' in text_a, (
+        f'env_a SARIF missing aws_s3_bucket.alpha reference: {text_a[:2000]}'
+    )
+    assert 'test-bucket-alpha' in text_a, (
+        f'env_a SARIF missing test-bucket-alpha reference: {text_a[:2000]}'
+    )
+    assert 'aws_s3_bucket.beta' in text_b, (
+        f'env_b SARIF missing aws_s3_bucket.beta reference: {text_b[:2000]}'
+    )
+    assert 'test-bucket-beta' in text_b, (
+        f'env_b SARIF missing test-bucket-beta reference: {text_b[:2000]}'
+    )
+
+    # THE REGRESSION: env A's findings must NOT leak into env B's SARIF.
+    # Before the subprocess fix, Checkov 3.3.9's in-process cache
+    # returned env A's results for the second (env B) call too.
+    assert 'alpha' not in text_b, (
+        f'REGRESSION: alpha resource leaked into env_b SARIF: {text_b[:2000]}'
+    )
+    assert 'test-bucket-alpha' not in text_b, (
+        f'REGRESSION: test-bucket-alpha leaked into env_b SARIF: {text_b[:2000]}'
+    )
+    assert 'beta' not in text_a, (
+        f'REGRESSION: beta resource leaked into env_a SARIF: {text_a[:2000]}'
+    )
+    assert 'test-bucket-beta' not in text_a, (
+        f'REGRESSION: test-bucket-beta leaked into env_a SARIF: {text_a[:2000]}'
+    )
