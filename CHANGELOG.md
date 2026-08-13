@@ -5,6 +5,28 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [1.3.0](https://github.com/JosiahSiegel/pacioli/compare/v1.2.1...v1.3.0) (2026-08-13)
+
+
+### Features
+
+* environment exclusions + dark-first accessible report ([0660f82](https://github.com/JosiahSiegel/pacioli/commit/0660f824b7a879e23a5bc28c7779fbaca5b49280))
+* **report:** add tokenized dark default theme ([5c9ef7b](https://github.com/JosiahSiegel/pacioli/commit/5c9ef7b0ab0c15c35b6c8e62c1a24fef53168f37))
+* **report:** filter environment views dynamically ([c5e5029](https://github.com/JosiahSiegel/pacioli/commit/c5e502970a77d017ff692bffd8bd672164356dfa))
+* **scope:** require structured environment scope records ([6eb131b](https://github.com/JosiahSiegel/pacioli/commit/6eb131be747777913056e6ac5c0e22acf84b0250))
+
+
+### Bug Fixes
+
+* **ci:** install package for browser smoke test ([3c2fe2c](https://github.com/JosiahSiegel/pacioli/commit/3c2fe2c321fed8c495c0de1f818fa5e47230c8d9))
+* **report:** remove legacy template and repair hash routes ([b56587b](https://github.com/JosiahSiegel/pacioli/commit/b56587b1069689e97f6a93da3ef94f4c5ba0eaa6))
+
+
+### Documentation
+
+* **report:** clarify scope and local filters ([5513542](https://github.com/JosiahSiegel/pacioli/commit/5513542d4eaf2c81618c0322e70e2cb723572649))
+* **scope:** document structured environment exclusions ([ab131a6](https://github.com/JosiahSiegel/pacioli/commit/ab131a64e25fc54da47e05d06b72bb715fd875bf))
+
 ## [1.2.1](https://github.com/JosiahSiegel/pacioli/compare/v1.2.0...v1.2.1) (2026-08-13)
 
 
