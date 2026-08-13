@@ -8,7 +8,46 @@ once it reaches 1.0.
 ## [1.2.0](https://github.com/JosiahSiegel/pacioli/compare/v1.1.1...v1.2.0) (2026-08-13)
 
 
-### Features
+## [1.2.1](https://github.com/JosiahSiegel/pacioli/compare/v1.2.0...v1.2.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **checkov_runner:** invoke Checkov as subprocess to avoid process-level cache
+
+  Checkov 3.3.9 has a process-level cache that returns SARIF results from
+  the FIRST scan regardless of the second scan's `env_dir` or CWD.
+  Reproduced locally with a 4-scan sequence on alternating env_dirs; all 4
+  SARIFs were byte-identical.
+
+  Fix: invoke Checkov as `python -m checkov.main <args>` via
+  `subprocess.run` with `cwd=env_dir`. Each scan gets its own Python
+  process and its own cache namespace.
+
+  Side benefits:
+  * The Windows relpath workaround (`os.chdir` to `env_dir`) is no longer
+    needed — the subprocess starts with `cwd=env_dir` natively.
+  * The runner becomes thread-safe again (no process-global CWD mutation).
+  * Each scan is now bounded by a 900s timeout so a stuck subprocess
+    cannot wedge the orchestrator.
+
+  Reported symptom: a `cognitive_services.tf` finding scanned in
+  `CR_Formstax_ADF/prod` would appear in the SARIF for `CR_Personelle/stage`
+  (which has no `cognitive_services.tf`).
+
+### Tests
+
+* **checkov_runner:** rewrite to mock `subprocess.run` instead of `Checkov`
+
+  The previous tests mocked `Checkov(argv=...).run()` because the runner
+  called Checkov in-process. The mocking surface moved to `subprocess.run`
+  to match the fix. Added a regression test
+  (`test_two_sequential_subprocess_scans_produce_independent_sarifs`) that
+  runs two real Checkov subprocesses against distinct envs and asserts
+  the SARIFs reference their respective env paths.
+
+
+## Features
 
 * **cli:** --version flag, version read from importlib.metadata (1.1.2) ([369d1a1](https://github.com/JosiahSiegel/pacioli/commit/369d1a16483767fe66bc518b5d0bf252809b6b10))
 
