@@ -100,6 +100,10 @@ cd pacioli
 python -m pip install -r scanner/requirements-pinned.txt
 python -m pip install pytest pyyaml
 
+# Browser-report test prerequisites (only needed for `make test-browser`)
+pip install -e ".[test]"
+python -m playwright install chromium
+
 # ruff (optional, for `make lint`)
 # macOS:
 brew install ruff
@@ -110,8 +114,12 @@ pip install ruff
 ## The test suite
 
 ```bash
-# Run pytest
+# Run non-browser pytest tests (does not require Playwright or Chromium)
 make test
+
+# Run the generated static-report browser smoke test
+# Prerequisites: pip install -e ".[test]" && python -m playwright install chromium
+make test-browser
 
 # Run shell lint + Python compile
 make lint
@@ -120,7 +128,12 @@ make lint
 make selftest
 ```
 
-`make test` runs all 348 tests across 20 files:
+`make test` runs the non-browser test suite and deselects the optional
+`browser` marker so a Playwright/Chromium download is never required for
+ordinary local testing. `make test-browser` runs only the marked static-report
+browser smoke test after its explicitly preinstalled prerequisites are present.
+
+The non-browser suite includes these test files:
 
 | Test file | What it covers |
 |---|---|

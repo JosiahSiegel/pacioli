@@ -1,0 +1,35 @@
+# Environment Exclusion — Todo 2 Scope Documentation
+
+## Targeted regression suite
+
+```text
+$ python -m pytest scanner/tests/test_discovery.py -v
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.1.1, pluggy-1.6.0
+collected 56 items
+
+scanner/tests/test_discovery.py::test_shipped_scope_example_uses_structured_records_and_discovers_pairs PASSED
+... 55 additional discovery tests passed ...
+
+============================= 56 passed in 0.94s ==============================
+```
+
+## Stale-example checks
+
+```text
+$ grep -rn 'envs: \[prod' examples/ docs/
+(no matches)
+
+$ grep -rnE '^\s*-\s+prod\s*$|^\s*-\s+dev\s*$' examples/ docs/
+(no matches)
+```
+
+## Diagnostics
+
+```text
+$ lsp_diagnostics scanner/discovery.py
+No diagnostics found
+
+$ lsp_diagnostics scanner/tests/test_discovery.py
+No diagnostics found
+```

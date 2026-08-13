@@ -166,6 +166,33 @@ bundler, no framework). The full CSS and JS are emitted in-line
 by `write_html_report` in `aggregate.py`. Open it in any modern
 browser; no web server required.
 
+### Report view, theme, and evidence boundaries
+
+The static report is **Dark default**: its first paint uses the dark theme.
+The sidebar selector offers **Dark, Light, and System**. The selected theme
+uses browser-local persistence (`localStorage`); `System` follows the browser
+or operating-system color preference. A missing, invalid, or unavailable
+stored value falls back to Dark.
+
+The sidebar's **Hide environments** controls define a **report view**, not a
+scan-scope or compliance-scope decision. This is a client-side report-view-only
+exclusion: checking an environment hides it from the browser view and
+recomputes the dashboard KPIs, severity donut, findings, environment summary,
+top lists, coverage, and drift views from the remaining environments. The
+status reports either `Full scan: viewing all <N> environments.` or the
+number excluded and visible.
+
+Use **Full-report reset** to clear the report view exclusions and the
+search/severity/requirement filters. If every environment is hidden, the
+report shows an empty-filter state that directs the reader to reset
+exclusions; the donut shows `No data` and finding-derived lists show `No
+visible findings.` Clearing the exclusions restores the full report view.
+
+A report view never changes the generated scan evidence. SARIF, CSV, and
+JUnit evidence remains unchanged and represents the full scan, regardless of
+the browser-local filter or stored theme choice. Use `pci_scope.yaml` to make
+a scan-scope decision instead; see [Operator Guide](OPERATOR_GUIDE.md#adding-a-new-project-to-scope).
+
 ### `#dashboard`
 
 The default route. Contains:
@@ -185,7 +212,9 @@ The filterable findings table. Filters:
 
 - Free-text search (matches `resource`, `check_id`, `message`, `file_path`).
 - Severity pills (`HIGH`, `MEDIUM`, `LOW`, `SUPPRESSED`).
-- Env picker (one entry per env from `pci_scope.yaml`).
+- Environment exclusions (checkboxes for the full scanned environment set;
+  this report view is client-side only and is not a `pci_scope.yaml` scan
+  scope control).
 - PCI requirement picker (one entry per in-scope req from `pci_mapping.yaml`).
 
 Each finding row shows:

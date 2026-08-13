@@ -108,42 +108,80 @@ checkov --version
 
 ## Step 2: create the scope file
 
-`pci_scope.yaml` declares which `(project, env)` pairs are in PCI
-audit scope. The scanner walks every entry under
-`env/<project>/<env>/`.
+`pci_scope.yaml` declares **scan scope**, the version-controlled PCI audit
+boundary. For `projects:` entries, the scanner walks
+`env/<project>/<env>/` only when both the project and environment are
+`in_scope`.
 
 ```bash
 cp ../pacioli/examples/scope.yaml.example ./pci_scope.yaml
 ```
 
+> **Breaking change:** legacy scalar environment names are rejected. Migrate
+> each `envs:` item from `- prod` to `- name: prod` with its own `status:`.
+> Wrap a legacy top-level project list in `projects:` and add a `status:` to
+> every project. The parser rejects a manifest that does not use this
+> structured schema.
+
 Edit `pci_scope.yaml` for your project names:
 
 ```yaml
-- project: myapp
-  description: My application infrastructure
-  envs:
-    - prod
-    - staging
-- project: myapp-data
-  description: Data layer for myapp
-  envs:
-    - prod
+projects:
+  - project: myapp
+    description: My application infrastructure
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: pending
+        reason: Data-classification attestation is awaiting Security approval.
+  - project: sandbox
+    status: excluded
+    reason: Sandbox is outside the PCI audit boundary.
+    envs:
+      - name: dev
+        status: in_scope
 ```
 
-### Status field
+### Scope schema and status semantics
 
-Each project entry has a `status` field with three values:
+The root accepts only `projects:` and `scan_paths:` and requires at least one
+non-empty list. A project record permits only `project` (non-blank string),
+optional `description` (string), `status`, optional `reason` (string), and
+`envs` (list). Each environment record permits only `name` (non-blank string),
+`status`, and optional `reason` (string). `status` must be `in_scope`,
+`pending`, or `excluded`; `reason` is required and non-blank for `pending` and
+`excluded`.
+
+A `scan_paths:`-only manifest is also valid. Each item requires a non-blank
+`path` string and may include non-blank string `project`, `env`, `backend_key`,
+`workspace`, and `stack_label` values. Omitted `project` defaults to `default`;
+omitted `env` defaults to the basename of `path`. `stack_label` is required to
+disambiguate colliding `(project, env)` paths.
+
+Project status gates every environment beneath it: a project marked `pending`
+or `excluded` overrides an environment otherwise marked `in_scope`. Environment
+status controls only that named environment when its project is `in_scope`.
 
 | Status | Behavior |
 |---|---|
-| `in_scope` | Scanned on every run |
-| `pending` | Skipped (data-classification attestation outstanding) |
-| `excluded` | Skipped (not in PCI audit boundary) |
+| `in_scope` | Scanned on every run when both project and environment are `in_scope`. |
+| `pending` | Never scanned; use while an attestation or approval is outstanding. |
+| `excluded` | Never scanned; use for a workload outside the PCI audit boundary. |
 
-For your initial setup, set every project you want scanned to
-`in_scope`. Use `pending` if you're staging a project for later
-addition; use `excluded` only for permanent out-of-scope items
-like a sandbox.
+`pending` and `excluded` projects or environments are omitted at scan time
+and never enter a newly generated report. For your initial setup, make every
+intended scan pair `in_scope`; retain pending or excluded declarations with
+reasons so the audit boundary remains explicit in Git.
+
+For temporary browser triage after a full scan, use the report's **Hide
+environments** checkboxes. That separate **report view** is a client-side
+report-view-only exclusion: it recomputes what is shown without changing scan
+scope or generated files. SARIF, CSV, and JUnit evidence remains unchanged as
+full-scan evidence. The report defaults to Dark and persists the chosen Dark,
+Light, or System theme locally in the browser. See
+[Report Format](REPORT_FORMAT.md#report-view-theme-and-evidence-boundaries).
 
 ## Step 3: create the baseline file (initially empty)
 
@@ -329,21 +367,24 @@ git commit -m "feat: add pacioli PCI compliance scanning"
 
 ### A new project joins the audit boundary
 
-1. Add the project to `pci_scope.yaml` with `status: in_scope`.
-2. Run the scan against the new project alone.
-3. Triage findings.
-4. Commit the scope change as a PR titled "PCI scope: add
+1. Add the project as a structured `projects:` record with `status: in_scope`.
+2. Add each scan-ready environment as `{name: <env>, status: in_scope}`.
+3. Run the scan against the new project alone.
+4. Triage findings.
+5. Commit the scope change as a PR titled "PCI scope: add
    <project>".
 
 ### A project leaves the audit boundary
 
-Set its `status` to `excluded` (permanent) or `pending` (temporary).
-Do not delete the entry — the audit trail is in git.
+Set its project `status` to `excluded` (permanent) or `pending` (temporary)
+and add the required reason. Do not delete the entry — the audit trail is in
+Git.
 
 ### A new env is created for an existing in-scope project
 
-Add the new env to the existing `envs:` list under that project.
-No PR title convention is required.
+Add a structured environment record under its `envs:` list. Give it
+`status: in_scope` when ready to scan, or `pending`/`excluded` with a reason
+when it must not enter the audit boundary. No PR title convention is required.
 
 ### A finding is reported as a false positive
 

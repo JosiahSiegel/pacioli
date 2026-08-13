@@ -54,6 +54,7 @@ Console scripts
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -82,6 +83,7 @@ from scanner.discovery import (  # noqa: E402
     DiscoveredPair,
     NoTerraformFoundError,
     discover_pairs,
+    discover_skipped_scope_environments,
 )
 from scanner.frameworks import (  # noqa: E402
     SUPPORTED_FRAMEWORKS,
@@ -338,11 +340,6 @@ class Orchestrator:
             # threading ``framework`` through every signature.
             self._framework = framework
 
-            output_dir = Path(output_dir).resolve()
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            run_root = self._setup_run_root(output_dir, label)
-
             target_repo, resolved_mapping, resolved_baseline, pairs = (
                 self._resolve_scan_inputs(
                     target_repo=target_repo,
@@ -353,10 +350,22 @@ class Orchestrator:
                     include_modules=include_modules,
                 )
             )
+            skipped_environments = discover_skipped_scope_environments(target_repo)
+
+            for skipped in skipped_environments:
+                _log(
+                    "INFO",
+                    f"skipping declared {skipped.project}/{skipped.env}: "
+                    f"status={skipped.status}; reason={skipped.reason}",
+                )
 
             if not pairs:
                 _log("WARN", "no (project, env) pairs matched --project/--env filters")
                 return 0
+
+            output_dir = Path(output_dir).resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            run_root = self._setup_run_root(output_dir, label)
 
             self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs, framework=framework)
 
@@ -494,6 +503,22 @@ class Orchestrator:
         return run_root
 
     @staticmethod
+    def _write_environment_metadata(env_run_dir: Path, pair: DiscoveredPair) -> None:
+        """Atomically record the pair identity before any Checkov pass executes."""
+        artifact = env_run_dir / "pacioli_environment.json"
+        temporary = artifact.with_suffix(".json.tmp")
+        metadata = {
+            "schema_version": 1,
+            "project": pair.project,
+            "env": pair.env,
+            "stack_label": pair.stack_label,
+        }
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary, artifact)
+
+    @staticmethod
     def _resolve_baseline(
         baseline_path: Optional[Path],
         target_repo: Path,
@@ -597,6 +622,7 @@ class Orchestrator:
             label_suffix = f"-{pair.stack_label}" if pair.stack_label else ""
             env_run_dir = run_root / proj / f"{env_name}{label_suffix}"
             env_run_dir.mkdir(parents=True, exist_ok=True)
+            self._write_environment_metadata(env_run_dir, pair)
 
             _log("INFO", f"scanning {proj}/{env_name}")
 

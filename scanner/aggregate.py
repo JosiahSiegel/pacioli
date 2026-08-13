@@ -138,6 +138,9 @@ class EnvResult:
     scan_status: str  # ok | failed_to_plan | no_sarif
     findings: list[Finding] = field(default_factory=list)
     error: str | None = None
+    # Identity belongs to the scan metadata, not a physical run-directory name.
+    # ``None`` marks a legacy run directory with no metadata sidecar.
+    stack_label: str | None = None
 
 
 @dataclass
@@ -1870,19 +1873,191 @@ def _render_drift_section(drift_findings: list[dict]) -> str:
         )
     return (
         "<h2>Drift Findings</h2>\n"
-        "<p style=\"font-style:italic; color:#555;\">"
+        "<p class=\"inline-muted\"><em>"
         "Drift is the difference between the planned resource shape "
         "(source .tf + terraform plan) and the live Azure state "
         "(.tfstate pulled from Azure Storage). Investigate every drift "
         "finding before re-running <code>terraform apply</code> &mdash; "
         "it may indicate manual changes that need to be either codified "
         "in source or reverted to match the plan."
-        "</p>\n"
+        "</em></p>\n"
         "<table>\n"
         "  <tr><th>Resource</th><th>File:Line</th><th>Attribute</th>"
         "<th>Drift Type</th><th>Source &rarr; State</th><th>Severity</th></tr>\n"
         + "\n".join(rows)
         + "\n</table>\n"
+    )
+
+
+def _environment_display_label(project: str, env: str, stack_label: str | None) -> str:
+    """Return the canonical human label for one environment identity."""
+    label = f"{project}/{env}"
+    return f"{label} [{stack_label}]" if stack_label else label
+
+
+def _count_findings_by_severity(findings: list[Finding]) -> dict[str, int]:
+    """Return unsuppressed finding counts grouped for report presentation."""
+    return {
+        "high_critical": sum(
+            not finding.suppressed and finding.severity in ("HIGH", "CRITICAL")
+            for finding in findings
+        ),
+        "medium": sum(
+            not finding.suppressed and finding.severity == "MEDIUM"
+            for finding in findings
+        ),
+        "low": sum(
+            not finding.suppressed and finding.severity == "LOW"
+            for finding in findings
+        ),
+    }
+
+
+def _should_upgrade_resource_severity(current: str, prior: str) -> bool:
+    """Return True if the current finding's severity should override the prior severity."""
+    if current == "CRITICAL":
+        return True
+    if current == "HIGH" and prior != "CRITICAL":
+        return True
+    if current == "MEDIUM" and prior == "LOW":
+        return True
+    return False
+
+
+def _build_environment_block(result: EnvResult) -> dict:
+    """Build the report-model block for one scanned environment."""
+    identity = {
+        "project": result.project,
+        "env": result.env,
+        "stack_label": result.stack_label,
+        "display_label": _environment_display_label(
+            result.project, result.env, result.stack_label
+        ),
+    }
+    environment_findings = [
+        {
+            "identity_label": identity["display_label"],
+            "project": finding.project,
+            "env": finding.env,
+            "stack_label": result.stack_label,
+            "check_id": finding.check_id,
+            "severity": finding.severity,
+            "resource": finding.resource,
+            "file_path": finding.file_path,
+            "line": finding.line,
+            "message": finding.message,
+            "framework": finding.framework,
+            "requirements": finding.requirements,
+            "suppressed": finding.suppressed,
+            "help_uri": finding.help_uri,
+        }
+        for finding in result.findings
+    ]
+    severity_counts = _count_findings_by_severity(result.findings)
+    return {
+        "identity": identity,
+        "scan_status": result.scan_status,
+        "error": result.error,
+        "findings": environment_findings,
+        "counts": {
+            "total": len(result.findings),
+            "high": severity_counts["high_critical"],
+            "medium": severity_counts["medium"],
+            "low": severity_counts["low"],
+        },
+    }
+
+
+def _build_top_lists(findings: list[Finding]) -> tuple[list[dict], list[dict]]:
+    """Build sorted resource and rule frequency lists from unsuppressed findings."""
+    resource_counts: dict[str, int] = {}
+    resource_severity: dict[str, str] = {}
+    rule_counts: dict[str, int] = {}
+    for finding in findings:
+        if finding.resource and not finding.suppressed:
+            resource_counts[finding.resource] = resource_counts.get(finding.resource, 0) + 1
+            resource_severity.setdefault(finding.resource, "LOW")
+            prior_severity = resource_severity[finding.resource]
+            if _should_upgrade_resource_severity(finding.severity, prior_severity):
+                resource_severity[finding.resource] = finding.severity
+        if not finding.suppressed:
+            rule_counts[finding.check_id] = rule_counts.get(finding.check_id, 0) + 1
+    top_resources = [
+        {"resource": resource, "count": count, "severity": resource_severity[resource]}
+        for resource, count in sorted(resource_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    ]
+    top_rules = [
+        {"check_id": check_id, "count": count}
+        for check_id, count in sorted(rule_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    ]
+    return top_resources, top_rules
+
+
+def _build_report_model(
+    env_results: list[EnvResult],
+    mapping_data: dict,
+    cells: dict,
+    out_of_scope: list[dict],
+    suppressed_count: int,
+    gaps: CoverageGaps,
+    drift_findings: list[dict],
+    framework_name: str,
+    framework_version: str,
+) -> dict:
+    """Build the complete immutable input contract for browser projections."""
+    raw_findings = [
+        finding for result in env_results for finding in result.findings
+    ]
+    environments = [_build_environment_block(result) for result in env_results]
+    findings = [
+        finding for environment in environments for finding in environment["findings"]
+    ]
+    top_resources, top_rules = _build_top_lists(raw_findings)
+    return {
+        "schema_version": 1,
+        "framework": {"name": framework_name, "version": framework_version},
+        "counts": {
+            "total_findings": len(raw_findings),
+            **_count_findings_by_severity(raw_findings),
+            "suppressed": suppressed_count,
+            "environment_count": len(env_results),
+        },
+        "environments": environments,
+        "findings": findings,
+        "top_lists": {"resources": top_resources, "rules": top_rules},
+        "requirements": mapping_data.get("requirements", []),
+        "requirement_mappings": {
+            requirement["id"]: requirement.get("checks", [])
+            for requirement in mapping_data.get("requirements", [])
+            if requirement.get("id")
+        },
+        "coverage_cells": [
+            {"requirement": requirement, "check_id": check_id, "status": status}
+            for (requirement, check_id), status in sorted(cells.items())
+        ],
+        "coverage_gaps": gaps.records,
+        "out_of_scope_requirements": out_of_scope,
+        "drift_findings": drift_findings,
+        "baseline": {"suppressed_count": suppressed_count},
+    }
+
+
+def _severity_css_class(severity: str) -> str:
+    """Return the CSS severity modifier used by dashboard count pills."""
+    if severity in ("HIGH", "CRITICAL"):
+        return "high"
+    if severity == "MEDIUM":
+        return "medium"
+    return ""
+
+
+def _serialize_report_model(model: dict) -> str:
+    """Serialize the inert report model without HTML parsing ambiguity."""
+    return (
+        json.dumps(model, ensure_ascii=True)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
     )
 
 
@@ -1971,19 +2146,6 @@ def write_html_report(
     # as build_coverage_matrix so the heatmap + per-row filter agree
     # on what counts as a "note req".
     note_tokens_html = _resolve_note_tokens(mapping_data)
-    total_findings = sum(len(er.findings) for er in env_results)
-    high_critical = sum(
-        1 for er in env_results for f in er.findings
-        if not f.suppressed and f.severity in ("HIGH", "CRITICAL")
-    )
-    medium = sum(
-        1 for er in env_results for f in er.findings
-        if not f.suppressed and f.severity == "MEDIUM"
-    )
-    low = sum(
-        1 for er in env_results for f in er.findings
-        if not f.suppressed and f.severity == "LOW"
-    )
 
     # Resolve framework name + version from mapping YAML. Supports any
     # framework (PCI DSS, SOC 2, CIS Azure, NIST 800-53, ISO 27001, ...)
@@ -1994,13 +2156,31 @@ def write_html_report(
     if framework_version is None:
         framework_version = mapping_data.get("framework_version") or mapping_data.get("pci_dss_version", "4.0.1")
     framework_full = f"{framework_name} v{framework_version}"
+    report_model = _build_report_model(
+        env_results,
+        mapping_data,
+        cells,
+        out_of_scope,
+        suppressed_count,
+        gaps,
+        drift_findings,
+        framework_name,
+        framework_version,
+    )
+    report_model_json = _serialize_report_model(report_model)
+    total_findings = report_model["counts"]["total_findings"]
+    high_critical = report_model["counts"]["high_critical"]
+    medium = report_model["counts"]["medium"]
+    low = report_model["counts"]["low"]
 
     banner = ""
     if failed_envs:
-        envs_str = ", ".join(f"{er.project}/{er.env}" for er in failed_envs)
+        envs_str = ", ".join(
+            _environment_display_label(er.project, er.env, er.stack_label)
+            for er in failed_envs
+        )
         banner = (
-            f'<div style="background:#c00;color:#fff;padding:1em;margin:1em 0;'
-            f'border:2px solid #900;font-weight:bold;">'
+            f'<div class="banner-error">'
             f"RED BANNER: state-pull failed for {envs_str}. "
             f"Reports below are based on source-only scan; do not rely on PCI "
             f"compliance claims until re-scan succeeds."
@@ -2010,274 +2190,152 @@ def write_html_report(
     # CSS is held as a plain string (NOT inside an f-string) because Python
     # 3.12+ parses `{...}` greedily inside f-strings -- and CSS has braces.
     CSS_STYLE = """\
-  /* ===== Pacioli PCI Report -- first-class SPA styles ===== */
+  /* ===== Pacioli report -- semantic token contract ===== */
+  :root, [data-theme="dark"] {
+    color-scheme: dark;
+    --color-bg: #121820;
+    --color-surface: #1b2532;
+    --color-surface-subtle: #253142;
+    --color-surface-raised: #202c3b;
+    --color-fg: #f3f7fb;
+    --color-fg-muted: #b6c2d1;
+    --color-nav-bg: #101b2d;
+    --color-nav-surface: #172a43;
+    --color-nav-fg: #e7f0fb;
+    --color-nav-muted: #b8c9dd;
+    --color-border: #38475a;
+    --color-border-subtle: #2b3849;
+    --color-accent: #79b8ff;
+    --color-accent-surface: #17395f;
+    --color-danger: #ff8a8a;
+    --color-danger-surface: #54272f;
+    --color-warning: #ffd08a;
+    --color-warning-surface: #564222;
+    --color-neutral: #bdc7d4;
+    --color-success: #86d7a2;
+    --color-success-surface: #1d4932;
+    --color-code-bg: #0e1724;
+    --color-code-fg: #d5ebff;
+    --color-focus: #9ecbff;
+    --color-shadow: rgba(0, 0, 0, 0.28);
+    --color-nav-divider: rgba(231, 240, 251, 0.16);
+    --color-nav-hover: rgba(231, 240, 251, 0.08);
+    --color-nav-active: rgba(231, 240, 251, 0.16);
+    --color-nav-field: rgba(231, 240, 251, 0.1);
+    --color-nav-field-hover: rgba(231, 240, 251, 0.2);
+    --color-surface-shadow: rgba(0, 0, 0, 0.28);
+  }
+  [data-theme="light"] {
+    color-scheme: light;
+    --color-bg: #f5f7fb;
+    --color-surface: #ffffff;
+    --color-surface-subtle: #eef2f8;
+    --color-surface-raised: #fafcff;
+    --color-fg: #172033;
+    --color-fg-muted: #536276;
+    --color-nav-bg: #0a2648;
+    --color-nav-surface: #0d3560;
+    --color-nav-fg: #eef6ff;
+    --color-nav-muted: #c7d8ea;
+    --color-border: #ccd5e1;
+    --color-border-subtle: #e2e8f0;
+    --color-accent: #075cc4;
+    --color-accent-surface: #e6f1ff;
+    --color-danger: #b42318;
+    --color-danger-surface: #fff0f0;
+    --color-warning: #9a5d00;
+    --color-warning-surface: #fff7e6;
+    --color-neutral: #66758a;
+    --color-success: #187a3d;
+    --color-success-surface: #e9f8ee;
+    --color-code-bg: #10223a;
+    --color-code-fg: #d5ebff;
+    --color-focus: #005fcc;
+    --color-shadow: rgba(31, 48, 70, 0.12);
+    --color-nav-divider: rgba(238, 246, 255, 0.2);
+    --color-nav-hover: rgba(238, 246, 255, 0.12);
+    --color-nav-active: rgba(238, 246, 255, 0.2);
+    --color-nav-field: rgba(238, 246, 255, 0.12);
+    --color-nav-field-hover: rgba(238, 246, 255, 0.24);
+    --color-surface-shadow: rgba(31, 48, 70, 0.12);
+  }
+  [data-theme="system"] { color-scheme: dark light; }
+  @media (prefers-color-scheme: light) {
+    [data-theme="system"] {
+      --color-bg: #f5f7fb; --color-surface: #ffffff; --color-surface-subtle: #eef2f8;
+      --color-surface-raised: #fafcff; --color-fg: #172033; --color-fg-muted: #536276;
+      --color-nav-bg: #0a2648; --color-nav-surface: #0d3560; --color-nav-fg: #eef6ff;
+      --color-nav-muted: #c7d8ea; --color-border: #ccd5e1; --color-border-subtle: #e2e8f0;
+      --color-accent: #075cc4; --color-accent-surface: #e6f1ff; --color-danger: #b42318;
+      --color-danger-surface: #fff0f0; --color-warning: #9a5d00; --color-warning-surface: #fff7e6;
+      --color-neutral: #66758a; --color-success: #187a3d; --color-success-surface: #e9f8ee;
+      --color-code-bg: #10223a; --color-code-fg: #d5ebff; --color-focus: #005fcc;
+      --color-shadow: rgba(31, 48, 70, 0.12); --color-nav-divider: rgba(238, 246, 255, 0.2);
+      --color-nav-hover: rgba(238, 246, 255, 0.12); --color-nav-active: rgba(238, 246, 255, 0.2);
+      --color-nav-field: rgba(238, 246, 255, 0.12); --color-nav-field-hover: rgba(238, 246, 255, 0.24);
+      --color-surface-shadow: rgba(31, 48, 70, 0.12);
+    }
+  }
   *, *::before, *::after { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
-                 Arial, sans-serif;
-    color: #1a1f2e;
-    background: #f5f6fa;
-    line-height: 1.5;
-    font-size: 14px;
+  :focus-visible { outline: 3px solid var(--color-focus); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
   }
-  a { color: #0050b3; text-decoration: none; }
+  /* ===== Report layout and components ===== */
+  html, body { margin: 0; min-height: 100%; padding: 0; }
+  body { background: var(--color-bg); color: var(--color-fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 14px; line-height: 1.5; }
+  a { color: var(--color-accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em;
-         background: #eef; padding: 0 4px; border-radius: 3px; }
-  h1, h2, h3, h4 { color: #0a1a3a; margin: 0 0 0.5em 0; font-weight: 600; }
-  h1 { font-size: 1.8em; }
-  h2 { font-size: 1.4em; border-bottom: 2px solid #003a70; padding-bottom: 0.3em; }
-  h3 { font-size: 1.15em; color: #003a70; margin-top: 1.5em; }
-  h4 { font-size: 1em; margin-top: 1em; }
+  code { background: var(--color-surface-subtle); border-radius: 3px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; padding: 0 var(--space-1, 4px); }
+  h1, h2, h3, h4 { color: var(--color-fg); font-weight: 600; margin: 0 0 0.5em; }
+  h1 { font-size: 1.8em; } h2 { border-bottom: 2px solid var(--color-accent); font-size: 1.4em; padding-bottom: 0.3em; } h3 { color: var(--color-accent); font-size: 1.15em; margin-top: 1.5em; } h4 { font-size: 1em; margin-top: 1em; }
   table { border-collapse: collapse; margin: 1em 0; width: 100%; }
-  th, td { border: 1px solid #d0d6e0; padding: 6px 10px; text-align: left; }
-  th { background: #eef2f8; font-weight: 600; }
+  th, td { border: 1px solid var(--color-border); padding: 6px 10px; text-align: left; } th { background: var(--color-surface-subtle); }
+  #app { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100dvh; }
+  #sidebar { background: var(--color-nav-bg); color: var(--color-nav-fg); height: 100dvh; overflow-y: auto; padding: 0; position: sticky; top: 0; }
+  .sidebar-brand { border-bottom: 1px solid var(--color-nav-divider); padding: 1.4em 1.2em; }
+  .sidebar-brand h1 { color: var(--color-nav-fg); font-size: 1.3em; line-height: 1.1; margin: 0; }
+  .sidebar-brand .subtitle, .sidebar-footer { color: var(--color-nav-muted); font-size: 0.78em; line-height: 1.4; }
+  .sidebar-brand .subtitle { margin-top: 4px; } .sidebar-footer { border-top: 1px solid var(--color-nav-divider); padding: 1em 1.2em; }
+  nav.sidebar-nav { padding: 0.6em 0; } nav.sidebar-nav a { align-items: center; border-left: 3px solid transparent; color: var(--color-nav-fg); display: flex; font-weight: 500; gap: 10px; padding: 0.7em 1.2em; transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out; }
+  nav.sidebar-nav a:hover { background: var(--color-nav-hover); color: var(--color-nav-fg); text-decoration: none; } nav.sidebar-nav a.active { background: var(--color-nav-active); border-left-color: var(--color-accent); }
+  nav.sidebar-nav a .icon { display: inline-block; font-size: 1.05em; text-align: center; width: 18px; } nav.sidebar-nav a .badge { background: var(--color-danger); border-radius: 10px; color: var(--color-nav-bg); font-size: 0.7em; font-weight: 700; margin-left: auto; padding: 1px 7px; } nav.sidebar-nav a .badge.ok { background: var(--color-success); } nav.sidebar-nav a .badge.warn { background: var(--color-warning); }
+  #main { min-width: 0; overflow-x: auto; padding: 1.4em 2em 4em; } .route { display: none; } .route.active { display: block; } .route-header { align-items: flex-end; border-bottom: 1px solid var(--color-border); display: flex; justify-content: space-between; margin-bottom: 1.4em; padding-bottom: 1em; } .route-header h1 { margin: 0; } .route-header .meta { color: var(--color-fg-muted); font-size: 0.85em; line-height: 1.5; text-align: right; }
+  .kpi-grid { display: grid; gap: 1em; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); margin: 1em 0 1.4em; } .kpi, .top-list, .panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 6px; box-shadow: 0 1px 3px var(--color-surface-shadow); padding: 1em 1.2em; } .kpi { overflow: hidden; position: relative; } .kpi::before { background: var(--color-accent); bottom: 0; content: ""; left: 0; position: absolute; top: 0; width: 4px; } .kpi.kpi-high::before { background: var(--color-danger); } .kpi.kpi-medium::before { background: var(--color-warning); } .kpi.kpi-low::before { background: var(--color-neutral); } .kpi.kpi-ok::before { background: var(--color-success); } .kpi-label, .kpi-sub { color: var(--color-fg-muted); } .kpi-label { font-size: 0.78em; letter-spacing: 0.06em; margin-bottom: 6px; text-transform: uppercase; } .kpi-value { color: var(--color-fg); font-size: 2.2em; font-weight: 700; line-height: 1; } .kpi-sub { font-size: 0.85em; margin-top: 6px; }
+  .donut-wrap { align-items: center; display: flex; gap: 1.4em; margin: 1em 0; } .donut-legend { display: flex; flex-direction: column; gap: 0.5em; } .donut-legend-row { align-items: center; display: flex; font-size: 0.9em; gap: 0.6em; } .donut-legend-swatch { border-radius: 3px; height: 14px; width: 14px; } .swatch-high { background: var(--color-danger); } .swatch-medium { background: var(--color-warning); } .swatch-low { background: var(--color-neutral); } .swatch-ok { background: var(--color-success); }
+  .env-bar-row { align-items: center; background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: 4px; display: flex; gap: 0.8em; margin: 0.4em 0; padding: 0.4em 0.6em; } .env-bar-name { font-size: 0.92em; font-weight: 600; width: 260px; } .env-bar-track { background: var(--color-surface-subtle); border-radius: 3px; display: flex; flex: 1; height: 22px; overflow: hidden; } .env-bar-segment { height: 100%; } .env-bar-segment.high { background: var(--color-danger); } .env-bar-segment.medium { background: var(--color-warning); } .env-bar-segment.low { background: var(--color-neutral); } .env-bar-count { font-size: 0.9em; font-weight: 600; text-align: right; width: 80px; }
+  .top-list { margin: 0.6em 0; padding: 0.8em 1em; } .top-list h3 { font-size: 1em; margin: 0 0 0.6em; } .top-list-row { border-bottom: 1px solid var(--color-border-subtle); display: flex; font-size: 0.9em; justify-content: space-between; padding: 0.3em 0; } .top-list-row:last-child { border-bottom: 0; } .count-pill { background: var(--color-surface-subtle); border-radius: 10px; font-weight: 600; padding: 1px 8px; } .count-pill.high { background: var(--color-danger-surface); color: var(--color-danger); } .count-pill.medium { background: var(--color-warning-surface); color: var(--color-warning); }
+  .two-col { display: grid; gap: 1.4em; grid-template-columns: 1fr 1fr; margin: 1em 0; } .panel h3 { margin-top: 0; } .finding, .finding-body { background: var(--color-surface-raised); border-left: 4px solid var(--color-neutral); border-radius: 0 4px 4px 0; margin: 0.5em 0; padding: 0.8em 1em; } .finding.HIGH, .finding.CRITICAL, .finding-body.HIGH, .finding-body.CRITICAL { background: var(--color-danger-surface); border-left-color: var(--color-danger); } .finding.MEDIUM, .finding-body.MEDIUM { background: var(--color-warning-surface); border-left-color: var(--color-warning); } .suppressed { opacity: 0.5; text-decoration: line-through; } .req-coverage { color: var(--color-fg-muted); font-size: 0.9em; }
+  #filter-ui { align-items: center; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 6px; box-shadow: 0 1px 3px var(--color-surface-shadow); display: flex; flex-wrap: wrap; gap: 8px; margin: 1em 0; padding: 12px; position: sticky; top: 0; z-index: 10; } #filter-ui input[type="search"], #filter-ui select, #theme-select { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg); padding: 6px 10px; } #filter-ui input[type="search"] { width: 240px; } button { font: inherit; } #filter-ui button { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg); cursor: pointer; font-weight: 500; padding: 6px 12px; transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out, transform 120ms ease-out; } #filter-ui button:hover { background: var(--color-surface-raised); } #filter-ui button:active { transform: translateY(1px); } #filter-ui button.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); } #finding-count { color: var(--color-accent); font-size: 0.95em; font-weight: 700; margin-left: auto; }
+  .count-high { color: var(--color-danger); font-weight: 700; } .count-medium { color: var(--color-warning); font-weight: 600; } .count-low { color: var(--color-neutral); } .badge-row { border-radius: 12px; display: inline-block; font-size: 0.78em; font-weight: 600; padding: 2px 8px; } .badge-row.NON-COMPLIANT, .badge-row.STALE { background: var(--color-danger-surface); color: var(--color-danger); } .badge-row.NOT-SCANNED { background: var(--color-surface-subtle); color: var(--color-fg-muted); } .badge-row.COMPLIANT { background: var(--color-success-surface); color: var(--color-success); } .badge-row.OUT-OF-SCOPE { background: var(--color-accent-surface); color: var(--color-accent); } .badge-row.NO-MATCHING-RESOURCES { background: var(--color-warning-surface); color: var(--color-warning); }
+  .heatmap { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(min(110px, 100%), 1fr)); margin: 1em 0; } .heatmap-cell { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 4px; cursor: pointer; font-size: 0.85em; padding: 8px 10px; text-align: center; transition: transform 100ms ease-out, box-shadow 100ms ease-out, border-color 100ms ease-out; } .heatmap-cell:hover { border-color: var(--color-accent); box-shadow: 0 4px 8px var(--color-shadow); transform: translateY(-2px); } .heatmap-cell .req-id { color: var(--color-accent); font-weight: 700; } .heatmap-cell .req-count { color: var(--color-fg-muted); font-size: 0.75em; margin-top: 4px; } .heatmap-cell.kpi-high { background: var(--color-danger-surface); border-color: var(--color-danger); } .heatmap-cell.kpi-high .req-id { color: var(--color-danger); } .heatmap-cell.kpi-ok { background: var(--color-success-surface); border-color: var(--color-success); } .heatmap-cell.kpi-ok .req-id { color: var(--color-success); } .heatmap-cell.kpi-medium, .heatmap-cell.kpi-warn { background: var(--color-warning-surface); border-color: var(--color-warning); } .heatmap-cell.filtered { background: var(--color-accent-surface); border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent), 0 4px 12px var(--color-shadow); transform: translateY(-2px); } .heatmap-cell.filtered .req-id { color: var(--color-accent); } .heatmap-cell.dimmed { opacity: 0.25; } .heatmap-cell.dimmed:hover { opacity: 0.6; }
+  .remediation { background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; margin: 8px 0; padding: 8px 12px; } .remediation h4 { color: var(--color-accent); font-size: 0.95em; margin: 0 0 6px; } .remediation-hcl { background: var(--color-code-bg); border-radius: 4px; color: var(--color-code-fg); font-size: 0.85em; line-height: 1.5; overflow-x: auto; padding: 12px; white-space: pre; } .chain-of-custody { background: var(--color-surface-subtle); border-left: 3px solid var(--color-accent); border-radius: 0 3px 3px 0; color: var(--color-fg-muted); font-size: 0.85em; margin: 4px 0; padding: 4px 8px; } .coc-true { color: var(--color-success); font-weight: 600; } .coc-partial { color: var(--color-warning); font-weight: 600; }
+  .banner-error { background: var(--color-danger-surface); border-left: 6px solid var(--color-danger); border-radius: 4px; color: var(--color-danger); font-weight: 600; margin: 0 0 1em; padding: 1em 1.4em; } .banner-info { background: var(--color-accent-surface); border-left: 4px solid var(--color-accent); border-radius: 4px; color: var(--color-accent); margin: 0 0 1em; padding: 0.8em 1.2em; } .pulse-bar { border-radius: 50%; display: inline-block; height: 8px; margin-right: 4px; vertical-align: middle; width: 8px; } .pulse-bar.hot { background: var(--color-danger); } .pulse-bar.warm { background: var(--color-warning); } .pulse-bar.cool { background: var(--color-success); }
+  .theme-control { align-items: center; border-top: 1px solid var(--color-nav-divider); display: flex; gap: 8px; padding: 0.8em 1.2em; } .theme-control label { color: var(--color-nav-muted); font-size: 0.85em; } .theme-control #theme-select { background: var(--color-nav-field); border-color: var(--color-nav-divider); color: var(--color-nav-fg); flex: 1; }
+  .inline-muted { color: var(--color-fg-muted); } .inline-warning { color: var(--color-warning); } .oos-badge { background: var(--color-accent-surface); border-radius: 3px; color: var(--color-accent); font-weight: 700; padding: 2px 6px; } .oos-badge.stale { background: var(--color-danger-surface); color: var(--color-danger); } .oos-details { font-size: 0.9em; margin: 6px 0 0 1em; } .oos-details dd { margin: 0 0 4px; } .missing-value { color: var(--color-fg-muted); }
+  .visually-hidden { height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; width: 1px; clip: rect(0 0 0 0); white-space: nowrap; }
+  .filter-notice { align-items: center; background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; display: none; font-size: 0.9em; margin: 0.4em 0 0.8em; padding: 8px 12px; } .filter-notice-clear, .filter-notice-view { border: 1px solid var(--color-accent); border-radius: 3px; cursor: pointer; font-size: 0.85em; margin-left: 8px; padding: 2px 8px; } .filter-notice-clear { background: var(--color-surface); color: var(--color-accent); } .filter-notice-view { background: var(--color-accent); color: var(--color-bg); margin-left: 4px; }
+  .environment-exclusions { border: 1px solid var(--color-border); border-radius: 4px; margin: 0.8em 0; padding: 0.6em 0.8em; } .environment-exclusions legend { font-weight: 700; padding: 0 0.3em; } .environment-exclusion-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 0.5em; margin-bottom: 0.5em; } .environment-exclusion-options { display: grid; gap: 0.35em; } .environment-exclusion-option { align-items: center; display: flex; gap: 0.45em; } .environment-exclusion-option input { accent-color: var(--color-accent); } .environment-exclusion-status { color: var(--color-fg-muted); font-size: 0.85em; } .empty-view { background: var(--color-surface-subtle); border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg-muted); font-style: italic; padding: 0.8em; }
+  #sidebar-filter { border-bottom: 1px solid var(--color-nav-divider); border-top: 1px solid var(--color-nav-divider); font-size: 0.85em; padding: 0.8em 1.2em; } .sidebar-filter-label, #filter-summary { color: var(--color-nav-muted); font-size: 0.8em; } .sidebar-filter-label { font-size: 0.75em; letter-spacing: 0.06em; margin-bottom: 6px; text-transform: uppercase; } .sidebar-filter-input, .sidebar-filter-select, .sidebar-filter-reset, .gsev-btn { background: var(--color-nav-field); border: 1px solid var(--color-nav-divider); border-radius: 3px; color: var(--color-nav-fg); } .sidebar-filter-input, .sidebar-filter-select { padding: 5px 8px; width: 100%; } .sidebar-filter-input { margin-bottom: 6px; } .sidebar-filter-cluster { display: flex; flex-wrap: wrap; gap: 4px; } .gsev-btn { cursor: pointer; flex: 1; font-size: 0.85em; padding: 3px 8px; } .gsev-btn.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); } .gsev-btn:hover, .sidebar-filter-reset:hover { background: var(--color-nav-field-hover); } .sidebar-filter-select, .sidebar-filter-reset { margin-top: 6px; } .sidebar-filter-reset { cursor: pointer; padding: 4px; width: 100%; } #filter-summary { margin-top: 8px; }
+  #filter-banner { align-items: center; background: var(--color-accent-surface); border: 1px solid var(--color-accent); border-radius: 4px; display: none; flex-wrap: wrap; font-size: 0.9em; gap: 8px; margin: 0.6em 0; padding: 8px 12px; } #filter-banner strong, .filter-chip, .filter-chip-clear { color: var(--color-accent); } #filter-chips { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 6px; } .filter-chip { align-items: center; background: var(--color-surface); border: 1px solid var(--color-accent); border-radius: 12px; display: inline-flex; font-size: 0.85em; gap: 6px; padding: 3px 8px; } .filter-chip-clear { background: transparent; border: 0; cursor: pointer; font-size: 1.1em; font-weight: 700; line-height: 1; padding: 0 2px; } #filter-banner-clear { background: var(--color-surface); border: 1px solid var(--color-accent); border-radius: 3px; color: var(--color-accent); cursor: pointer; font-weight: 600; margin-left: auto; padding: 4px 10px; }
+  @media (max-width: 900px) { #app { grid-template-columns: 1fr; } #sidebar { height: auto; position: relative; } #main { padding: 1em; } .two-col { grid-template-columns: 1fr; } .route-header { align-items: flex-start; flex-direction: column; gap: 0.5em; } .route-header .meta { text-align: left; } }
 
-  /* ===== Layout: sidebar + content ===== */
-  #app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
-  #sidebar {
-    background: linear-gradient(180deg, #0a1a3a 0%, #003a70 100%);
-    color: #fff;
-    padding: 0;
-    overflow-y: auto;
-    position: sticky; top: 0; height: 100vh;
-  }
-  .sidebar-brand {
-    padding: 1.4em 1.2em; border-bottom: 1px solid rgba(255,255,255,0.1);
-  }
-  .sidebar-brand h1 { color: #fff; font-size: 1.3em; margin: 0; line-height: 1.1; }
-  .sidebar-brand .subtitle { font-size: 0.78em; color: #a8c0e0; margin-top: 4px; }
-  nav.sidebar-nav { padding: 0.6em 0; }
-  nav.sidebar-nav a {
-    display: flex; align-items: center; gap: 10px;
-    padding: 0.7em 1.2em; color: #d0d6e0; font-weight: 500;
-    border-left: 3px solid transparent; transition: all 0.12s;
-  }
-  nav.sidebar-nav a:hover { background: rgba(255,255,255,0.05); color: #fff; text-decoration: none; }
-  nav.sidebar-nav a.active {
-    background: rgba(255,255,255,0.10); color: #fff;
-    border-left-color: #4f9eff;
-  }
-  nav.sidebar-nav a .icon { font-size: 1.05em; width: 18px; display: inline-block; text-align: center; }
-  nav.sidebar-nav a .badge {
-    margin-left: auto; background: #c00; color: #fff;
-    border-radius: 10px; padding: 1px 7px; font-size: 0.7em; font-weight: 700;
-  }
-  nav.sidebar-nav a .badge.ok { background: #2a8c4a; }
-  nav.sidebar-nav a .badge.warn { background: #c80; }
-  .sidebar-footer {
-    padding: 1em 1.2em; border-top: 1px solid rgba(255,255,255,0.1);
-    font-size: 0.78em; color: #a8c0e0; line-height: 1.4;
-  }
-
-  /* ===== Main content ===== */
-  #main { padding: 1.4em 2em 4em; overflow-x: auto; }
-  .route { display: none; }
-  .route.active { display: block; }
-  .route-header { display: flex; justify-content: space-between; align-items: flex-end;
-                  margin-bottom: 1.4em; padding-bottom: 1em;
-                  border-bottom: 1px solid #d0d6e0; }
-  .route-header h1 { margin: 0; }
-  .route-header .meta { font-size: 0.85em; color: #5a6878; text-align: right; line-height: 1.5; }
-
-  /* ===== KPI cards ===== */
-  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-              gap: 1em; margin: 1em 0 1.4em; }
-  .kpi {
-    background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-    padding: 1.2em 1.4em; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-    position: relative; overflow: hidden;
-  }
-  .kpi::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0;
-                 width: 4px; background: #003a70; }
-  .kpi.kpi-high::before { background: #c00; }
-  .kpi.kpi-medium::before { background: #c80; }
-  .kpi.kpi-low::before { background: #888; }
-  .kpi.kpi-ok::before { background: #2a8c4a; }
-  .kpi-label { font-size: 0.78em; color: #5a6878; text-transform: uppercase;
-                letter-spacing: 0.06em; margin-bottom: 6px; }
-  .kpi-value { font-size: 2.2em; font-weight: 700; line-height: 1; color: #0a1a3a; }
-  .kpi-sub { font-size: 0.85em; color: #5a6878; margin-top: 6px; }
-
-  /* ===== Severity donut ===== */
-  .donut-wrap { display: flex; gap: 1.4em; align-items: center; margin: 1em 0; }
-  .donut-legend { display: flex; flex-direction: column; gap: 0.5em; }
-  .donut-legend-row { display: flex; align-items: center; gap: 0.6em; font-size: 0.9em; }
-  .donut-legend-swatch { width: 14px; height: 14px; border-radius: 3px; }
-
-  /* ===== Env health bars ===== */
-  .env-bar-row { display: flex; align-items: center; gap: 0.8em; margin: 0.4em 0;
-                 padding: 0.4em 0.6em; background: #fff; border-radius: 4px;
-                 border: 1px solid #e5e8ef; }
-  .env-bar-name { width: 260px; font-weight: 600; font-size: 0.92em; }
-  .env-bar-track { flex: 1; height: 22px; background: #eef2f8; border-radius: 3px;
-                   overflow: hidden; display: flex; }
-  .env-bar-segment { height: 100%; transition: width 0.3s; }
-  .env-bar-segment.high { background: #c00; }
-  .env-bar-segment.medium { background: #c80; }
-  .env-bar-segment.low { background: #888; }
-  .env-bar-count { width: 80px; text-align: right; font-weight: 600; font-size: 0.9em; }
-
-  /* ===== Top-N lists ===== */
-  .top-list { background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-              padding: 0.8em 1em; margin: 0.6em 0; }
-  .top-list h3 { margin: 0 0 0.6em; font-size: 1em; }
-  .top-list-row { display: flex; justify-content: space-between; padding: 0.3em 0;
-                  border-bottom: 1px solid #f0f2f5; font-size: 0.9em; }
-  .top-list-row:last-child { border-bottom: 0; }
-  .top-list-row .count-pill { background: #eef2f8; padding: 1px 8px;
-                              border-radius: 10px; font-weight: 600; }
-  .top-list-row .count-pill.high { background: #fde; color: #c00; }
-  .top-list-row .count-pill.medium { background: #ffd; color: #a60; }
-
-  /* ===== Two-column layout ===== */
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4em; margin: 1em 0; }
-  .panel { background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-           padding: 1em 1.2em; }
-  .panel h3 { margin-top: 0; }
-
-  /* ===== Findings ===== */
-  .finding { margin: 0.5em 0; padding: 0.8em 1em; background: #fafafa;
-             border-left: 4px solid #888; border-radius: 0 4px 4px 0; }
-  .finding.HIGH { border-left-color: #c00; background: #fff8f8; }
-  .finding.CRITICAL { border-left-color: #c00; background: #fee; }
-  .finding.MEDIUM { border-left-color: #c80; background: #fffaf0; }
-  .finding.LOW { border-left-color: #888; }
-  .suppressed { opacity: 0.5; text-decoration: line-through; }
-  .req-coverage { font-size: 0.9em; color: #555; }
-
-  .finding-row { margin: 0; padding: 0; }
-  .finding-body { margin: 0.5em 0; padding: 0.8em 1em; background: #fafafa;
-                  border-left: 4px solid #888; border-radius: 0 4px 4px 0; }
-  .finding-body.HIGH { border-left-color: #c00; background: #fff8f8; }
-  .finding-body.CRITICAL { border-left-color: #c00; background: #fee; }
-  .finding-body.MEDIUM { border-left-color: #c80; background: #fffaf0; }
-  .finding-body.LOW { border-left-color: #888; }
-
-  /* ===== Filter UI ===== */
-  #filter-ui { background: #fff; border: 1px solid #d0d6e0; border-radius: 6px;
-               padding: 12px; margin: 1em 0;
-               display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-               box-shadow: 0 1px 3px rgba(0,0,0,0.04); position: sticky; top: 0; z-index: 10; }
-  #filter-ui input[type="search"] { width: 240px; padding: 6px 10px;
-                                     border: 1px solid #d0d6e0; border-radius: 4px; }
-  #filter-ui button { padding: 6px 12px; border: 1px solid #d0d6e0;
-                      background: #fff; cursor: pointer; border-radius: 4px;
-                      font-weight: 500; transition: all 0.12s; }
-  #filter-ui button:hover { background: #f5f6fa; }
-  #filter-ui button.active { background: #003a70; color: #fff; border-color: #003a70; }
-  #filter-ui select { padding: 6px 10px; border: 1px solid #d0d6e0; border-radius: 4px; }
-  #finding-count { margin-left: auto; font-weight: 700; color: #003a70; font-size: 0.95em; }
-
-  /* ===== Severity badges ===== */
-  .count-high { color: #c00; font-weight: 700; }
-  .count-medium { color: #a60; font-weight: 600; }
-  .count-low { color: #888; }
-  .badge-row { display: inline-block; padding: 2px 8px; border-radius: 12px;
-               font-size: 0.78em; font-weight: 600; }
-  .badge-row.NON-COMPLIANT { background: #fde; color: #c00; }
-  .badge-row.NOT-SCANNED { background: #eee; color: #555; }
-  .badge-row.COMPLIANT { background: #dfd; color: #2a8c4a; }
-  .badge-row.STALE { background: #fbb; color: #800; }
-  .badge-row.OUT-OF-SCOPE { background: #cdf; color: #006; }
-  .badge-row.NO-MATCHING-RESOURCES { background: #ffe; color: #a60; }
-
-  /* ===== Heatmap (PCI coverage) ===== */
-  .heatmap { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-             gap: 6px; margin: 1em 0; }
-  .heatmap-cell { background: #fff; border: 1px solid #d0d6e0; border-radius: 4px;
-                  padding: 8px 10px; text-align: center; font-size: 0.85em;
-                  cursor: pointer; transition: transform 0.1s, box-shadow 0.1s, border-color 0.1s; }
-  .heatmap-cell:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.08); border-color: #4f9eff; }
-  .heatmap-cell:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.08); }
-  .heatmap-cell .req-id { font-weight: 700; color: #003a70; }
-  .heatmap-cell .req-count { font-size: 0.75em; color: #5a6878; margin-top: 4px; }
-  .heatmap-cell.kpi-high { background: #fde; border-color: #c00; }
-  .heatmap-cell.kpi-high .req-id { color: #c00; }
-  .heatmap-cell.kpi-ok { background: #dfd; border-color: #2a8c4a; }
-  .heatmap-cell.kpi-ok .req-id { color: #2a8c4a; }
-  .heatmap-cell.kpi-medium { background: #ffd; border-color: #c80; }
-  .heatmap-cell.kpi-warn { background: #ffe; border-color: #c80; }
-  .heatmap-cell.filtered { border-color: #4f9eff; box-shadow: 0 0 0 3px #4f9eff, 0 4px 12px rgba(79,158,255,0.3); transform: translateY(-2px); background: #eaf3ff; }
-  .heatmap-cell.filtered .req-id { color: #0050b3; }
-  .heatmap-cell.dimmed { opacity: 0.25; }
-  .heatmap-cell.dimmed:hover { opacity: 0.6; transform: translateY(-2px); }
-
-  /* ===== Remediation block ===== */
-  .remediation { background: #f0f7ff; border: 1px solid #b8d4ff; border-radius: 4px;
-                 padding: 8px 12px; margin: 8px 0; }
-  .remediation h4 { margin: 0 0 6px 0; color: #003a70; font-size: 0.95em; }
-  .remediation-hcl { background: #0a1a3a; color: #d0e8ff; padding: 12px;
-                     border-radius: 4px; overflow-x: auto; font-size: 0.85em;
-                     line-height: 1.5; white-space: pre; }
-  .chain-of-custody { font-size: 0.85em; color: #5a6878; margin: 4px 0;
-                      padding: 4px 8px; background: #eef2f8;
-                      border-left: 3px solid #4f9eff; border-radius: 0 3px 3px 0; }
-  .coc-true { color: #2a8c4a; font-weight: 600; }
-  .coc-partial { color: #c80; font-weight: 600; }
-
-  /* ===== Banner ===== */
-  .banner-error { background: #c00; color: #fff; padding: 1em 1.4em; margin: 0 0 1em;
-                  border-left: 6px solid #800; font-weight: 600; border-radius: 4px; }
-  .banner-info { background: #eef2f8; color: #003a70; padding: 0.8em 1.2em; margin: 0 0 1em;
-                  border-left: 4px solid #4f9eff; border-radius: 4px; }
-
-  /* ===== Sparkline / activity pulse ===== */
-  .pulse-bar { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-               margin-right: 4px; vertical-align: middle; }
-  .pulse-bar.hot { background: #c00; box-shadow: 0 0 8px #c00; }
-  .pulse-bar.warm { background: #c80; }
-  .pulse-bar.cool { background: #2a8c4a; }
-
-  /* ===== Responsive ===== */
-  @media (max-width: 900px) {
-    #app { grid-template-columns: 1fr; }
-    #sidebar { position: relative; height: auto; }
-    #main { padding: 1em; }
-    .two-col { grid-template-columns: 1fr; }
-  }
 """
 
-    # Compute per-environment aggregate stats for the dashboard route.
-    # Each env_results entry has a project, env, scan_status, and findings list.
-    env_stats = []
-    for er in env_results:
-        f_total = len(er.findings)
-        f_high = sum(1 for f in er.findings if not f.suppressed and f.severity in ("HIGH", "CRITICAL"))
-        f_med = sum(1 for f in er.findings if not f.suppressed and f.severity == "MEDIUM")
-        f_low = sum(1 for f in er.findings if not f.suppressed and f.severity == "LOW")
-        env_stats.append({
-            "label": f"{er.project}/{er.env}",
-            "project": er.project,
-            "env": er.env,
-            "scan_status": er.scan_status,
-            "total": f_total,
-            "high": f_high,
-            "medium": f_med,
-            "low": f_low,
-        })
-    # Top vulnerable resources (by total finding count across all envs)
-    from collections import Counter as _Counter
-    res_counter = _Counter()
-    res_severity = {}
-    for er in env_results:
-        for f in er.findings:
-            if f.resource and not f.suppressed:
-                res_counter[f.resource] += 1
-                cur = res_severity.get(f.resource, "LOW")
-                if f.severity == "CRITICAL" or (f.severity == "HIGH" and cur != "CRITICAL"):
-                    res_severity[f.resource] = f.severity
-                elif f.severity == "MEDIUM" and cur == "LOW":
-                    res_severity[f.resource] = f.severity
-    top_resources = res_counter.most_common(15)
-    # Top rule IDs by frequency
-    rule_counter = _Counter()
-    for er in env_results:
-        for f in er.findings:
-            if not f.suppressed:
-                rule_counter[f.check_id] += 1
-    top_rules = rule_counter.most_common(15)
+    # Every server-side projection begins with the same immutable browser model.
+    env_stats = [
+        {
+            "label": environment["identity"]["display_label"],
+            "project": environment["identity"]["project"],
+            "env": environment["identity"]["env"],
+            "stack_label": environment["identity"]["stack_label"],
+            "scan_status": environment["scan_status"],
+            **environment["counts"],
+        }
+        for environment in report_model["environments"]
+    ]
+    top_resources = report_model["top_lists"]["resources"]
+    top_rules = report_model["top_lists"]["rules"]
     # Compute percentages for donut
     pct_high = (high_critical / total_findings * 100) if total_findings else 0
     pct_med = (medium / total_findings * 100) if total_findings else 0
@@ -2293,42 +2351,70 @@ def write_html_report(
     # views without rewriting the renderer.
     generated_at = datetime.now(timezone.utc).isoformat()
     run_dir_disp = html.escape(str(out.parent))
+    theme_bootstrap = """<script>
+(function () {
+  var key = 'pacioli.report.theme';
+  var valid = { dark: true, light: true, system: true };
+  var theme = 'dark';
+  try {
+    var stored = localStorage.getItem(key);
+    if (stored && valid[stored]) theme = stored;
+  } catch (error) {
+    theme = 'dark';
+  }
+  document.documentElement.dataset.theme = theme;
+}());
+</script>"""
     body = f"""<!doctype html>
-<html lang="en"><head>
+<html lang="en" data-theme="dark"><head>
 <meta charset="utf-8">
+<meta name="color-scheme" content="dark light">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pacioli {framework_full} Compliance Report</title>
+{theme_bootstrap}
 <style>
 {CSS_STYLE}</style>
 </head>
 <body>
+<script type="application/json" id="pacioli-report-model">{report_model_json}</script>
 <div id="app">
 <aside id="sidebar">
-  <div class="sidebar-brand">
-    <h1>Pacioli</h1>
-    <div class="subtitle">{framework_full} Compliance Report</div>
-  </div>
-  <nav class="sidebar-nav">
-    <a href="#dashboard" data-route="dashboard" class="active">
-      <span class="icon">▣</span>Dashboard</a>
-    <a href="#findings" data-route="findings">
-      <span class="icon">≡</span>Findings
-      <span class="badge" id="badge-findings">{total_findings}</span></a>
-    <a href="#environments" data-route="environments">
-      <span class="icon">▦</span>Environments
-      <span class="badge" id="badge-envs">{len(env_results)}</span></a>
-    <a href="#coverage" data-route="coverage">
-      <span class="icon">⬚</span>PCI Coverage
-      <span class="badge {'warn' if pending_gaps else 'ok'}" id="badge-gaps">{pending_gaps}</span></a>
-    <a href="#remediation" data-route="remediation">
-      <span class="icon">⚙</span>Remediation</a>
-    <a href="#oos" data-route="oos">
-      <span class="icon">⌧</span>Out-of-Scope
-      <span class="badge {'warn' if stale_oos else ''}">{len(out_of_scope)}</span></a>
-    <a href="#drift" data-route="drift">
-      <span class="icon">⇄</span>Drift
-      <span class="badge {'warn' if drift_findings else 'ok'}">{len(drift_findings)}</span></a>
-  </nav>
-  <div class="sidebar-footer">
+   <div class="sidebar-brand">
+     <h1>Pacioli</h1>
+     <div class="subtitle">{framework_full} Compliance Report</div>
+   </div>
+   <fieldset id="environment-exclusions" class="environment-exclusions">
+     <legend>Hide environments</legend>
+     <div class="environment-exclusion-actions">
+       <button type="button" id="environment-select-visible">Select all visible</button>
+       <button type="button" id="environment-reset">Full-report reset</button>
+     </div>
+     <div id="environment-exclusion-status" class="environment-exclusion-status" role="status" aria-live="polite"></div>
+     <div id="environment-exclusion-options" class="environment-exclusion-options"></div>
+   </fieldset>
+    <nav class="sidebar-nav" aria-label="Report sections">
+    <a href="#dashboard" data-route="dashboard" class="active">Dashboard</a>
+    <a href="#findings" data-route="findings">Findings
+       <span class="badge" id="badge-findings">{total_findings}</span></a>
+    <a href="#environments" data-route="environments">Environments
+       <span class="badge" id="badge-envs">{len(env_results)}</span></a>
+    <a href="#coverage" data-route="coverage">PCI Coverage
+       <span class="badge {'warn' if pending_gaps else 'ok'}" id="badge-gaps">{pending_gaps}</span></a>
+    <a href="#remediation" data-route="remediation">Remediation</a>
+    <a href="#oos" data-route="oos">Out-of-Scope
+       <span class="badge {'warn' if stale_oos else ''}">{len(out_of_scope)}</span></a>
+    <a href="#drift" data-route="drift">Drift
+       <span class="badge {'warn' if drift_findings else 'ok'}">{len(drift_findings)}</span></a>
+   </nav>
+   <div class="theme-control">
+     <label for="theme-select">Theme</label>
+     <select id="theme-select" name="theme">
+       <option value="dark">Dark</option>
+       <option value="light">Light</option>
+       <option value="system">System</option>
+     </select>
+   </div>
+   <div class="sidebar-footer">
     Generated {generated_at}<br>
     <code>{run_dir_disp}</code>
   </div>
@@ -2345,43 +2431,43 @@ def write_html_report(
   </div>
   <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Total Findings</div>
-      <div class="kpi-value">{total_findings}</div>
-      <div class="kpi-sub">across {len(env_results)} environment{'' if len(env_results)==1 else 's'}</div></div>
+      <div class="kpi-value" id="kpi-total">{total_findings}</div>
+       <div class="kpi-sub" id="kpi-total-sub">across {len(env_results)} environment{'' if len(env_results)==1 else 's'}</div></div>
     <div class="kpi kpi-high"><div class="kpi-label">High / Critical</div>
-      <div class="kpi-value">{high_critical}</div>
-      <div class="kpi-sub">{pct_high:.1f}% of total</div></div>
+      <div class="kpi-value" id="kpi-high">{high_critical}</div>
+       <div class="kpi-sub" id="kpi-high-sub">{pct_high:.1f}% of total</div></div>
     <div class="kpi kpi-medium"><div class="kpi-label">Medium</div>
-      <div class="kpi-value">{medium}</div>
-      <div class="kpi-sub">{pct_med:.1f}% of total</div></div>
+      <div class="kpi-value" id="kpi-medium">{medium}</div>
+       <div class="kpi-sub" id="kpi-medium-sub">{pct_med:.1f}% of total</div></div>
     <div class="kpi kpi-low"><div class="kpi-label">Low</div>
-      <div class="kpi-value">{low}</div>
-      <div class="kpi-sub">{pct_low:.1f}% of total</div></div>
+      <div class="kpi-value" id="kpi-low">{low}</div>
+       <div class="kpi-sub" id="kpi-low-sub">{pct_low:.1f}% of total</div></div>
     <div class="kpi kpi-ok"><div class="kpi-label">Suppressed</div>
-      <div class="kpi-value">{suppressed_count}</div>
-      <div class="kpi-sub">{pct_sup:.1f}% of total · baseline waivers</div></div>
+      <div class="kpi-value" id="kpi-suppressed">{suppressed_count}</div>
+       <div class="kpi-sub" id="kpi-suppressed-sub">{pct_sup:.1f}% of total · baseline waivers</div></div>
   </div>
   <div class="two-col">
     <div class="panel">
       <h3>Severity Distribution</h3>
       <div class="donut-wrap">
         <svg width="160" height="160" viewBox="0 0 160 160" id="severity-donut">
-          <circle cx="80" cy="80" r="60" fill="none" stroke="#eef2f8" stroke-width="24"/>
+          <circle cx="80" cy="80" r="60" fill="none" stroke="var(--color-surface-subtle)" stroke-width="24"/>
         </svg>
-        <div class="donut-legend">
+        <div class="donut-legend" id="severity-donut-legend">
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#c00"></span>
+            <span class="donut-legend-swatch swatch-high"></span>
             <strong>{high_critical}</strong> High / Critical
           </div>
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#c80"></span>
+            <span class="donut-legend-swatch swatch-medium"></span>
             <strong>{medium}</strong> Medium
           </div>
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#888"></span>
+            <span class="donut-legend-swatch swatch-low"></span>
             <strong>{low}</strong> Low
           </div>
           <div class="donut-legend-row">
-            <span class="donut-legend-swatch" style="background:#2a8c4a"></span>
+            <span class="donut-legend-swatch swatch-ok"></span>
             <strong>{suppressed_count}</strong> Suppressed
           </div>
         </div>
@@ -2389,7 +2475,8 @@ def write_html_report(
     </div>
     <div class="panel">
       <h3>Environment Health</h3>
-      <div class="env-bar-list">
+          <div class="env-bar-list" id="env-health-list">
+
 """
     # Build env health bars
     if env_stats:
@@ -2399,15 +2486,15 @@ def write_html_report(
             w_med = e["medium"] / max_total * 100
             w_low = e["low"] / max_total * 100
             status_class = "kpi-high" if e["high"] > 0 else ("kpi-medium" if e["medium"] > 0 else "kpi-ok")
-            body += f"""        <div class="env-bar-row" data-env-bar="{html.escape(e['label'])}" style="cursor:pointer;">
-           <div class="env-bar-name">{html.escape(e['label'])} <span class="badge-row {status_class.upper().replace('KPI-','')}">{e['scan_status']}</span></div>
-          <div class="env-bar-track">
-            <div class="env-bar-segment high" style="width:{w_high:.1f}%" title="HIGH: {e['high']}"></div>
-            <div class="env-bar-segment medium" style="width:{w_med:.1f}%" title="MEDIUM: {e['medium']}"></div>
-            <div class="env-bar-segment low" style="width:{w_low:.1f}%" title="LOW: {e['low']}"></div>
-          </div>
-          <div class="env-bar-count">{e['total']}</div>
-        </div>
+        body += f"""        <div class="env-bar-row" data-env-bar="{html.escape(e['label'])}" data-identity-label="{html.escape(e['label'])}">
+          <div class="env-bar-name">{html.escape(e['label'])} <span class="badge-row {status_class.upper().replace('KPI-','')}">{e['scan_status']}</span></div>
+         <div class="env-bar-track">
+           <div class="env-bar-segment high" style="width:{w_high:.1f}%" title="HIGH: {e['high']}"></div>
+           <div class="env-bar-segment medium" style="width:{w_med:.1f}%" title="MEDIUM: {e['medium']}"></div>
+           <div class="env-bar-segment low" style="width:{w_low:.1f}%" title="LOW: {e['low']}"></div>
+         </div>
+         <div class="env-bar-count">{e['total']}</div>
+       </div>
 """
     else:
         body += "        <em>No environments scanned.</em>\n"
@@ -2415,19 +2502,21 @@ def write_html_report(
     </div>
   </div>
   <div class="two-col">
-    <div class="top-list">
-      <h3>Top Vulnerable Resources</h3>
+    <div class="top-list" id="top-resources">
+       <h3>Top Vulnerable Resources</h3>
 """
-    for rsc, cnt in top_resources:
-        sev = res_severity.get(rsc, "LOW")
-        sev_class = "high" if sev in ("HIGH", "CRITICAL") else ("medium" if sev == "MEDIUM" else "")
-        body += f'      <div class="top-list-row"><code>{html.escape(rsc)}</code><span class="count-pill {sev_class}">{cnt}</span></div>\n'
+    for resource_entry in top_resources:
+        resource = resource_entry["resource"]
+        severity = resource_entry["severity"]
+        count = resource_entry["count"]
+        severity_class = _severity_css_class(severity)
+        body += f'      <div class="top-list-row"><code>{html.escape(resource)}</code><span class="count-pill {severity_class}">{count}</span></div>\n'
     body += """    </div>
-    <div class="top-list">
-      <h3>Top Fired Rules</h3>
+    <div class="top-list" id="top-rules">
+       <h3>Top Fired Rules</h3>
 """
-    for cid, cnt in top_rules:
-        body += f'      <div class="top-list-row"><code>{html.escape(cid)}</code><span class="count-pill">{cnt}</span></div>\n'
+    for rule_entry in top_rules:
+        body += f'      <div class="top-list-row"><code>{html.escape(rule_entry["check_id"])}</code><span class="count-pill">{rule_entry["count"]}</span></div>\n'
     body += """    </div>
   </div>
 </section>  <!-- /route-dashboard -->
@@ -2441,10 +2530,15 @@ def write_html_report(
             if e["scan_status"] != "ok"
             else f'<span class="badge-row COMPLIANT">{e["scan_status"]}</span>'
         )
+        stack_label_display = (
+            f" <small>[{html.escape(e['stack_label'])}]</small>"
+            if e["stack_label"]
+            else ""
+        )
         _env_table_rows.append(
-            f"<tr data-project=\"{html.escape(e['project'])}\" data-env=\"{html.escape(e['env'])}\">"
+            f"<tr data-project=\"{html.escape(e['project'])}\" data-env=\"{html.escape(e['env'])}\" data-stack-label=\"{html.escape(e['stack_label'] or '')}\">"
             f"<td><code>{html.escape(e['project'])}</code></td>"
-            f"<td><code>{html.escape(e['env'])}</code></td>"
+            f"<td><code>{html.escape(e['env'])}</code>{stack_label_display}</td>"
             f"<td>{status_pill}</td>"
             f"<td><strong>{e['total']}</strong></td>"
             f"<td class=\"count-high\">{e['high']}</td>"
@@ -2457,8 +2551,8 @@ def write_html_report(
     body += f"<div class=\"meta\">{len(env_stats)} environment{'' if len(env_stats)==1 else 's'} scanned</div></div>\n"
     body += "  <h3>Per-Environment Summary</h3>\n"
     body += "  <table>\n"
-    body += "    <tr><th>Project</th><th>Env</th><th>Status</th><th>Total</th><th>High</th><th>Medium</th><th>Low</th></tr>\n"
-    body += "    " + "\n    ".join(_env_table_rows) + "\n"
+    body += "    <thead><tr><th>Project</th><th>Env</th><th>Status</th><th>Total</th><th>High</th><th>Medium</th><th>Low</th></tr></thead>\n"
+    body += "    <tbody id=\"environment-table-body\">" + "\n    ".join(_env_table_rows) + "</tbody>\n"
     body += "  </table>\n"
     body += "</section>  <!-- /route-environments -->\n"
 
@@ -2515,13 +2609,13 @@ def write_html_report(
     else:
         body += "    <div class=\"meta\">&nbsp;</div>\n"
     body += "  </div>\n"
-    body += f"  <h3>Coverage Heatmap <small style=\"font-weight:400;color:#5a6878;font-size:0.7em;\">— click any cell to filter to that {html.escape(framework_name)} req</small></h3>\n"
-    body += "  <div id=\"heatmap-active-filter\" style=\"display:none;margin:0.4em 0 0.8em;padding:8px 12px;background:#eaf3ff;border:1px solid #4f9eff;border-radius:4px;font-size:0.9em;\">\n"
+    body += f"  <h3>Coverage Heatmap <small class=\"inline-muted\">— click any cell to filter to that {html.escape(framework_name)} req</small></h3>\n"
+    body += "  <div id=\"heatmap-active-filter\" class=\"filter-notice\">\n"
     body += "    <strong>Filtered:</strong> <span id=\"heatmap-active-req\"></span>\n"
-    body += "    <button id=\"heatmap-clear-btn\" style=\"margin-left:8px;padding:2px 8px;background:#fff;border:1px solid #4f9eff;color:#0050b3;border-radius:3px;cursor:pointer;font-size:0.85em;\">Clear</button>\n"
-    body += "    <button id=\"heatmap-view-findings\" style=\"margin-left:4px;padding:2px 8px;background:#4f9eff;border:1px solid #4f9eff;color:#fff;border-radius:3px;cursor:pointer;font-size:0.85em;\">View findings →</button>\n"
+    body += "    <button id=\"heatmap-clear-btn\" class=\"filter-notice-clear\">Clear</button>\n"
+    body += "    <button id=\"heatmap-view-findings\" class=\"filter-notice-view\">View findings →</button>\n"
     body += "  </div>\n"
-    body += "  <div class=\"heatmap\">\n"
+    body += "  <div class=\"heatmap\" id=\"coverage-heatmap\">\n"
     # Build heatmap cells -- one per in-scope req
     for req in mapping_data.get("requirements", []):
         rid = req["id"]
@@ -2545,8 +2639,9 @@ def write_html_report(
         body += f'    <div class="heatmap-cell {klass}" title="{html.escape(title)}"><div class="req-id">{html.escape(rid)}</div><div class="req-count">{finding_count} finding{"" if finding_count == 1 else "s"} · {label}</div></div>\n'
     body += f"""  </div>
   <h3>{html.escape(framework_name)} Requirement Status</h3>
-  <table>
-    <tr><th>{html.escape(framework_name)} Requirement</th><th>Status</th></tr>
+   <table id="coverage-status-table">
+     <tr><th>{html.escape(framework_name)} Requirement</th><th>Status</th></tr>
+
 """
 
     for req in mapping_data.get("requirements", []):
@@ -2603,7 +2698,7 @@ def write_html_report(
                 if missing_ids and missing_count:
                     missing_inline = " ".join(html.escape(x) for x in missing_ids)
                     tip = (
-                        ' <span style="color:#a80" '
+                        ' <span class="inline-warning" '
                         f'title="missing: {missing_inline}">'
                         f"({missing_count}/{expected_count} mapped checks absent)"
                         "</span>"
@@ -2622,14 +2717,14 @@ def write_html_report(
                             break
                     if note_text:
                         tip = (
-                            ' <span style="color:#555" '
+                            ' <span class="inline-muted" '
                             f'title="{html.escape(note_text)}">'
                             f"[note: {html.escape(note_text)}]"
                             "</span>"
                         )
                     else:
                         tip = (
-                            ' <span style="color:#888" '
+                            ' <span class="inline-muted" '
                             'title="no working Checkov coverage; '
                             'see pci_mapping.yaml note">'
                             "(no working Checkov coverage)"
@@ -2637,7 +2732,7 @@ def write_html_report(
                         )
                 elif missing_count == 0 and expected_count > 0:
                     tip = (
-                        ' <span style="color:#888" '
+                        ' <span class="inline-muted" '
                         "title=\"every mapped check fired at least once - "
                         'all findings compliant (accepted)">'
                         "(all mapped checks ran)</span>"
@@ -2705,21 +2800,17 @@ def write_html_report(
         # must NOT trust an expired exclusion.
         if stale:
             badge = (
-                f'<span style="background:#fbb; color:#800; padding:2px 6px; '
-                f'border-radius:3px; font-weight:bold;">OUT OF SCOPE -- '
+                f'<span class="oos-badge stale">OUT OF SCOPE -- '
                 f'STALE (expired {-days_to_expiry}d ago)</span>'
             )
         else:
-            badge = (
-                '<span style="background:#cdf; color:#006; padding:2px 6px; '
-                'border-radius:3px; font-weight:bold;">OUT OF SCOPE</span>'
-            )
+            badge = '<span class="oos-badge">OUT OF SCOPE</span>'
 
         # Build the audit-trail details: every field below MUST be
         # present for the exclusion to be defensible. They are rendered
         # as a definition list so an auditor can read all of them in
         # one glance.
-        details = "<dl style='margin:6px 0 0 1em; font-size:0.9em;'>"
+        details = "<dl class='oos-details'>"
         for label, value in [
             ("Title", title),
             ("Rationale", rationale),
@@ -2739,7 +2830,7 @@ def write_html_report(
                 display = f'<a href="{html.escape(value)}">{html.escape(value)}</a>'
             details += (
                 f"<dt><strong>{label}:</strong></dt>"
-                f"<dd style='margin:0 0 4px 0;'>{display or '<em style=\"color:#999\">missing</em>'}</dd>"
+                f"<dd>{display or '<em class=\"missing-value\">missing</em>'}</dd>"
             )
         details += "</dl>"
 
@@ -2778,16 +2869,17 @@ def write_html_report(
     # Per-environment drill-down: view switcher that lets the operator
     # narrow the findings list to a single project/env without paging.
     # Click an env card to filter; "ALL" restores the full view.
-    body += '  <div id="env-summary-cards" style="display:flex;flex-wrap:wrap;gap:0.6em;margin:0.6em 0 1em;"></div>\n'
-    body += '  <script>window.__envStats = ' + json.dumps(env_stats) + ';</script>\n'
+    body += '  <div id="env-summary-cards" class="env-summary-cards"></div>\n'
     body += (
         '<div id="filter-ui">\n'
+        '  <label class="visually-hidden" for="finding-search">Search findings</label>\n'
         '  <input type="search" id="finding-search" '
         'placeholder="Search check_id, resource, file, message…">\n'
-        '  <button data-severity-filter="ALL" class="active">ALL</button>\n'
-        '  <button data-severity-filter="HIGH">HIGH</button>\n'
-        '  <button data-severity-filter="MEDIUM">MEDIUM</button>\n'
-        '  <button data-severity-filter="LOW">LOW</button>\n'
+        '  <button type="button" data-severity-filter="ALL" class="active">ALL</button>\n'
+        '  <button type="button" data-severity-filter="HIGH">HIGH</button>\n'
+        '  <button type="button" data-severity-filter="MEDIUM">MEDIUM</button>\n'
+        '  <button type="button" data-severity-filter="LOW">LOW</button>\n'
+        f'  <label class="visually-hidden" for="{REQUIREMENT_FILTER_ID}">Filter findings by requirement</label>\n'
         f'  <select id="{REQUIREMENT_FILTER_ID}">\n'
         f'    <option value="">All {html.escape(framework_name)} reqs</option>\n'
         f'  </select>\n'
@@ -2797,10 +2889,13 @@ def write_html_report(
     body += "<h2>Findings by Environment</h2>\n"
 
     for er in env_results:
+        environment_label = _environment_display_label(
+            er.project, er.env, er.stack_label
+        )
         if er.scan_status != "ok":
-            body += f"<h3>{er.project}/{er.env} <em>(scan failed: {html.escape(er.error or 'unknown')})</em></h3>\n"
+            body += f"<h3 class=\"finding-environment-heading\" data-identity-label=\"{html.escape(environment_label, quote=True)}\">{html.escape(environment_label)} <em>(scan failed: {html.escape(er.error or 'unknown')})</em></h3>\n"
             continue
-        body += f"<h3>{er.project}/{er.env} ({len(er.findings)} findings)</h3>\n"
+        body += f"<h3 class=\"finding-environment-heading\" data-identity-label=\"{html.escape(environment_label, quote=True)}\">{html.escape(environment_label)} ({len(er.findings)} findings)</h3>\n"
         for f in er.findings:
             classes = f"finding-body finding {f.severity}"
             if f.suppressed:
@@ -2839,6 +2934,8 @@ def write_html_report(
                 f'data-file-path="{html.escape(f.file_path or "", quote=True)}" '
                 f'data-project="{html.escape(f.project or "", quote=True)}" '
                 f'data-env="{html.escape(f.env or "", quote=True)}" '
+                f'data-stack-label="{html.escape(er.stack_label or "", quote=True)}" '
+                f'data-identity-label="{html.escape(environment_label, quote=True)}" '
                 f'data-suppressed="{"true" if f.suppressed else "false"}" '
                 f'data-message="{html.escape(msg_attr, quote=True)}"'
             )
@@ -2858,7 +2955,7 @@ def write_html_report(
             # message + file:line)" so the row never prints a blank
             # <code> again.
             resource_disp = html.escape(f.resource) if f.resource else (
-                '<em style="color:#a80">(resource address unresolved -- see message + file:line)</em>'
+                '<em class="inline-warning">(resource address unresolved -- see message + file:line)</em>'
             )
             body += f"<code>{resource_disp}</code><br>"
             file_loc = f.file_path or ""
@@ -2982,563 +3079,162 @@ def write_html_report(
     # ``__FRAMEWORK_NAME__ reqs``.
     FILTER_JS = ("""\
 <script>
-/* ============================================================
-   Pacioli SPA router + findings filter + chart (vanilla JS)
-   ============================================================ */
-(function() {
-  // ----- Section routing (hash-based) -----
-  const routes = ['dashboard', 'findings', 'environments', 'coverage',
-                  'remediation', 'oos', 'drift'];
+(function () {
+  'use strict';
+  const routes = ['dashboard', 'findings', 'environments', 'coverage', 'remediation', 'oos', 'drift'];
   function showRoute(name) {
-    if (!routes.includes(name)) name = 'dashboard';
-    document.querySelectorAll('.route').forEach(r => {
-      r.classList.toggle('active', r.id === 'route-' + name);
+    const route = routes.includes(name) ? name : 'dashboard';
+    document.querySelectorAll('.route').forEach(function (section) {
+      section.classList.toggle('active', section.id === 'route-' + route);
     });
-    document.querySelectorAll('nav.sidebar-nav a').forEach(a => {
-      a.classList.toggle('active', a.dataset.route === name);
+    document.querySelectorAll('nav.sidebar-nav a').forEach(function (link) {
+      link.classList.toggle('active', link.dataset.route === route);
     });
-    if (location.hash !== '#' + name) {
-      history.replaceState(null, '', '#' + name);
-    }
-    // Re-sync every filter UI on every route change so the user always
-    // sees the current FILTER state reflected in the active route's
-    // dropdowns/buttons. The `__pacioliUiReady` flag is set below once
-    // every dropdown/button has been queried from the DOM; before that
-    // point the UI elements are in the temporal dead zone and we must
-    // not call syncAllFilterUIs from showRoute().
-    if (window.__pacioliUiReady) syncAllFilterUIs();
   }
-  document.querySelectorAll('nav.sidebar-nav a').forEach(a => {
-    a.addEventListener('click', (e) => {
-      e.preventDefault();
-      showRoute(a.dataset.route);
+  function showRouteFromHash() {
+    showRoute((location.hash || '#dashboard').slice(1));
+  }
+  document.querySelectorAll('nav.sidebar-nav a').forEach(function (link) {
+    link.addEventListener('click', function () {
+      showRoute(link.dataset.route);
     });
   });
-  // (Heatmap cell click handler: see the FILTER-aware handler below; the
-  // earlier inline handler was removed because it bypassed FILTER and
-  // caused the in-page dropdown to desync from the sidebar global filter.)
-  // Initial route from hash
-  const initial = (location.hash || '#dashboard').replace('#', '');
-  showRoute(initial);
-
-  // ----- Severity donut chart (pure SVG, no deps) -----
-  (function renderDonut() {
+  window.addEventListener('hashchange', showRouteFromHash);
+  showRouteFromHash();
+  const modelElement = document.getElementById('pacioli-report-model');
+  let model;
+  try { model = JSON.parse(modelElement.textContent); } catch (error) { return; }
+  const storageKey = 'pacioli.report.filters';
+  const validSeverities = new Set(['ALL', 'HIGH', 'MEDIUM', 'LOW']);
+  const identities = model.environments.map(function (environment) { return environment.identity.display_label; });
+  const state = { q: '', sev: 'ALL', req: '', excluded: new Set() };
+  const storage = {
+    get: function () { try { return localStorage.getItem(storageKey); } catch (error) { return null; } },
+    set: function (value) { try { localStorage.setItem(storageKey, value); } catch (error) { return; } },
+    clearLegacy: function () { try { document.cookie = 'pacioli_req=; path=/; max-age=0'; } catch (error) { return; } },
+    legacy: function () { try { const match = document.cookie.match(/(?:^|; )pacioli_req=([^;]*)/); return match ? decodeURIComponent(match[1]) : null; } catch (error) { return null; } },
+  };
+  function parseState(value) {
+    try {
+      const candidate = JSON.parse(value);
+      if (!candidate || typeof candidate !== 'object') return null;
+      return candidate;
+    } catch (error) { return null; }
+  }
+  function restore() {
+    const saved = parseState(storage.get());
+    if (saved) {
+      state.q = typeof saved.q === 'string' ? saved.q : '';
+      state.sev = validSeverities.has(saved.sev) ? saved.sev : 'ALL';
+      state.req = typeof saved.req === 'string' ? saved.req : '';
+      if (Array.isArray(saved.excluded)) saved.excluded = saved.excluded.filter(function (label) { return typeof label === 'string' && identities.includes(label); });
+      state.excluded = new Set(saved.excluded || []);
+      return;
+    }
+    const legacyValue = storage.legacy();
+    const legacy = legacyValue ? parseState(legacyValue) : null;
+    if (legacy) {
+      state.q = typeof legacy.q === 'string' ? legacy.q : '';
+      state.sev = validSeverities.has(legacy.sev) ? legacy.sev : 'ALL';
+      state.req = typeof legacy.req === 'string' ? legacy.req : '';
+      if (typeof legacy.env === 'string' && identities.includes(legacy.env)) state.excluded.add(legacy.env);
+    }
+    storage.clearLegacy();
+  }
+  function persist() { storage.set(JSON.stringify({ q: state.q, sev: state.sev, req: state.req, excluded: Array.from(state.excluded).sort() })); }
+  function make(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
+  function visibleEnvironments() { return model.environments.filter(function (environment) { return !state.excluded.has(environment.identity.display_label); }); }
+  function filteredFindings(environments) {
+    const visible = new Set(environments.map(function (environment) { return environment.identity.display_label; }));
+    return model.findings.filter(function (finding) {
+      const search = [finding.check_id, finding.resource, finding.file_path, finding.message].join(' ').toLowerCase();
+      return visible.has(finding.identity_label) && (!state.q || search.includes(state.q)) && (state.sev === 'ALL' || finding.severity === state.sev) && (!state.req || finding.requirements.includes(state.req));
+    });
+  }
+  function counts(findings) {
+    return findings.reduce(function (total, finding) {
+      total.total += 1;
+      if (finding.suppressed) total.suppressed += 1;
+      else if (finding.severity === 'HIGH' || finding.severity === 'CRITICAL') total.high += 1;
+      else if (finding.severity === 'MEDIUM') total.medium += 1;
+      else total.low += 1;
+      return total;
+    }, { total: 0, high: 0, medium: 0, low: 0, suppressed: 0 });
+  }
+  function replaceChildren(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function renderDonut(summary) {
     const svg = document.getElementById('severity-donut');
-    if (!svg) return;
-    const total = """ + str(total_findings) + """;
-    const slices = [
-      { v: """ + str(high_critical) + """, color: '#c00', label: 'HIGH' },
-      { v: """ + str(medium) + """, color: '#c80', label: 'MEDIUM' },
-      { v: """ + str(low) + """, color: '#888', label: 'LOW' },
-      { v: """ + str(suppressed_count) + """, color: '#2a8c4a', label: 'SUPPRESSED' },
-    ];
-    if (total === 0) {
-      const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      t.setAttribute('x', '80'); t.setAttribute('y', '85');
-      t.setAttribute('text-anchor', 'middle');
-      t.setAttribute('font-size', '14'); t.setAttribute('fill', '#5a6878');
-      t.textContent = 'No data';
-      svg.appendChild(t);
-      return;
-    }
-    const r = 60, c = 2 * Math.PI * r;
-    let offset = 0;
-    slices.forEach(s => {
-      if (s.v === 0) return;
-      const pct = s.v / total;
-      const len = pct * c;
-      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      circle.setAttribute('cx', '80'); circle.setAttribute('cy', '80');
-      circle.setAttribute('r', r.toString());
-      circle.setAttribute('fill', 'none');
-      circle.setAttribute('stroke', s.color);
-      circle.setAttribute('stroke-width', '20');
-      circle.setAttribute('stroke-dasharray', len + ' ' + (c - len));
-      circle.setAttribute('stroke-dashoffset', (-offset).toString());
-      circle.setAttribute('transform', 'rotate(-90 80 80)');
-      svg.appendChild(circle);
-      offset += len;
+    const legend = document.getElementById('severity-donut-legend');
+    replaceChildren(svg); replaceChildren(legend);
+    const slices = [['High / Critical', summary.high, 'var(--color-danger)', 'swatch-high'], ['Medium', summary.medium, 'var(--color-warning)', 'swatch-medium'], ['Low', summary.low, 'var(--color-neutral)', 'swatch-low'], ['Suppressed', summary.suppressed, 'var(--color-success)', 'swatch-ok']];
+    const base = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); base.setAttribute('cx', '80'); base.setAttribute('cy', '80'); base.setAttribute('r', '60'); base.setAttribute('fill', 'none'); base.setAttribute('stroke', 'var(--color-surface-subtle)'); base.setAttribute('stroke-width', '24'); svg.appendChild(base);
+    const circumference = 2 * Math.PI * 60; let offset = 0;
+    slices.forEach(function (slice) {
+      const row = make('div', undefined, 'donut-legend-row'); row.appendChild(make('span', '', 'donut-legend-swatch ' + slice[3])); row.appendChild(make('strong', String(slice[1]))); row.appendChild(document.createTextNode(' ' + slice[0])); legend.appendChild(row);
+      if (!summary.total || !slice[1]) return;
+      const length = slice[1] / summary.total * circumference; const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); circle.setAttribute('cx', '80'); circle.setAttribute('cy', '80'); circle.setAttribute('r', '60'); circle.setAttribute('fill', 'none'); circle.setAttribute('stroke', slice[2]); circle.setAttribute('stroke-width', '20'); circle.setAttribute('stroke-dasharray', length + ' ' + (circumference - length)); circle.setAttribute('stroke-dashoffset', String(-offset)); circle.setAttribute('transform', 'rotate(-90 80 80)'); svg.appendChild(circle); offset += length;
     });
-    // Center total
-    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    t.setAttribute('x', '80'); t.setAttribute('y', '78');
-    t.setAttribute('text-anchor', 'middle');
-    t.setAttribute('font-size', '26'); t.setAttribute('font-weight', '700');
-    t.setAttribute('fill', '#0a1a3a');
-    t.textContent = total;
-    svg.appendChild(t);
-    const t2 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    t2.setAttribute('x', '80'); t2.setAttribute('y', '95');
-    t2.setAttribute('text-anchor', 'middle');
-    t2.setAttribute('font-size', '9'); t2.setAttribute('fill', '#5a6878');
-    t2.textContent = 'findings';
-    svg.appendChild(t2);
-  })();
-
-  // ----- Per-env summary cards (drill-down within Findings route) -----
-  // Cards are rendered WITHOUT inline click handlers because the FILTER-
-  // aware handler (registered further down) attaches to #env-summary-cards
-  // once and is the single source of truth for env filter transitions.
-  (function renderEnvCards() {
-    const container = document.getElementById('env-summary-cards');
-    if (!container || !window.__envStats) return;
-    const all = document.createElement('button');
-    all.type = 'button';
-    all.dataset.env = '__all__';
-    all.className = 'kpi';
-    all.style.cssText = 'cursor:pointer;border:2px solid #003a70;text-align:left;';
-    all.innerHTML = '<div class="kpi-label">All environments</div><div class="kpi-value">' +
-      window.__envStats.reduce((a, e) => a + e.total, 0) + '</div>';
-    container.appendChild(all);
-    window.__envStats.forEach(e => {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.dataset.env = e.label;
-      card.className = 'kpi';
-      card.style.cssText = 'cursor:pointer;text-align:left;border:1px solid #d0d6e0;';
-      const klass = e.high > 0 ? 'kpi-high' : (e.medium > 0 ? 'kpi-medium' : 'kpi-ok');
-      card.classList.add(klass);
-      card.innerHTML = '<div class="kpi-label">' + e.label + '</div>' +
-        '<div class="kpi-value">' + e.total + '</div>' +
-        '<div class="kpi-sub">' +
-        (e.high ? '<span class="count-high">' + e.high + ' H</span> ' : '') +
-        (e.medium ? '<span class="count-medium">' + e.medium + ' M</span> ' : '') +
-        (e.low ? '<span class="count-low">' + e.low + ' L</span>' : '') +
-        '</div>';
-      container.appendChild(card);
-    });
-    // The click handler is wired in the FILTER section below so the
-    // single source of truth (FILTER.env) is the only state that mutates.
-  })();
-
-  // ----- Cross-filtering: ONE global filter state, all routes read it -----
-  // Filter shape: { q: string, sev: 'ALL'|'HIGH'|'MEDIUM'|'LOW', req: string, env: string }
-  // Every input (search, severity buttons, requirement dropdown, env cards, heatmap
-  // cells) updates the global state and triggers applyAll(). Every output
-  // (findings, heatmap highlight, env-bar highlight, KPI counts, count badge)
-  // reads the same state. This is true cross-filtering: switching severity on
-  // the dashboard also dims unrelated heatmap cells, narrows env-bar tallies,
-  // and filters findings. The "req" key is the framework-agnostic
-  // requirement-id filter (formerly ``pci`` -- see scanner.frameworks
-  // ``REQUIREMENT_FILTER_STATE_KEY``). The data-attribute name on each
-  // finding row is the framework-agnostic ``data-req`` (former
-  // ``data-pci-req`` -- see ``REQUIREMENT_DATA_ATTR``).
-  const FILTER = window.__pacioliFilter = { q: '', sev: 'ALL', req: '', env: '__all__' };
-  const rows = document.querySelectorAll('.finding-row');
-  const totalCount = rows.length;
-  const search = document.getElementById('finding-search');
-  const sevBtns = document.querySelectorAll('[data-severity-filter]');
-  const reqFilter = document.getElementById('req-filter');
-  const countBadge = document.getElementById('finding-count');
-  const heatmapCells = document.querySelectorAll('.heatmap-cell');
-  const envBars = document.querySelectorAll('[data-env-bar]');
-
-  // ----- Cookie helpers (persist filter across page reloads) -----
-  function cookieGet(k) {
-    const m = document.cookie.match(new RegExp('(?:^|; )' + k + '=([^;]*)'));
-    return m ? decodeURIComponent(m[1]) : null;
+    const center = document.createElementNS('http://www.w3.org/2000/svg', 'text'); center.setAttribute('x', '80'); center.setAttribute('y', '85'); center.setAttribute('text-anchor', 'middle'); center.setAttribute('font-size', '18'); center.setAttribute('fill', 'var(--color-fg)'); center.textContent = summary.total ? String(summary.total) : 'No data'; svg.appendChild(center);
   }
-  function cookieSet(k, v) {
-    document.cookie = k + '=' + encodeURIComponent(v) + '; path=/; max-age=86400';
+  function renderEnvironmentViews(environments) {
+    const health = document.getElementById('env-health-list'); const table = document.getElementById('environment-table-body'); replaceChildren(health); replaceChildren(table);
+    if (!environments.length) { health.appendChild(make('p', 'No environments are visible. Reset exclusions to restore the full scan.', 'empty-view')); }
+    environments.forEach(function (environment) {
+      const summary = counts(environment.findings); const row = make('div', undefined, 'env-bar-row'); row.dataset.identityLabel = environment.identity.display_label; row.appendChild(make('div', environment.identity.display_label + ' (' + environment.scan_status + ')', 'env-bar-name')); const track = make('div', undefined, 'env-bar-track'); const denominator = summary.total || 1; [['high', summary.high], ['medium', summary.medium], ['low', summary.low]].forEach(function (part) { const segment = make('div', '', 'env-bar-segment ' + part[0]); segment.style.width = part[1] / denominator * 100 + '%'; track.appendChild(segment); }); row.appendChild(track); row.appendChild(make('div', String(summary.total), 'env-bar-count')); health.appendChild(row);
+      const tr = document.createElement('tr'); [environment.identity.project, environment.identity.env + (environment.identity.stack_label ? ' [' + environment.identity.stack_label + ']' : ''), environment.scan_status, String(summary.total), String(summary.high), String(summary.medium), String(summary.low)].forEach(function (value, index) { tr.appendChild(make('td', value, index === 4 ? 'count-high' : index === 5 ? 'count-medium' : index === 6 ? 'count-low' : '')); }); table.appendChild(tr);
+    });
+    document.querySelectorAll('.finding-environment-heading').forEach(function (heading) { heading.hidden = state.excluded.has(heading.dataset.identityLabel); });
   }
-
-  // ---- Filter row in the sidebar (always visible, cross-route) -----
-  const sidebarFilter = document.createElement('div');
-  sidebarFilter.id = 'sidebar-filter';
-  sidebarFilter.style.cssText = 'padding: 0.8em 1.2em; border-top: 1px solid rgba(255,255,255,0.1); border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.85em;';
-  sidebarFilter.innerHTML = `
-    <div style="color:#a8c0e0;font-size:0.75em;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Global Filter</div>
-    <input type="search" id="global-search" placeholder="Search all…"
-      style="width:100%;padding:5px 8px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.08);color:#fff;border-radius:3px;margin-bottom:6px;">
-    <div style="display:flex;gap:4px;flex-wrap:wrap;">
-      <button data-sev="ALL"   class="gsev-btn active">All</button>
-      <button data-sev="HIGH"  class="gsev-btn">High</button>
-      <button data-sev="MEDIUM" class="gsev-btn">Med</button>
-      <button data-sev="LOW"   class="gsev-btn">Low</button>
-    </div>
-    <select id="global-req" style="width:100%;padding:4px;margin-top:6px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:3px;">
-      <option value="">__FRAMEWORK_NAME__ reqs</option>
-    </select>
-    <button id="reset-filter" style="width:100%;margin-top:6px;padding:4px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:3px;cursor:pointer;">Reset filter</button>
-    <div id="filter-summary" style="margin-top:8px;color:#a8c0e0;font-size:0.8em;"></div>
-  `;
-
-  // ---- "FILTERING BY" top banner (visible on every route) ----
-  // Renders the active filter state at the top of <main> so the user
-  // always sees what's currently filtering the data, regardless of which
-  // page they're on. Independent chips per filter dimension; clicking
-  // any chip clears that one dimension. The "Clear all" button resets
-  // every dimension. The banner is hidden when no filter is active.
-  const filterBanner = document.createElement('div');
-  filterBanner.id = 'filter-banner';
-  filterBanner.style.cssText = 'display:none;margin:0.6em 0;padding:8px 12px;background:#eaf3ff;border:1px solid #4f9eff;border-radius:4px;font-size:0.9em;align-items:center;gap:8px;flex-wrap:wrap;';
-  filterBanner.innerHTML = `
-    <strong style="color:#003a70;">Filtering by:</strong>
-    <span id="filter-chips" style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center;"></span>
-    <button id="filter-banner-clear" style="margin-left:auto;padding:4px 10px;background:#fff;border:1px solid #4f9eff;color:#003a70;border-radius:3px;cursor:pointer;font-weight:600;">Clear all</button>
-  `;
-  // Sidebar buttons need similar styling to the in-page filter buttons
-  const style = document.createElement('style');
-  style.textContent = `
-    .gsev-btn { padding: 3px 8px; background: rgba(255,255,255,0.08); color: #d0d6e0;
-                 border: 1px solid rgba(255,255,255,0.2); border-radius: 3px;
-                 cursor: pointer; font-size: 0.85em; flex: 1; }
-    .gsev-btn.active { background: #4f9eff; color: #fff; border-color: #4f9eff; }
-    .gsev-btn:hover { background: rgba(255,255,255,0.15); }
-    .heatmap-cell.dimmed { opacity: 0.25; }
-    .heatmap-cell.dimmed:hover { opacity: 0.6; transform: translateY(-2px); }
-    .heatmap-cell.filtered { box-shadow: 0 0 0 3px #4f9eff; background: #eaf3ff; }
-    .env-bar-row.dimmed { opacity: 0.3; }
-  `;
-  document.head.appendChild(style);
-
-  // Find the sidebar-brand div and insert the filter after it
-  const sidebarBrand = document.querySelector('.sidebar-brand');
-  sidebarBrand.parentNode.insertBefore(sidebarFilter, sidebarBrand.nextSibling);
-
-  // Wire the global inputs to the same handlers
-  const globalSearch = document.getElementById('global-search');
-  const globalSevBtns = sidebarFilter.querySelectorAll('.gsev-btn');
-  const globalReq = document.getElementById('global-req');
-  const resetBtn = document.getElementById('reset-filter');
-
-  // Restore from cookie
-  const saved = (function() {
-    try { return JSON.parse(cookieGet('pacioli_req') || '{}'); } catch(e) { return {}; }
-  })();
-  if (saved.q) FILTER.q = saved.q;
-  if (saved.sev) FILTER.sev = saved.sev;
-  if (saved.req) FILTER.req = saved.req;
-  if (saved.env) FILTER.env = saved.env;
-  globalSearch.value = FILTER.q;
-  globalSevBtns.forEach(b => b.classList.toggle('active', b.dataset.sev === FILTER.sev));
-  globalReq.value = FILTER.req;
-
-  // ---- Core: apply filter to everything ----
-  function applyAll() {
-    // 1. Findings: show/hide rows
-    let shown = 0;
-    rows.forEach(r => {
-      const sev = r.dataset.severity || '';
-      const env = (r.dataset.project || '') + '/' + (r.dataset.env || '');
-      const hay = (r.dataset.checkId + ' ' + r.dataset.resource + ' ' +
-                   r.dataset.filePath + ' ' + r.dataset.message).toLowerCase();
-      const matchQ = !FILTER.q || hay.includes(FILTER.q);
-      const matchSev = FILTER.sev === 'ALL' || sev === FILTER.sev;
-      const matchReq = !FILTER.req || r.dataset.req === FILTER.req;
-      const matchEnv = FILTER.env === '__all__' || env === FILTER.env;
-      const visible = matchQ && matchSev && matchReq && matchEnv;
-      r.style.display = visible ? '' : 'none';
-      if (visible) shown++;
+  function renderFindings(environments) {
+    const visible = new Set(environments.map(function (environment) { return environment.identity.display_label; }));
+    document.querySelectorAll('.finding-row').forEach(function (row) {
+      const haystack = [row.dataset.checkId, row.dataset.resource, row.dataset.filePath, row.dataset.message].join(' ').toLowerCase();
+      row.hidden = !visible.has(row.dataset.identityLabel) || !!state.q && !haystack.includes(state.q) || state.sev !== 'ALL' && row.dataset.severity !== state.sev || !!state.req && row.dataset.req !== state.req;
     });
-    if (countBadge) countBadge.textContent = 'Showing ' + shown + ' of ' + totalCount;
-
-    // 2. Heatmap: dim cells that don't match, highlight the filter target
-    heatmapCells.forEach(cell => {
-      const reqId = cell.querySelector('.req-id').textContent;
-      const matchReq = !FILTER.req || reqId === FILTER.req;
-      cell.classList.toggle('dimmed', FILTER.req && !matchReq);
-      cell.classList.toggle('filtered', FILTER.req === reqId);
-    });
-
-    // 3. Env health bars: dim envs that don't match the env filter
-    envBars.forEach(bar => {
-      const envLabel = bar.dataset.envBar;
-      const matchEnv = FILTER.env === '__all__' || envLabel === FILTER.env;
-      bar.classList.toggle('dimmed', FILTER.env !== '__all__' && !matchEnv);
-    });
-
-    // 4. Env summary cards on Findings route: highlight selected env
-    document.querySelectorAll('#env-summary-cards button').forEach(btn => {
-      const label = btn.dataset.env;
-      btn.style.border = (label === FILTER.env) ? '2px solid #003a70' : '';
-    });
-
-    // 5. Filter chip summary in sidebar
-    const parts = [];
-    if (FILTER.q) parts.push('q=' + JSON.stringify(FILTER.q));
-    if (FILTER.sev !== 'ALL') parts.push('sev=' + FILTER.sev);
-    if (FILTER.req) parts.push('req=' + FILTER.req);
-    if (FILTER.env !== '__all__') parts.push('env=' + FILTER.env);
-    document.getElementById('filter-summary').textContent =
-      parts.length ? 'Active: ' + parts.join(' · ') : 'No filter active';
-
-    // 6. Persist
-    cookieSet('pacioli_req', JSON.stringify(FILTER));
-
-    // 7. Heatmap active-filter banner
-    if (typeof updateHeatmapBanner === 'function') updateHeatmapBanner();
-
-    // 8. Sync every filter UI to FILTER state. This is the SINGLE source
-    // of alignment for dropdowns/buttons across the sidebar AND the in-page
-    // Findings header. After any state change (click, heatmap, env card,
-    // cookie restore, route change), every visible UI element reflects
-    // the same FILTER. This eliminates the "dropdown does not match what
-    // I'm filtering by" bug.
-    syncAllFilterUIs();
+    const allVisible = model.findings.filter(function (finding) { return visible.has(finding.identity_label); });
+    document.getElementById('finding-count').textContent = 'Showing ' + filteredFindings(environments).length + ' of ' + allVisible.length;
+    document.getElementById('badge-findings').textContent = String(allVisible.length);
+    document.getElementById('badge-envs').textContent = String(environments.length);
   }
-
-  // ---- Sync every filter UI to FILTER state ----
-  // Called by applyAll() AND on every route change AND on cookie restore.
-  // Every input/button/dropdown in the page -- sidebar AND in-page -- gets
-  // updated here so the user never sees stale state.
-  function syncAllFilterUIs() {
-    // Search inputs (sidebar + in-page)
-    if (globalSearch) globalSearch.value = FILTER.q;
-    if (search) search.value = FILTER.q;
-
-    // Severity buttons: both the sidebar (.gsev-btn, data-sev) and the
-    // in-page (.data-severity-filter) read the same FILTER.sev.
-    if (globalSevBtns) globalSevBtns.forEach(b => {
-      b.classList.toggle('active', b.dataset.sev === FILTER.sev);
-    });
-    if (sevBtns) sevBtns.forEach(b => {
-      b.classList.toggle('active', b.dataset.severityFilter === FILTER.sev);
-    });
-
-    // Requirement dropdown: both sidebar (#global-req) and in-page (#req-filter).
-    // Use the property setter so the visible value reflects FILTER
-    // even when the option was just added dynamically.
-    if (globalReq) globalReq.value = FILTER.req;
-    if (reqFilter) reqFilter.value = FILTER.req;
-
-    // Sidebar "filter summary" text is updated by applyAll() too, but
-    // we re-set it here so a cookie-restore on initial load also shows
-    // the right summary.
-    const parts = [];
-    if (FILTER.q) parts.push('q=' + JSON.stringify(FILTER.q));
-    if (FILTER.sev !== 'ALL') parts.push('sev=' + FILTER.sev);
-    if (FILTER.req) parts.push('req=' + FILTER.req);
-    if (FILTER.env !== '__all__') parts.push('env=' + FILTER.env);
-    const fs = document.getElementById('filter-summary');
-    if (fs) fs.textContent = parts.length ? 'Active: ' + parts.join(' · ') : 'No filter active';
-
-    // Top-of-page "FILTERING BY" banner with per-dimension chips.
-    // Each chip shows the active filter value with a clear (x) button
-    // that resets only that dimension. Independent of dropdowns so the
-    // user always sees what's active, regardless of route or dropdown state.
-    renderFilterBanner();
+  function renderTopLists(findings) {
+    const sources = [['top-resources', 'Top Vulnerable Resources', 'resource'], ['top-rules', 'Top Fired Rules', 'check_id']];
+    sources.forEach(function (source) { const target = document.getElementById(source[0]); replaceChildren(target); target.appendChild(make('h3', source[1])); const entries = {}; findings.filter(function (finding) { return !finding.suppressed && finding[source[2]]; }).forEach(function (finding) { entries[finding[source[2]]] = (entries[finding[source[2]]] || 0) + 1; }); Object.keys(entries).sort(function (left, right) { return entries[right] - entries[left] || left.localeCompare(right); }).slice(0, 15).forEach(function (key) { const row = make('div', undefined, 'top-list-row'); row.appendChild(make('code', key)); row.appendChild(make('span', String(entries[key]), 'count-pill')); target.appendChild(row); }); if (!Object.keys(entries).length) target.appendChild(make('p', 'No visible findings.', 'inline-muted')); });
   }
-
-  // Render the top-of-page filter banner. Inserts a chip for each
-  // active filter dimension. Clicking a chip's x clears that dimension.
-  function renderFilterBanner() {
-    const banner = document.getElementById('filter-banner');
-    const chips = document.getElementById('filter-chips');
-    if (!banner || !chips) return;
-    const active = [];
-    if (FILTER.q) active.push({ dim: 'q', label: 'search: ' + FILTER.q });
-    if (FILTER.sev !== 'ALL') active.push({ dim: 'sev', label: 'severity: ' + FILTER.sev });
-    if (FILTER.req) active.push({ dim: 'req', label: '__FRAMEWORK_NAME__: ' + FILTER.req });
-    if (FILTER.env !== '__all__') active.push({ dim: 'env', label: 'env: ' + FILTER.env });
-    if (active.length === 0) {
-      banner.style.display = 'none';
-      chips.innerHTML = '';
-      return;
-    }
-    banner.style.display = 'flex';
-    chips.innerHTML = '';
-    active.forEach(c => {
-      const chip = document.createElement('span');
-      chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:3px 8px;background:#fff;border:1px solid #4f9eff;border-radius:12px;font-size:0.85em;color:#003a70;';
-      chip.innerHTML = '<span>' + c.label + '</span>';
-      const x = document.createElement('button');
-      x.textContent = '×';
-      x.title = 'Clear ' + c.dim + ' filter';
-      x.style.cssText = 'border:none;background:transparent;color:#003a70;font-weight:700;cursor:pointer;padding:0 2px;font-size:1.1em;line-height:1;';
-      x.addEventListener('click', () => {
-        if (c.dim === 'q') FILTER.q = '';
-        else if (c.dim === 'sev') FILTER.sev = 'ALL';
-        else if (c.dim === 'req') FILTER.req = '';
-        else if (c.dim === 'env') FILTER.env = '__all__';
-        applyAll();
-      });
-      chip.appendChild(x);
-      chips.appendChild(chip);
-    });
+  function requirementStatus(requirement, findings, environments) {
+    if (!environments.length) return 'NO VISIBLE ENVIRONMENTS';
+    const matching = findings.filter(function (finding) { return finding.requirements.includes(requirement.id); });
+    if (matching.some(function (finding) { return !finding.suppressed; })) return 'NON-COMPLIANT';
+    if (matching.length) return 'COMPLIANT (suppressed)';
+    if (environments.some(function (environment) { return environment.scan_status !== 'ok'; })) return 'NOT SCANNED';
+    return 'NO MATCHING RESOURCES IN SCOPE';
   }
-
-  // ---- Wire every input to the global filter ----
-  globalSearch.addEventListener('input', () => {
-    FILTER.q = globalSearch.value.toLowerCase();
-    // Mirror to the in-page search if present
-    if (search) search.value = FILTER.q;
-    applyAll();
-  });
-  globalSevBtns.forEach(b => b.addEventListener('click', () => {
-    globalSevBtns.forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    FILTER.sev = b.dataset.sev;
-    // Mirror to in-page severity buttons
-    sevBtns.forEach(x => x.classList.toggle('active', x.dataset.severityFilter === FILTER.sev));
-    applyAll();
-  }));
-  globalReq.addEventListener('change', () => {
-    FILTER.req = globalReq.value;
-    if (reqFilter) reqFilter.value = FILTER.req;
-    applyAll();
-  });
-  resetBtn.addEventListener('click', () => {
-    FILTER.q = ''; FILTER.sev = 'ALL'; FILTER.req = ''; FILTER.env = '__all__';
-    globalSearch.value = '';
-    globalSevBtns.forEach(b => b.classList.toggle('active', b.dataset.sev === 'ALL'));
-    globalReq.value = '';
-    if (search) search.value = '';
-    if (reqFilter) reqFilter.value = '';
-    sevBtns.forEach(x => x.classList.toggle('active', x.dataset.severityFilter === 'ALL'));
-    document.querySelectorAll('#env-summary-cards button').forEach(b => b.style.border = '');
-    applyAll();
-  });
-
-  // ---- Hook the in-page findings filter into the global state ----
-  if (search) search.addEventListener('input', () => {
-    FILTER.q = search.value.toLowerCase();
-    globalSearch.value = FILTER.q;
-    applyAll();
-  });
-  sevBtns.forEach(b => b.addEventListener('click', () => {
-    sevBtns.forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    FILTER.sev = b.dataset.severityFilter;
-    globalSevBtns.forEach(x => x.classList.toggle('active', x.dataset.sev === FILTER.sev));
-    applyAll();
-  }));
-  if (reqFilter) reqFilter.addEventListener('change', () => {
-    FILTER.req = reqFilter.value;
-    globalReq.value = FILTER.req;
-    applyAll();
-  });
-
-  // ---- Heatmap cells: click sets requirement filter and navigates to Findings ----
-  // The filter is the single source of truth: clicking a cell sets
-  // FILTER.req, syncs both dropdowns (sidebar + in-page), navigates to
-  // the Findings route so the operator sees the filtered list, and
-  // persists to the cookie. Clicking the same cell again clears the
-  // filter and stays on the Findings route.
-  heatmapCells.forEach(cell => {
-    cell.addEventListener('click', () => {
-      const reqId = cell.querySelector('.req-id').textContent;
-      // Toggle: if same reqId, clear; otherwise set
-      FILTER.req = (FILTER.req === reqId) ? '' : reqId;
-      // Navigate to findings so the operator sees the filtered list with
-      // the in-page dropdown aligned to the active filter.
-      showRoute('findings');
-      applyAll();
-    });
-  });
-
-  // ---- Heatmap "View findings" / "Clear" buttons ----
-  const heatmapActiveFilter = document.getElementById('heatmap-active-filter');
-  const heatmapActiveReq = document.getElementById('heatmap-active-req');
-  const heatmapClearBtn = document.getElementById('heatmap-clear-btn');
-  const heatmapViewBtn = document.getElementById('heatmap-view-findings');
-  if (heatmapClearBtn) {
-    heatmapClearBtn.addEventListener('click', () => {
-      FILTER.req = '';
-      globalReq.value = '';
-      if (reqFilter) reqFilter.value = '';
-      applyAll();
-    });
+  function renderCoverage(environments) {
+    const heatmap = document.getElementById('coverage-heatmap'); const table = document.getElementById('coverage-status-table'); replaceChildren(heatmap); while (table.rows.length > 1) table.deleteRow(1);
+    const findings = environments.reduce(function (all, environment) { return all.concat(environment.findings); }, []);
+    if (!environments.length) heatmap.appendChild(make('p', 'No environments are visible. Reset exclusions to inspect coverage.', 'empty-view'));
+    model.requirements.forEach(function (requirement) { const status = requirementStatus(requirement, findings, environments); const cell = make('button', undefined, 'heatmap-cell'); cell.type = 'button'; cell.dataset.req = requirement.id; cell.appendChild(make('div', requirement.id, 'req-id')); cell.appendChild(make('div', findings.filter(function (finding) { return finding.requirements.includes(requirement.id); }).length + ' findings · ' + status, 'req-count')); cell.classList.toggle('filtered', state.req === requirement.id); cell.addEventListener('click', function () { state.req = state.req === requirement.id ? '' : requirement.id; update(); }); heatmap.appendChild(cell); const row = table.insertRow(); row.appendChild(make('td', requirement.id + (requirement.title ? ' ' + requirement.title : ''))); row.appendChild(make('td', status, status === 'NON-COMPLIANT' ? 'count-high' : '')); });
+    const gaps = document.querySelector('#route-coverage h3 + p.req-coverage'); if (gaps) gaps.hidden = environments.length !== identities.length;
   }
-  if (heatmapViewBtn) {
-    heatmapViewBtn.addEventListener('click', () => {
-      showRoute('findings');
-    });
+  function renderDrift(environments) { const visiblePairs = new Set(environments.map(function (environment) { return environment.identity.project + '\u0000' + environment.identity.env; })); document.querySelectorAll('#route-drift tr[data-project]').forEach(function (row) { row.hidden = !visiblePairs.has(row.dataset.project + '\u0000' + row.dataset.env); }); }
+  function renderControls(environments) {
+    const options = document.getElementById('environment-exclusion-options'); replaceChildren(options); identities.forEach(function (identity) { const label = make('label', undefined, 'environment-exclusion-option'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = state.excluded.has(identity); checkbox.value = identity; checkbox.addEventListener('change', function () { checkbox.checked ? state.excluded.add(identity) : state.excluded.delete(identity); update(); }); label.appendChild(checkbox); label.appendChild(document.createTextNode(identity)); options.appendChild(label); }); const hidden = state.excluded.size; document.getElementById('environment-exclusion-status').textContent = hidden ? hidden + ' environment' + (hidden === 1 ? '' : 's') + ' excluded; viewing ' + environments.length + ' of ' + identities.length + ' environments.' : 'Full scan: viewing all ' + identities.length + ' environments.';
   }
-  // Show the active-filter banner when a requirement filter is active
-  function updateHeatmapBanner() {
-    if (!heatmapActiveFilter) return;
-    if (FILTER.req) {
-      heatmapActiveFilter.style.display = 'block';
-      heatmapActiveReq.textContent = FILTER.req;
-    } else {
-      heatmapActiveFilter.style.display = 'none';
-    }
-  }
-
-  // ---- Env summary cards: click sets env filter ----
-  document.querySelectorAll('#env-summary-cards button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const label = btn.dataset.env;
-      FILTER.env = (FILTER.env === label) ? '__all__' : label;
-      showRoute('findings');
-      applyAll();
-    });
-  });
-
-  // ---- Env table rows: click sets env filter ----
-  document.querySelectorAll('#route-environments tr[data-project]').forEach(row => {
-    row.style.cursor = 'pointer';
-    row.addEventListener('click', () => {
-      const label = row.dataset.project + '/' + row.dataset.env;
-      FILTER.env = (FILTER.env === label) ? '__all__' : label;
-      showRoute('findings');
-      applyAll();
-    });
-  });
-
-  // ---- Env health bars in dashboard: click sets env filter ----
-  envBars.forEach(bar => {
-    bar.addEventListener('click', () => {
-      const label = bar.dataset.envBar;
-      FILTER.env = (FILTER.env === label) ? '__all__' : label;
-      showRoute('findings');
-      applyAll();
-    });
-  });
-
-  // ---- Populate the global requirement dropdown from the data ----
-  const reqs = new Set();
-  rows.forEach(r => { if (r.dataset.req) reqs.add(r.dataset.req); });
-  Array.from(reqs).sort().forEach(req => {
-    const o = document.createElement('option');
-    o.value = req; o.textContent = req;
-    globalReq.appendChild(o);
-    if (reqFilter) {
-      const o2 = document.createElement('option');
-      o2.value = req; o2.textContent = req;
-      reqFilter.appendChild(o2);
-    }
-  });
-  globalReq.value = FILTER.req;
-  if (reqFilter) reqFilter.value = FILTER.req;
-
-  // ---- Inject the top-of-page filter banner into <main> ----
-  // The banner is visible on every route, positioned at the top of the
-  // main content area so the user always sees what's filtering the data
-  // regardless of which page they're on.
-  const main = document.getElementById('main');
-  if (main && filterBanner && !document.getElementById('filter-banner')) {
-    main.insertBefore(filterBanner, main.firstChild);
-  }
-
-  // ---- Wire the banner's "Clear all" button ----
-  const bannerClear = document.getElementById('filter-banner-clear');
-  if (bannerClear) {
-    bannerClear.addEventListener('click', () => {
-      FILTER.q = ''; FILTER.sev = 'ALL'; FILTER.req = ''; FILTER.env = '__all__';
-      globalSearch.value = '';
-      globalSevBtns.forEach(b => b.classList.toggle('active', b.dataset.sev === 'ALL'));
-      globalReq.value = '';
-      if (search) search.value = '';
-      if (reqFilter) reqFilter.value = '';
-      if (sevBtns) sevBtns.forEach(x => x.classList.toggle('active', x.dataset.severityFilter === 'ALL'));
-      applyAll();
-    });
-  }
-
-  applyAll();
-
-  // Mark the UI as ready so showRoute() can safely call syncAllFilterUIs.
-  // Set AFTER all const declarations (sidebarFilter, globalSearch, etc.)
-  // so the function never reads a TDZ variable.
-  window.__pacioliUiReady = true;
-
-  // ----- Toolbar hint (hover) -----
-  document.querySelectorAll('nav.sidebar-nav a').forEach(a => {
-    a.title = a.textContent.trim().split(/\\s+/).slice(1).join(' ') || a.textContent;
-  });
-})();
+  function renderSummary(environments, summary) { const pct = function (value) { return summary.total ? (value / summary.total * 100).toFixed(1) : '0.0'; }; [['total', summary.total, 'across ' + environments.length + ' of ' + identities.length + ' environments'], ['high', summary.high, pct(summary.high) + '% of total'], ['medium', summary.medium, pct(summary.medium) + '% of total'], ['low', summary.low, pct(summary.low) + '% of total'], ['suppressed', summary.suppressed, pct(summary.suppressed) + '% of total · baseline waivers']].forEach(function (entry) { document.getElementById('kpi-' + entry[0]).textContent = String(entry[1]); document.getElementById('kpi-' + entry[0] + '-sub').textContent = entry[2]; }); }
+  function renderBanner() { const banner = document.getElementById('filter-banner'); const chips = document.getElementById('filter-chips'); if (!banner || !chips) return; replaceChildren(chips); const labels = []; if (state.q) labels.push('search: ' + state.q); if (state.sev !== 'ALL') labels.push('severity: ' + state.sev); if (state.req) labels.push(model.framework.name + ': ' + state.req); if (state.excluded.size) labels.push(state.excluded.size + ' environment exclusion' + (state.excluded.size === 1 ? '' : 's')); labels.forEach(function (label) { chips.appendChild(make('span', label, 'filter-chip')); }); banner.style.display = labels.length ? 'flex' : 'none'; }
+  function syncInputs() { document.querySelectorAll('#finding-search, #global-search').forEach(function (input) { input.value = state.q; }); document.querySelectorAll('[data-severity-filter], .gsev-btn').forEach(function (button) { button.classList.toggle('active', (button.dataset.severityFilter || button.dataset.sev) === state.sev); }); document.querySelectorAll('#req-filter, #global-req').forEach(function (select) { select.value = state.req; }); }
+  function update() { const environments = visibleEnvironments(); const findings = environments.reduce(function (all, environment) { return all.concat(environment.findings); }, []); const summary = counts(findings); renderControls(environments); renderSummary(environments, summary); renderDonut(summary); renderEnvironmentViews(environments); renderFindings(environments); renderTopLists(findings); renderCoverage(environments); renderDrift(environments); renderBanner(); syncInputs(); persist(); }
+  function reset() { state.q = ''; state.sev = 'ALL'; state.req = ''; state.excluded.clear(); update(); }
+  function addRequirementOptions() { const values = model.requirements.map(function (requirement) { return requirement.id; }); document.querySelectorAll('#req-filter, #global-req').forEach(function (select) { values.forEach(function (value) { const option = make('option', value); option.value = value; select.appendChild(option); }); }); }
+  restore(); addRequirementOptions();
+  document.getElementById('environment-select-visible').addEventListener('click', function () { identities.forEach(function (identity) { state.excluded.add(identity); }); update(); });
+  document.getElementById('environment-reset').addEventListener('click', reset);
+  document.querySelectorAll('#finding-search').forEach(function (input) { input.addEventListener('input', function () { state.q = input.value.toLowerCase(); update(); }); });
+  document.querySelectorAll('[data-severity-filter]').forEach(function (button) { button.addEventListener('click', function () { state.sev = button.dataset.severityFilter; update(); }); });
+  document.querySelectorAll('#req-filter').forEach(function (select) { select.addEventListener('change', function () { state.req = select.value; update(); }); });
+  document.getElementById('heatmap-clear-btn').addEventListener('click', function () { state.req = ''; update(); });
+  document.getElementById('heatmap-view-findings').addEventListener('click', function () { location.hash = '#findings'; });
+  update();
+}());
 </script>
 """).replace("__FRAMEWORK_NAME__ reqs", framework_name + " reqs").replace(
         "__FRAMEWORK_NAME__: ", framework_name + ": "
@@ -3718,6 +3414,47 @@ class EnvResultFull(EnvResult):
     sarif_files: dict[str, Path | None] = field(default_factory=dict)
 
 
+def _read_environment_metadata(env_dir: Path, directory_project: str, directory_env: str) -> tuple[str, str, str | None]:
+    """Return canonical identity from metadata, or legacy directory identity."""
+    metadata_path = env_dir / "pacioli_environment.json"
+    if not metadata_path.exists():
+        return directory_project, directory_env, None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        raise ValueError(f"invalid environment metadata at {metadata_path}: {error}") from error
+    if not isinstance(metadata, dict):
+        raise ValueError(f"invalid environment metadata at {metadata_path}: expected object")
+    expected_keys = {"schema_version", "project", "env", "stack_label"}
+    if set(metadata) != expected_keys:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: expected keys {sorted(expected_keys)}"
+        )
+    if metadata["schema_version"] != 1:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: unsupported schema_version {metadata['schema_version']!r}"
+        )
+    project = metadata["project"]
+    env = metadata["env"]
+    stack_label = metadata["stack_label"]
+    if not isinstance(project, str) or not project:
+        raise ValueError(f"invalid environment metadata at {metadata_path}: project must be a non-empty string")
+    if not isinstance(env, str) or not env:
+        raise ValueError(f"invalid environment metadata at {metadata_path}: env must be a non-empty string")
+    if stack_label is not None and (not isinstance(stack_label, str) or not stack_label):
+        raise ValueError(f"invalid environment metadata at {metadata_path}: stack_label must be a non-empty string or null")
+    if project != directory_project:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: project mismatches directory ({project!r} != {directory_project!r})"
+        )
+    expected_directory_env = env if stack_label is None else f"{env}-{stack_label}"
+    if directory_env != expected_directory_env:
+        raise ValueError(
+            f"invalid environment metadata at {metadata_path}: env/stack_label mismatches directory ({expected_directory_env!r} != {directory_env!r})"
+        )
+    return project, env, stack_label
+
+
 def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
     """Walk a run dir and produce EnvResultFull per project/env.
 
@@ -3740,7 +3477,11 @@ def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
         for env_dir in entry.iterdir():
             if not env_dir.is_dir():
                 continue
-            env = env_dir.name
+            canonical_project, canonical_env, stack_label = _read_environment_metadata(
+                env_dir, project, env_dir.name
+            )
+            project = canonical_project
+            env = canonical_env
             sarif_files: dict[str, Path | None] = {}
             for sarif_path in env_dir.glob("results_*.sarif"):
                 pass_name = _sarif_filename_to_pass(sarif_path.name)
@@ -3758,6 +3499,7 @@ def walk_run_dir(run_dir: Path, projects: list[dict]) -> list[EnvResultFull]:
             r = EnvResultFull(
                 project=project,
                 env=env,
+                stack_label=stack_label,
                 scan_status="ok",
                 plan_dir=env_dir,
                 sarif_files=sarif_files,

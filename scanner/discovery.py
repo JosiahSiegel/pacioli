@@ -1,56 +1,40 @@
-"""Auto-discover (project, env) pairs in an IaC target repo.
+"""Auto-discover the in-scope ``(project, env)`` pairs in an IaC repo.
 
-Ports the precedence rules from ``scanner/lib/common.sh`` (bash):
+``<target>/pci_scope.yaml`` is authoritative when present. Its root may contain
+only ``projects:`` and ``scan_paths:`` and must provide at least one non-empty
+list. ``projects:`` records have this exact shape::
 
-  1. If ``<target>/pci_scope.yaml`` exists, it is the source of truth.
-     Only entries with ``status: in_scope`` are loaded; for each entry
-     the YAML's ``envs`` list determines which envs to scan, walking
-     ``env/<project>/<env>/`` for each (mirrors bash ``load_pci_scope``
-     + ``require_env_dir``).
+    - project: <non-blank string>
+      description: <optional string>
+      status: in_scope | pending | excluded
+      reason: <required non-blank string for pending/excluded>
+      envs:
+        - name: <non-blank string>
+          status: in_scope | pending | excluded
+          reason: <required non-blank string for pending/excluded>
 
-  2. Else if ``<target>/env/`` exists, walk ``env/<project>/<env>/``
-     subdirectories and emit one pair per env that contains at least
-     one IaC file detected by
-     :func:`scanner.frameworks.detect_frameworks` (excluding ``~*``
-     stubs). The check is framework-aware — Terraform ``*.tf``,
-     Kubernetes ``*.yaml``, Dockerfile, Bicep, CloudFormation, etc.
-     all qualify.
+Legacy scalar environments (for example, ``- prod``) are invalid. Only pairs
+whose project and environment are both ``in_scope`` are discovered. A pending
+or excluded project overrides all of its environments. Pending and excluded
+pairs are never scanned.
 
-  3. Else detect IaC files at the repo root via
-     :func:`scanner.frameworks.detect_frameworks`; if any exist, return
-     ``[("default", "default")]`` (a flat repo with no env layout).
+``scan_paths:`` may be the only root list or accompany ``projects:``. Each
+entry permits only ``path`` (required non-blank string), optional ``project``,
+``env``, ``backend_key``, ``workspace``, and ``stack_label`` strings. ``project``
+defaults to ``"default"`` and ``env`` to the basename of ``path``. Colliding
+``(project, env)`` entries require per-entry ``stack_label`` values. Explicit
+stack paths are exclusion-gated only when their declared logical pair is pending
+or excluded; unmatched paths remain discoverable.
 
-  4. If none of the above produces any pairs, raise
-     :class:`NoIaCFoundError` (alias :class:`NoTerraformFoundError`).
+Without a scope manifest, discovery walks ``env/<project>/<env>/`` directories
+that contain a framework detected by :func:`scanner.frameworks.detect_frameworks`.
+Otherwise it detects framework files at the repo root and emits
+``[("default", "default")]``. If no branch produces a pair, it raises
+:class:`NoIaCFoundError` (alias :class:`NoTerraformFoundError`).
 
-``scan_paths:`` extension
--------------------------
-In addition to the four legacy branches, ``pci_scope.yaml`` may carry an
-OPTIONAL top-level ``scan_paths:`` list whose entries declare stack
-roots directly (``{path, project?, env?, backend_key?, workspace?,
-stack_label?}``). When present, these entries are unioned with whatever
-the legacy branches produced. Stack roots in ``scan_paths:`` do NOT
-have to live under ``<target>/env/<project>/<env>/`` — they may point
-anywhere on the filesystem (a sibling checkout, a sibling repo in a
-monorepo, etc.).
-
-Two entries that resolve to the same ``(project, env)`` MUST carry a
-per-entry ``stack_label:`` to disambiguate, otherwise the scanner
-fail-closes with a clear message naming both entries. The contract is
-the same as the bash scanner's ``--scan-path`` / ``--scan-glob`` flags
-introduced alongside this Todo.
-
-``--project`` and ``--env`` filters are applied AFTER the YAML-vs-env-
-tree decision so the precedence semantics match the bash scanner. In
-flat-root mode (legacy branch 3) the filters RELABEL the single
-``(default, default)`` pair rather than filtering to zero.
-
-Why YAML takes precedence: in the bash scanner ``load_pci_scope`` is
-the only authoritative source of the project list when the file
-exists; the env/ tree is just where the .tf files live. A consumer
-may have ``env/<project>/<env>`` directories for projects that are
-explicitly NOT in PCI scope (sandbox, dev-sandbox) — the YAML is
-the explicit allowlist.
+``--project`` and ``--env`` filters apply to the fully resolved in-scope set.
+They cannot add a pending or excluded pair. In flat-root mode only, filters
+relabel the single ``(default, default)`` pair rather than filtering to zero.
 """
 
 from __future__ import annotations
@@ -254,96 +238,218 @@ def _has_iac_files(env_dir: Path) -> bool:
     return bool(detect_frameworks(env_dir))
 
 
-def _load_pci_scope(scope_file: Path) -> list[tuple[str, str]]:
-    """Load in-scope (project, env) pairs from pci_scope.yaml.
+@dataclass(frozen=True)
+class SkippedScopeEnvironment:
+    """A declared environment omitted because its scope status excludes it."""
 
-    Only entries with ``status: in_scope`` are honored. The YAML's
-    ``envs`` list per entry determines which envs are scanned.
-    Raises :class:`NoIaCFoundError` (alias
-    :class:`NoTerraformFoundError`) if no in-scope entries
-    yield any pairs.
+    project: str
+    env: str
+    status: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class _ScopeManifest:
+    """Parsed scope contract used to gate legacy and explicit stack pairs."""
+
+    in_scope_pairs: list[tuple[str, str]]
+    excluded_pairs: set[tuple[str, str]]
+    skipped_environments: list[SkippedScopeEnvironment]
+    raw: dict
+
+
+def _scope_error(location: str, message: str) -> ValueError:
+    """Build a schema error which names the offending YAML location."""
+    return ValueError(f"pci_scope.yaml.{location}: {message}")
+
+
+def _required_string(raw: dict, key: str, location: str) -> str:
+    """Return a required non-blank string from a YAML mapping."""
+    value = raw.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise _scope_error(f"{location}.{key}", "must be a non-blank string")
+    return value
+
+
+def _optional_string(raw: dict, key: str, location: str) -> Optional[str]:
+    """Return an optional string while preserving a present blank value."""
+    value = raw.get(key)
+    if value is not None and not isinstance(value, str):
+        raise _scope_error(f"{location}.{key}", "must be a string when present")
+    return value
+
+
+def _scope_status(raw: dict, location: str) -> tuple[str, Optional[str]]:
+    """Parse a scope status and its required exclusion reason."""
+    status = _required_string(raw, "status", location)
+    if status not in {"in_scope", "pending", "excluded"}:
+        raise _scope_error(f"{location}.status", "must be in_scope, pending, or excluded")
+    reason = _optional_string(raw, "reason", location)
+    if status in {"pending", "excluded"} and (reason is None or not reason.strip()):
+        raise _scope_error(f"{location}.reason", "is required and must be non-blank for pending or excluded status")
+    return status, reason
+
+
+def _expect_fields(raw: object, expected: set[str], location: str) -> dict:
+    """Require a YAML mapping with exactly the declared field names."""
+    if not isinstance(raw, dict):
+        raise _scope_error(location, "must be a mapping")
+    unknown = set(raw) - expected
+    if unknown:
+        raise _scope_error(location, f"contains unknown field(s): {', '.join(sorted(unknown))}")
+    return raw
+
+
+def _validate_root(data: object) -> dict:
+    """Validate the scope root and require a non-empty projects or scan_paths list."""
+    root = _expect_fields(data, {"projects", "scan_paths"}, "root")
+    projects = root.get("projects")
+    scan_paths = root.get("scan_paths")
+    if projects is not None and not isinstance(projects, list):
+        raise _scope_error("projects", "must be a list when present")
+    if scan_paths is not None and not isinstance(scan_paths, list):
+        raise _scope_error("scan_paths", "must be a list when present")
+    if not projects and not scan_paths:
+        raise _scope_error("root", "requires a non-empty projects or scan_paths list")
+    return root
+
+
+def _validate_project(project_raw: object, index: int) -> tuple[dict, str, str, Optional[str]]:
+    """Validate one project record and return its parsed scope metadata."""
+    location = f"projects[{index}]"
+    project = _expect_fields(
+        project_raw,
+        {"project", "description", "status", "reason", "envs"},
+        location,
+    )
+    project_name = _required_string(project, "project", location)
+    _optional_string(project, "description", location)
+    project_status, project_reason = _scope_status(project, location)
+    envs = project.get("envs")
+    if envs is None:
+        raise _scope_error(f"{location}.envs", "is required and must be a list")
+    if not isinstance(envs, list):
+        raise _scope_error(f"{location}.envs", "must be a list")
+    return project, project_name, project_status, project_reason
+
+
+def _validate_environment(
+    env_raw: object, project_location: str, env_index: int
+) -> tuple[dict, str, str, Optional[str]]:
+    """Validate one environment record and return its parsed scope metadata."""
+    location = f"{project_location}.envs[{env_index}]"
+    environment = _expect_fields(env_raw, {"name", "status", "reason"}, location)
+    env_name = _required_string(environment, "name", location)
+    env_status, env_reason = _scope_status(environment, location)
+    return environment, env_name, env_status, env_reason
+
+
+def _record_environment_decision(
+    project: str,
+    env: str,
+    project_status: str,
+    project_reason: Optional[str],
+    env_status: str,
+    env_reason: Optional[str],
+    pairs: list[tuple[str, str]],
+    excluded_pairs: set[tuple[str, str]],
+    skipped: list[SkippedScopeEnvironment],
+) -> None:
+    """Record the effective in-scope or excluded decision for one environment."""
+    key = (project, env)
+    if project_status == "in_scope" and env_status == "in_scope":
+        pairs.append(key)
+        return
+    excluded_pairs.add(key)
+    status = project_status if project_status != "in_scope" else env_status
+    reason = project_reason if project_status != "in_scope" else env_reason
+    skipped.append(SkippedScopeEnvironment(project, env, status, reason or ""))
+
+
+def _parse_scope_manifest(scope_file: Path) -> _ScopeManifest:
+    """Parse the strict ``pci_scope.yaml`` schema into exclusion-gating data.
+
+    Root keys are exactly ``projects`` and ``scan_paths``; at least one must be
+    a non-empty list. Project records accept only ``project``, ``description``,
+    ``status``, ``reason``, and ``envs``. Environment records accept only
+    ``name``, ``status``, and ``reason``. Both statuses are one of ``in_scope``,
+    ``pending``, or ``excluded``; pending and excluded records require a
+    non-blank reason. Scalar environment names and unknown keys are rejected.
+
+    The returned in-scope pairs require both project and environment status to
+    be ``in_scope``. A non-in-scope project overrides its child environment's
+    status and reason. ``scan_paths`` is validated at the same root boundary
+    and parsed separately by :func:`_load_scan_paths`.
     """
     if not _HAVE_YAML:
         raise RuntimeError(
-            "pci_scope.yaml was found at "
-            f"{scope_file} but PyYAML is not installed; "
-            "install pyyaml or remove pci_scope.yaml to fall back "
-            "to env/-tree auto-discovery."
+            f"pci_scope.yaml was found at {scope_file} but PyYAML is not installed; install pyyaml or remove pci_scope.yaml."
         )
-
-    data = _read_scope_yaml(scope_file)
-    projects = data.get("projects", []) or []
-    return _collect_scope_pairs(projects)
-
-
-def _read_scope_yaml(scope_file: Path) -> dict:
-    """Read and parse the scope YAML file, returning an empty dict on load failure.
-
-    Extracted from :func:`_load_pci_scope` so the parent function's
-    cognitive complexity stays under the S3776 ceiling. Returns
-    ``{}`` when the file is empty or contains a bare scalar — the
-    caller's ``data.get("projects", []) or []`` then degrades to a
-    no-op rather than raising.
-    """
-    with scope_file.open("r", encoding="utf-8") as fh:
-        return _yaml.safe_load(fh) or {}
-
-
-def _collect_scope_pairs(projects: list[object]) -> list[tuple[str, str]]:
-    """Flatten the ``projects:`` list of a scope YAML into (project, env) pairs.
-
-    Per-entry rules (kept here so the caller stays focused on I/O and
-    YAML availability):
-
-      * Skip entries that are not mappings (``isinstance(proj, dict)``).
-      * Honor only ``status: in_scope`` entries.
-      * Require a non-empty ``project`` field; skip otherwise.
-      * Emit one pair per non-empty ``envs`` entry.
-
-    Extracted from :func:`_load_pci_scope` to keep the parent function's
-    cognitive complexity under the S3776 ceiling.
-    """
+    root = _validate_root(_read_scope_yaml(scope_file))
+    projects = root.get("projects") or []
     pairs: list[tuple[str, str]] = []
-    for proj in projects:
-        if not isinstance(proj, dict):
-            continue
-        if proj.get("status") != "in_scope":
-            continue
-        project_name = proj.get("project")
-        if not project_name:
-            continue
-        envs = proj.get("envs") or []
-        for env_name in envs:
-            if not env_name:
-                continue
-            pairs.append((str(project_name), str(env_name)))
-    return pairs
+    excluded_pairs: set[tuple[str, str]] = set()
+    skipped: list[SkippedScopeEnvironment] = []
+    seen: set[tuple[str, str]] = set()
+    for project_index, project_raw in enumerate(projects):
+        project, project_name, project_status, project_reason = _validate_project(
+            project_raw, project_index
+        )
+        project_location = f"projects[{project_index}]"
+        for env_index, env_raw in enumerate(project["envs"]):
+            _, env_name, env_status, env_reason = _validate_environment(
+                env_raw, project_location, env_index
+            )
+            key = (project_name, env_name)
+            if key in seen:
+                raise _scope_error(
+                    f"{project_location}.envs[{env_index}]",
+                    f"duplicates declared environment {project_name}/{env_name}",
+                )
+            seen.add(key)
+            _record_environment_decision(
+                project_name,
+                env_name,
+                project_status,
+                project_reason,
+                env_status,
+                env_reason,
+                pairs,
+                excluded_pairs,
+                skipped,
+            )
+    return _ScopeManifest(pairs, excluded_pairs, skipped, root)
 
 
-def _discover_from_yaml(
-    target_repo: Path,
-    project_filter: Optional[str],
-    env_filter: Optional[str],
-) -> list[tuple[str, str]]:
-    """Handle the ``pci_scope.yaml::projects:`` discovery branch.
+def _load_pci_scope(scope_file: Path) -> list[tuple[str, str]]:
+    """Load only in-scope structured project/environment records."""
+    return _parse_scope_manifest(scope_file).in_scope_pairs
 
-    Loads in-scope (project, env) pairs from ``<target_repo>/pci_scope.yaml``
-    and applies ``project_filter`` / ``env_filter``.
 
-    The YAML is the source of truth: when it exists, env subdirectories
-    outside the YAML are out of scope by definition. We trust the
-    YAML's (project, env) list as-is; downstream ``require_env_dir``-
-    style validation happens in the scan loop, not here. Replicating
-    it here would conflate discovery with validation.
+def _read_scope_yaml(scope_file: Path) -> object:
+    """Read the YAML document before validating its structured scope contract."""
+    try:
+        with scope_file.open("r", encoding="utf-8") as fh:
+            return _yaml.safe_load(fh)
+    except _yaml.YAMLError as exc:
+        raise _scope_error("root", f"contains invalid YAML: {exc}") from exc
 
-    This helper does NOT raise :class:`NoIaCFoundError` when the
-    ``projects:`` list is empty — it may legitimately be empty in the
-    presence of a ``scan_paths:`` block. The caller (:func:`discover_pairs`)
-    raises after consulting both branches, so the "scan_paths:
-    only" YAML does not produce a false negative.
+
+def discover_skipped_scope_environments(target_repo: Path) -> list[SkippedScopeEnvironment]:
+    """Return declared pending/excluded environments for orchestrator logging."""
+    scope_file = Path(target_repo) / SCOPE_FILENAME
+    if not scope_file.is_file():
+        return []
+    return _parse_scope_manifest(scope_file).skipped_environments
+
+
+def _discover_from_yaml(target_repo: Path) -> list[tuple[str, str]]:
+    """Load in-scope structured project/environment pairs from the manifest.
+
+    Filtering deliberately belongs after scan-path exclusion gating and the
+    merge in :func:`discover_pairs`, so it applies identically to both sources.
     """
-    pairs = _load_pci_scope(target_repo / SCOPE_FILENAME)
-    return _apply_filters(pairs, project_filter, env_filter)
+    return _load_pci_scope(target_repo / SCOPE_FILENAME)
 
 
 def _discover_from_env_tree(
@@ -476,14 +582,8 @@ def _load_scan_paths(
             "install pyyaml or remove pci_scope.yaml."
         )
 
-    data = _read_scope_yaml(scope_file)
-    raw = data.get("scan_paths")
-    if not raw:
-        return []
-    if not isinstance(raw, list):
-        raise ValueError(
-            f"pci_scope.yaml: scan_paths must be a list, got {type(raw).__name__}"
-        )
+    data = _parse_scope_manifest(scope_file).raw
+    raw = data.get("scan_paths", [])
 
     entries: list[ScanPathEntry] = []
     for index, item in enumerate(raw):
@@ -517,51 +617,31 @@ def _parse_scan_path_entry(
         share the same ``(project, env)`` (enforced upstream in
         :func:`_resolve_scan_paths`).
     """
+    location = f"scan_paths[{index}]"
+    raw = _expect_fields(
+        raw,
+        {"path", "project", "env", "backend_key", "workspace", "stack_label"},
+        location,
+    )
     raw_path = raw.get("path")
-    if not raw_path or not isinstance(raw_path, str):
-        raise ValueError(
-            f"pci_scope.yaml: scan_paths[{index}].path is required and "
-            "must be a non-empty string"
-        )
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise _scope_error(f"{location}.path", "is required and must be a non-blank string")
 
     path = Path(raw_path)
     if not path.is_absolute():
         path = (target_repo / raw_path).resolve()
 
     project = raw.get("project", "default")
-    if not isinstance(project, str) or not project:
-        raise ValueError(
-            f"pci_scope.yaml: scan_paths[{index}].project must be a "
-            "non-empty string when present"
-        )
+    if not isinstance(project, str) or not project.strip():
+        raise _scope_error(f"{location}.project", "must be a non-blank string when present")
 
     env_name = raw.get("env", path.name)
-    if not isinstance(env_name, str) or not env_name:
-        raise ValueError(
-            f"pci_scope.yaml: scan_paths[{index}].env must be a "
-            "non-empty string when present"
-        )
+    if not isinstance(env_name, str) or not env_name.strip():
+        raise _scope_error(f"{location}.env", "must be a non-blank string when present")
 
-    backend_key = raw.get("backend_key")
-    if backend_key is not None and not isinstance(backend_key, str):
-        raise ValueError(
-            f"pci_scope.yaml: scan_paths[{index}].backend_key must be "
-            "a string when present"
-        )
-
-    workspace = raw.get("workspace")
-    if workspace is not None and not isinstance(workspace, str):
-        raise ValueError(
-            f"pci_scope.yaml: scan_paths[{index}].workspace must be "
-            "a string when present"
-        )
-
-    stack_label = raw.get("stack_label")
-    if stack_label is not None and not isinstance(stack_label, str):
-        raise ValueError(
-            f"pci_scope.yaml: scan_paths[{index}].stack_label must be "
-            "a string when present"
-        )
+    backend_key = _optional_string(raw, "backend_key", location)
+    workspace = _optional_string(raw, "workspace", location)
+    stack_label = _optional_string(raw, "stack_label", location)
 
     return ScanPathEntry(
         path=path,
@@ -659,53 +739,50 @@ def discover_pairs(
     env_filter: Optional[str] = None,
     include_modules: bool = False,
 ) -> list[DiscoveredPair]:
-    """Return the list of ``(project, env)`` pairs to scan.
+    """Return the resolved in-scope ``(project, env)`` pairs to scan.
 
-    Precedence (mirrors bash ``load_pci_scope``):
+    If ``pci_scope.yaml`` exists, its strict ``projects:`` and optional
+    ``scan_paths:`` records are authoritative. A projects pair is returned only
+    when both statuses are ``in_scope``. A manifest may instead contain only
+    ``scan_paths:``; declared paths are excluded only when the same manifest
+    declares their logical pair pending or excluded. Otherwise discovery uses
+    the ``env/<project>/<env>/`` tree, then the flat-root framework fallback.
 
-      1. ``<target>/pci_scope.yaml`` exists → use it (in-scope only).
-         Any ``scan_paths:`` entries in the same YAML are unioned with
-         the ``projects:`` list. A YAML with only ``scan_paths:`` (no
-         ``projects:``) is valid; ``scan_paths:`` provides the pairs.
-      2. ``<target>/env/`` exists → walk ``env/<project>/<env>/``.
-         (scan_paths has no effect in this branch — the env/ tree
-         IS the discovery source.)
-      3. Otherwise → flat-repo fallback: scan root ``*.tf`` and emit
-         ``[("default", "default")]`` if any exist. Filters RELABEL
-         the single pair rather than filtering to zero.
-
-    Filters are applied inside the branch helpers so a non-matching
-    filter returns ``[]`` rather than raising (``NoIaCFoundError``
-    is reserved for the "nothing to scan at all" case — see below;
-    :class:`NoTerraformFoundError` is a deprecated alias kept for
-    backward compat).
+    ``--project`` and ``--env`` filter the fully merged, exclusion-gated
+    in-scope set. A non-matching filter returns ``[]``; it does not make a
+    pending or excluded pair scannable. In flat-root fallback mode alone, the
+    filters relabel its single ``(default, default)`` pair.
 
     Raises:
-        NoIaCFoundError: when NEITHER the ``projects:`` list NOR
-            the ``scan_paths:`` list OR the env/-tree walk produces
-            any pairs (the legacy "nothing to scan at all" signal).
-            Also raised by :func:`_discover_from_env_tree` /
-            :func:`_discover_flat_repo` for their empty-repo cases.
-        ScanPathsCollisionError: when two ``scan_paths:`` entries
-            collide on ``(project, env)`` and neither has a
-            ``stack_label``.
+        NoIaCFoundError: when an unfiltered manifest, env tree, or flat repo
+            produces no scan pairs.
+        ScanPathsCollisionError: when colliding ``scan_paths:`` entries lack a
+            per-entry ``stack_label``.
     """
     target_repo = Path(target_repo)
+    scope_file = target_repo / SCOPE_FILENAME
     legacy: list[tuple[str, str]] = []
+    excluded_pairs: set[tuple[str, str]] = set()
 
-    if (target_repo / SCOPE_FILENAME).is_file():
-        legacy = _discover_from_yaml(target_repo, project_filter, env_filter)
+    if scope_file.is_file():
+        scope_manifest = _parse_scope_manifest(scope_file)
+        legacy = scope_manifest.in_scope_pairs
+        excluded_pairs = scope_manifest.excluded_pairs
     elif (target_repo / "env").is_dir():
-        legacy = _discover_from_env_tree(target_repo, project_filter, env_filter)
+        legacy = _discover_from_env_tree(target_repo, None, None)
     else:
         legacy = _discover_flat_repo(target_repo, project_filter, env_filter)
 
     # scan_paths is OPTIONAL and only meaningful when pci_scope.yaml
-    # exists (it's a YAML key). In env/-tree and flat-root modes we
-    # don't widen the discovery surface.
+    # exists (it's a YAML key). An explicitly declared stack is omitted
+    # only when its logical pair is pending/excluded in the same manifest.
     scan_path_pairs: list[DiscoveredPair] = []
-    if (target_repo / SCOPE_FILENAME).is_file():
-        scan_path_pairs = _discover_from_scan_paths(target_repo, include_modules)
+    if scope_file.is_file():
+        scan_path_pairs = [
+            pair
+            for pair in _discover_from_scan_paths(target_repo, include_modules)
+            if pair.key() not in excluded_pairs
+        ]
 
     # Union: convert legacy tuples to DiscoveredPair (no stack_root).
     legacy_pairs: list[DiscoveredPair] = [
@@ -729,13 +806,18 @@ def discover_pairs(
         seen_pairs.add(key)
         merged.append(pair)
 
-    # Final "nothing to scan at all" guard. Previously raised inside
-    # _discover_from_yaml, but a YAML with only ``scan_paths:`` and no
-    # ``projects:`` is now valid — scan_paths provides the pairs.
-    # When the merged result is empty AND no filters narrowed it, the
-    # repo has nothing to scan. When filters ARE active, an empty
-    # result is a valid "no matches" signal and returns ``[]``
-    # (matching the legacy contract).
+    # The filters operate on the fully merged, exclusion-gated result so
+    # YAML projects and explicit scan_paths have identical CLI semantics.
+    merged = [
+        pair
+        for pair in merged
+        if (project_filter is None or pair.project == project_filter)
+        and (env_filter is None or pair.env == env_filter)
+    ]
+
+    # Final "nothing to scan at all" guard. A filtered empty result remains a
+    # valid no-match response, while an unfiltered manifest must declare at
+    # least one in-scope pair or unmatched explicit scan-path.
     if not merged and project_filter is None and env_filter is None:
         raise NoIaCFoundError(
             f"No IaC files found under {target_repo}. "

@@ -63,7 +63,7 @@ pacioli scan <target-repo>
 **Start here:**
 
 - [docs/CONSUMING_GUIDE.md](docs/CONSUMING_GUIDE.md) — first-time setup for adding the scanner to an IaC repo.
-- [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) — full operator runbook.
+- [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) — full operator runbook, including version-controlled scan scope versus temporary report view exclusions.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the pieces fit together.
 - [docs/INDEX.md](docs/INDEX.md) — master table of contents.
 
@@ -72,7 +72,7 @@ pacioli scan <target-repo>
 - [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) — every argument and environment variable.
 - [docs/MAPPING_SCHEMA.md](docs/MAPPING_SCHEMA.md) — mapping YAML format.
 - [docs/CHECK_AUTHORING.md](docs/CHECK_AUTHORING.md) — adding a custom check.
-- [docs/REPORT_FORMAT.md](docs/REPORT_FORMAT.md) — every output file.
+- [docs/REPORT_FORMAT.md](docs/REPORT_FORMAT.md) — every output file, report view filters, theme behavior, and full-scan evidence boundaries.
 - [docs/SAFETY_MODEL.md](docs/SAFETY_MODEL.md) — the read-only invariant.
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common failures.
 

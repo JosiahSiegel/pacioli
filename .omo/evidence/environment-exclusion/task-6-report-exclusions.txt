@@ -1,0 +1,15 @@
+python -m pytest scanner/tests/test_aggregate_html.py -v
+34 passed in 0.74s
+
+python -m pytest scanner/tests/test_report_browser.py -v
+2 passed in 2.78s
+
+ruff check scanner/aggregate.py
+All checks passed!
+
+lsp_diagnostics scanner/aggregate.py
+No diagnostics found
+lsp_diagnostics scanner/tests/test_aggregate_html.py
+No diagnostics found
+
+Note: test_report_browser.py was checked with the available ruff LSP path but the workspace resolver selected a different worktree path; the authoritative Playwright suite passed above.

@@ -2,7 +2,8 @@
 # =============================================================================
 # Targets (this Makefile is for the scanner repo itself, NOT for consumers):
 #   make help            - Print the target list
-#   make test            - Run pytest
+#   make test            - Run non-browser pytest tests
+#   make test-browser    - Run static report browser smoke tests (preinstalled test extra + Chromium required)
 #   make lint            - ruff check (skips silently if ruff not installed)
 #   make selftest        - Safety invariant self-test (read-only guard)
 #   make sync-mappings   - Mirror mappings/*.yaml -> scanner/mappings/*.yaml
@@ -17,13 +18,14 @@
 # Terraform repo, set `PACIOLI_DIR` to point at this checkout).
 # =============================================================================
 
-.PHONY: help test lint selftest sync-mappings check-mappings install clean
+.PHONY: help test test-browser lint selftest sync-mappings check-mappings install clean
 
 SCANNER_DIR := scanner
 
 help:
 	@echo "Pacioli scanner targets (this Makefile is for the scanner repo):"
-	@echo "  make test            - Run pytest ($(SCANNER_DIR)/tests)"
+	@echo "  make test            - Run non-browser pytest ($(SCANNER_DIR)/tests)"
+	@echo "  make test-browser    - Run browser smoke tests (requires preinstalled .[test] + Chromium)"
 	@echo "  make lint            - ruff check $(SCANNER_DIR)/"
 	@echo "  make selftest        - Safety invariant self-test (python -m scanner.safety)"
 	@echo "  make sync-mappings   - Mirror mappings/*.yaml -> scanner/mappings/*.yaml"
@@ -41,7 +43,12 @@ help:
 	@echo "  docs/CONSUMING_GUIDE.md"
 
 test: sync-mappings
-	pytest $(SCANNER_DIR)/tests/ -v
+	pytest $(SCANNER_DIR)/tests/ -v -m "not browser"
+
+test-browser: sync-mappings
+	@python -c "import playwright; import pytest_playwright" || { echo "ERROR: browser prerequisites are missing. Install with: pip install -e \".[test]\""; exit 1; }
+	@python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); browser = p.chromium.launch(); browser.close(); p.stop()" || { echo "ERROR: Chromium is unavailable. Install it with: python -m playwright install chromium"; exit 1; }
+	pytest $(SCANNER_DIR)/tests/test_report_browser.py -v --browser chromium --tracing retain-on-failure --screenshot only-on-failure
 
 lint:
 	@if command -v ruff >/dev/null 2>&1; then \

@@ -1,0 +1,18 @@
+Task 5 verification evidence
+============================
+
+Command:
+python -m pytest scanner/tests/test_aggregate_html.py -v && ruff check scanner/aggregate.py && python -m pytest scanner/tests/test_report_browser.py -v
+
+Result: PASS
+- scanner/tests/test_aggregate_html.py: 31 passed in 0.77s
+- ruff check scanner/aggregate.py: All checks passed!
+- scanner/tests/test_report_browser.py: 1 passed in 1.89s
+
+Manual/browser QA:
+- Chromium loaded the generated static report over loopback and asserted the report title.
+- The new renderer contract test verifies dark-first document state, color-scheme metadata, semantic dark/light/system declarations, guarded namespaced storage, system media listener, visible focus rule, reduced-motion rule, native labelled Theme select options, and all required DESIGN.md headers.
+
+Notes:
+- The first full aggregate test attempt observed a transient CKV_AZURE_44 severity mismatch. Reproducing against stashed pre-task state produced the same mismatch; a targeted re-run and the final full suite passed without changing severity code.
+- No external fonts, assets, framework, or separate theme JavaScript file were added.

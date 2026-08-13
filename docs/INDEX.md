@@ -24,8 +24,8 @@ jump directly to the section that matches your role.
 - **[Check Authoring](CHECK_AUTHORING.md)** — how to add a custom
   `CKV_AZURE_PCI_*` Checkov check.
 - **[Report Format](REPORT_FORMAT.md)** — every file in
-  `~/.pacioli/runs/<run-id>/`, the HTML report routes, and the SARIF/CSV
-  schemas.
+  `~/.pacioli/runs/<run-id>/`, the HTML report routes, browser-local report
+  view and theme behavior, and the SARIF/CSV evidence boundaries.
 
 ## Project documents
 
