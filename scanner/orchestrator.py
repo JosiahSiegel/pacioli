@@ -82,6 +82,7 @@ from scanner.checkov_runner import CheckovRunner  # noqa: E402
 from scanner.discovery import (  # noqa: E402
     DiscoveredPair,
     NoTerraformFoundError,
+    ScopeManifestError,
     discover_pairs,
     discover_skipped_scope_environments,
 )
@@ -351,6 +352,18 @@ class Orchestrator:
                     include_modules=include_modules,
                 )
             )
+            # Double-parse invariant: both ``discover_pairs`` (called
+            # inside ``_resolve_scan_inputs`` above) and
+            # ``discover_skipped_scope_environments`` (below) gate on
+            # ``scope_file.is_file()`` identically — see
+            # ``scanner.discovery.discover_pairs`` at
+            # ``scanner/discovery.py:767`` and
+            # ``scanner.discovery.discover_skipped_scope_environments``
+            # at ``scanner/discovery.py:445``. Once ``_resolve_scan_inputs``
+            # has succeeded, the re-parse below cannot raise
+            # ``ScopeManifestError``: a malformed file would have failed
+            # earlier and been rewrapped as ``OrchestratorError``. No
+            # second guard is needed.
             skipped_environments = discover_skipped_scope_environments(target_repo)
 
             for skipped in skipped_environments:
@@ -430,6 +443,14 @@ class Orchestrator:
                 include_modules=include_modules,
             )
         except NoTerraformFoundError as exc:
+            raise OrchestratorError(str(exc)) from exc
+        except ScopeManifestError as exc:
+            # Scope-manifest validation failed (malformed YAML, unknown
+            # field, wrong shape, etc.). Rewrap as OrchestratorError so
+            # the top-level handler at ``scan()`` emits a clean
+            # ``ERROR <msg>`` + ``rc=1`` instead of a Python traceback.
+            # ``ScanPathsCollisionError`` inherits from
+            # ``ScopeManifestError`` and is caught here too.
             raise OrchestratorError(str(exc)) from exc
 
         return target_repo, resolved_mapping, resolved_baseline, pairs

@@ -3260,3 +3260,93 @@ def test_pause_does_not_fire_when_files_exist(
         "orchestrator must run when both config files already exist; "
         f"got {len(stub_orchestrator)} calls"
     )
+
+
+# ---------------------------------------------------------------------------
+# TODO 4 — Friendly CLI errors for scope-manifest validation failures
+# ---------------------------------------------------------------------------
+#
+# Before this todo, a malformed ``.pacioli/scope.yaml`` raised a bare
+# ``ValueError`` from ``scanner.discovery``; the CLI dispatcher did not
+# catch it, so the user saw a full Python traceback on stderr. The fix
+# re-routes scope-manifest errors through ``OrchestratorError`` so the
+# top-level handler at ``scanner/orchestrator.py:2439-2441`` emits
+# ``ERROR <msg>`` and returns ``rc=1`` — the same code path other
+# user-facing failures already use.
+#
+# These subprocess tests guard the contract end-to-end (the real
+# ``pacioli scan`` entry point, not in-process mocks).
+
+
+def test_malformed_scope_manifest_returns_clean_cli_error(tmp_path: Path) -> None:
+    """A malformed ``.pacioli/scope.yaml`` produces ``ERROR`` + ``rc=1``, no traceback.
+
+    Concretely: write a scope file where ``envs`` is a string instead of
+    a list. The schema parser in ``scanner/discovery.py`` rejects that
+    with a ``ScopeManifestError``. After TODO 4 the orchestrator rewraps
+    it as ``OrchestratorError``; the CLI dispatcher logs ``ERROR <msg>``
+    and exits 1. The previous behaviour leaked a Python traceback to
+    stderr, which is what this test guards against.
+    """
+    scope_file = tmp_path / ".pacioli" / "scope.yaml"
+    scope_file.parent.mkdir(parents=True, exist_ok=True)
+    # ``envs`` must be a list of env records. A bare string triggers the
+    # "must be a list" branch in ``_expect_fields`` for project records.
+    scope_file.write_text(
+        "projects:\n"
+        "  - project: payments\n"
+        "    status: in_scope\n"
+        "    envs: not-a-list\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli("scan", str(tmp_path), "--non-interactive")
+
+    assert result.returncode == 1, (
+        f"malformed scope should exit 1; got rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "ERROR " in result.stderr, (
+        f"stderr should contain the friendly 'ERROR ' prefix; got: {result.stderr!r}"
+    )
+    assert "Traceback" not in result.stderr, (
+        f"stderr must NOT contain a Python traceback; got: {result.stderr!r}"
+    )
+    # The friendly message should name the offending YAML location so
+    # the operator can fix the right field.
+    assert ".pacioli/scope.yaml" in result.stderr, (
+        f"stderr should reference the scope file path; got: {result.stderr!r}"
+    )
+
+
+def test_unknown_field_in_scope_manifest_returns_clean_cli_error(tmp_path: Path) -> None:
+    """An unknown top-level field in ``.pacioli/scope.yaml`` is a friendly error.
+
+    The plan's QA scenario locks the exact message shape:
+    ``ERROR .pacioli/scope.yaml.root: contains unknown field(s): foo``.
+    """
+    scope_file = tmp_path / ".pacioli" / "scope.yaml"
+    scope_file.parent.mkdir(parents=True, exist_ok=True)
+    scope_file.write_text(
+        "foo: bar\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli("scan", str(tmp_path), "--non-interactive")
+
+    assert result.returncode == 1, (
+        f"unknown-field scope should exit 1; got rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "ERROR " in result.stderr, (
+        f"stderr should contain 'ERROR ' prefix; got: {result.stderr!r}"
+    )
+    assert "Traceback" not in result.stderr, (
+        f"stderr must NOT contain a Python traceback; got: {result.stderr!r}"
+    )
+    assert "unknown field" in result.stderr, (
+        f"stderr should describe the unknown-field failure; got: {result.stderr!r}"
+    )
+    assert ".pacioli/scope.yaml.root" in result.stderr, (
+        f"stderr should pinpoint the .root YAML location; got: {result.stderr!r}"
+    )

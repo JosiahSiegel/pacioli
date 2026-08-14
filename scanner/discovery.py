@@ -95,7 +95,18 @@ NoTerraformFoundError = NoIaCFoundError
 SCOPE_FILENAME: Final[str] = ".pacioli/scope.yaml"
 
 
-class ScanPathsCollisionError(ValueError):
+class ScopeManifestError(ValueError):
+    """Raised on any validation failure in the ``.pacioli/scope.yaml`` manifest.
+
+    A typed parent so the orchestrator can catch scope-manifest errors
+    specifically and rewrap them as :class:`OrchestratorError`, giving
+    the user a clean ``ERROR <msg>`` + ``rc=1`` instead of a Python
+    traceback. Subclasses (e.g. :class:`ScanPathsCollisionError`)
+    inherit this catch.
+    """
+
+
+class ScanPathsCollisionError(ScopeManifestError):
     """Raised when two ``scan_paths:`` entries collide on ``(project, env)``.
 
     The collision contract is fail-closed: if two declared stack roots
@@ -103,6 +114,10 @@ class ScanPathsCollisionError(ValueError):
     ``stack_label:``, the scanner refuses to proceed rather than
     silently picking one. The exception message names both entries so
     the operator can add a ``stack_label:`` to disambiguate.
+
+    Inherits from :class:`ScopeManifestError` so the orchestrator's
+    scope-manifest catch picks it up and the user sees a friendly CLI
+    error rather than a traceback.
     """
 
 
@@ -258,9 +273,9 @@ class _ScopeManifest:
     raw: dict
 
 
-def _scope_error(location: str, message: str) -> ValueError:
+def _scope_error(location: str, message: str) -> ScopeManifestError:
     """Build a schema error which names the offending YAML location."""
-    return ValueError(f"{SCOPE_FILENAME}.{location}: {message}")
+    return ScopeManifestError(f"{SCOPE_FILENAME}.{location}: {message}")
 
 
 def _required_string(raw: dict, key: str, location: str) -> str:
@@ -592,9 +607,9 @@ def _load_scan_paths(
     entries: list[ScanPathEntry] = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            raise ValueError(
-                f"{SCOPE_FILENAME}: scan_paths[{index}] must be a mapping, "
-                f"got {type(item).__name__}"
+            raise _scope_error(
+                f"scan_paths[{index}]",
+                f"must be a mapping, got {type(item).__name__}",
             )
         entries.append(_parse_scan_path_entry(item, index, target_repo))
     return entries

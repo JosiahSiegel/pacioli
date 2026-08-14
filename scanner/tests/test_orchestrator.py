@@ -305,7 +305,7 @@ def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) ->
             state_account=None,
         )
 
-    with pytest.raises(ValueError, match="pci_scope.yaml.projects"):
+    with pytest.raises(OrchestratorError, match=r"\.pacioli/scope\.yaml\.projects:"):
         _invoke_scan()
 
     assert not output_dir.exists()
