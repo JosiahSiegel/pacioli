@@ -5,6 +5,17 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [2.0.0](https://github.com/JosiahSiegel/pacioli/compare/v1.5.0...v2.0.0) (2026-08-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **scanner:** The default scope and baseline files now live under <target_repo>/.pacioli/scope.yaml and <target_repo>/.pacioli/baseline.yaml. Old pci_scope.yaml / pci_baseline.yaml files in consumer repositories are silently ignored after upgrade. Baseline suppressions stop applying until the baseline is recreated at the new path, and the bootstrap regenerates scope with everything in_scope (curated pending/excluded statuses are not carried over). See docs/TROUBLESHOOTING.md for the full migration steps. test_orchestrator.py::test_invalid_scope_fails_before_creating_output_directory still asserts the old pci_scope.yaml error prefix and will be fixed in the follow-up friendly-error todo.
+
+### Code Refactoring
+
+* **scanner:** rename config files to .pacioli/, optional reason, friendly errors ([#37](https://github.com/JosiahSiegel/pacioli/issues/37)) ([aebb0f9](https://github.com/JosiahSiegel/pacioli/commit/aebb0f96eb88b27840ba891115bf6773aad8495c))
+
 ## [Unreleased]
 
 
