@@ -113,6 +113,32 @@ boundary. For `projects:` entries, the scanner walks
 `env/<project>/<env>/` only when both the project and environment are
 `in_scope`.
 
+Instead of copying the example file by hand, run `pacioli scan --init`
+from the repo root. The CLI auto-discovers your IaC projects and
+environments and populates both `pci_scope.yaml` and `pci_baseline.yaml`
+atomically:
+
+```bash
+pacioli scan --init .
+```
+
+Output:
+
+```
+INFO  created /path/to/repo/pci_scope.yaml
+INFO  created /path/to/repo/pci_baseline.yaml
+```
+
+The generated `pci_scope.yaml` includes one `project:` entry per
+discovered stack, with every `envs:` set to `in_scope` by default. The
+generated `pci_baseline.yaml` starts with an empty `suppressions: []`
+list plus a comment header documenting the schema and discovery
+coverage. Existing files are never overwritten; if either already
+exists, the bootstrap is skipped silently.
+
+If you prefer to start from the curated example template instead of an
+auto-discovered manifest, the legacy command still works:
+
 ```bash
 cp ../pacioli/examples/scope.yaml.example ./pci_scope.yaml
 ```
@@ -188,6 +214,12 @@ Light, or System theme locally in the browser. See
 `pci_baseline.yaml` lists per-finding suppressions. Initially it
 should be an empty list — you populate it after the first scan.
 
+If you used `pacioli scan --init` in Step 2, this file already exists
+at the repo root with an empty `suppressions: []` list and a comment
+header. Skip to the **Headless / CI** section.
+
+If you copied the example file by hand instead, use the legacy command:
+
 ```bash
 cp ../pacioli/examples/baseline.yaml.example ./pci_baseline.yaml
 ```
@@ -204,7 +236,9 @@ suppressions: []
 ```
 
 You do NOT need to add any entries before the first scan. The
-aggregator handles the empty-list case.
+aggregator handles the empty-list case. After the first scan completes,
+run `pacioli baseline init <run-dir>` against that run directory to
+seed stub suppression entries for triage.
 
 ## Headless / CI
 

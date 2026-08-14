@@ -196,6 +196,7 @@ once it reaches 1.0.
 ### Features
 
 * **cli:** interactive mapping-pack picker when no `--mapping` / `PACIOLI_MAPPING` is set in an interactive shell (#[26](https://github.com/JosiahSiegel/pacioli/pull/26))
+* **Scope+baseline bootstrap on first run**: `pacioli scan` and `pacioli gate` now offer to scaffold `pci_scope.yaml` and `pci_baseline.yaml` when missing (interactive shells only). Pass `--init` to auto-create them silently in CI. Existing files are preserved. The bootstrap discovers projects and environments across all Checkov-supported frameworks (Terraform, CloudFormation, Kubernetes, Dockerfile, Bicep, Helm, OpenAPI, etc.) and emits a rich comment header with schema and examples.
 
 
 ### Documentation

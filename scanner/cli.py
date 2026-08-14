@@ -349,6 +349,14 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--init",
+        action="store_true",
+        help=(
+            "Auto-create missing pci_scope.yaml and pci_baseline.yaml "
+            "without prompting. Works in non-interactive environments."
+        ),
+    )
+    parser.add_argument(
         "--no-open",
         action="store_true",
         help="Do not auto-open the generated report.html in the default browser after the scan.",
@@ -1036,6 +1044,47 @@ def _maybe_prompt_for_mapping_pack(args: argparse.Namespace) -> Optional[int]:
     return None
 
 
+def _maybe_bootstrap_config(args: argparse.Namespace, target_repo: Path) -> Optional[int]:
+    """Run the scope+baseline bootstrap if missing config files are detected.
+
+    Returns:
+        None when no bootstrap was needed (or succeeded). Returns an int exit
+        code when the bootstrap should abort the scan (e.g., --init was
+        specified but creation failed).
+    """
+    from scanner import config_bootstrap
+
+    scope_missing, baseline_missing = config_bootstrap.missing_config_files(target_repo)
+    if not scope_missing and not baseline_missing:
+        return None  # both files exist, nothing to bootstrap
+
+    if getattr(args, "init", False):
+        # --init flag: auto-create silently in any environment.
+        try:
+            written = config_bootstrap.auto_create(
+                args, target_repo, scope_missing, baseline_missing
+            )
+            for path in written:
+                _log("INFO", f"created {path}")
+        except (OSError, config_bootstrap.ScopeInitError) as exc:
+            _log("ERROR", f"bootstrap failed: {exc}")
+            return 2
+    elif config_bootstrap.is_bootstrap_interactive(args):
+        # Interactive: prompt the user.
+        try:
+            written = config_bootstrap.prompt_and_create(
+                args, target_repo, scope_missing, baseline_missing
+            )
+            for path in written:
+                _log("INFO", f"created {path}")
+        except (EOFError, KeyboardInterrupt):
+            # No-op on cancellation (matches mapping picker pattern).
+            return None
+    # else: non-interactive and no --init -> skip silently (current behavior).
+
+    return None
+
+
 def _handle_scan(args: argparse.Namespace) -> int:
     """Dispatch ``pacioli scan`` to :func:`scanner.orchestrator.main`."""
     args = _apply_backcompat(args)
@@ -1058,6 +1107,12 @@ def _handle_scan(args: argparse.Namespace) -> int:
     # orchestrator sees it as if the user had typed --mapping explicitly
     # (preserves the "explicit never silently swaps" contract).
     rc = _maybe_prompt_for_mapping_pack(args)
+    if rc is not None:
+        return rc
+
+    # Bootstrap scope/baseline if missing (after mapping picker so picker gets first refusal).
+    target_repo = Path(args.target_repo)
+    rc = _maybe_bootstrap_config(args, target_repo)
     if rc is not None:
         return rc
 
@@ -1091,6 +1146,12 @@ def _handle_gate(args: argparse.Namespace) -> int:
 
     # Interactive mapping picker (same gate as _handle_scan; HOTFIX 1.1.1).
     rc = _maybe_prompt_for_mapping_pack(args)
+    if rc is not None:
+        return rc
+
+    # Bootstrap scope/baseline if missing (same gate as _handle_scan).
+    target_repo = Path(args.target_repo)
+    rc = _maybe_bootstrap_config(args, target_repo)
     if rc is not None:
         return rc
 

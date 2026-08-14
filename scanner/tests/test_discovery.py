@@ -131,6 +131,37 @@ def test_shipped_scope_example_uses_structured_records_and_discovers_pairs(
     assert _pairs(pairs) == [("myapp", "prod"), ("myapp-data", "prod")]
 
 
+def test_shipped_baseline_example_uses_mapping_root_and_loads() -> None:
+    """``examples/baseline.yaml.example`` must be loadable by ``aggregate.load_baseline``.
+
+    Regression test for the bug where the example was a top-level YAML
+    list but ``load_baseline`` expects a mapping root with
+    ``suppressions: []``. If the example regresses to a list root,
+    ``load_baseline`` would call ``data.get("suppressions", [])`` on a
+    list and raise ``AttributeError``.
+    """
+    from scanner.aggregate import load_baseline
+
+    example_path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "examples"
+        / "baseline.yaml.example"
+    )
+    assert example_path.is_file(), f"example file missing: {example_path}"
+
+    raw = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict), (
+        f"baseline example must be a mapping root, got {type(raw).__name__}"
+    )
+    assert set(raw) >= {"version", "verified_against", "suppressions"}
+    assert isinstance(raw["suppressions"], list)
+    assert raw["suppressions"] == []
+
+    result = load_baseline(example_path)
+    assert isinstance(result, list), "load_baseline should return a list"
+    assert result == [], f"expected empty suppressions, got {result}"
+
+
 # ---------------------------------------------------------------------------
 # 2. env/ tree detection
 # ---------------------------------------------------------------------------

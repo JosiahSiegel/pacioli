@@ -385,6 +385,8 @@ def _make_args(**kwargs: object) -> argparse.Namespace:
         "backend_key": None,
         # Todo 12: --framework flag.
         "framework": None,
+        # scan-config-bootstrap: --init flag (auto-create missing config files).
+        "init": False,
     }
     base.update(kwargs)
     return argparse.Namespace(**base)
@@ -2713,4 +2715,233 @@ def test_handle_scan_rejects_framework_plan_mismatch(
     assert "argv" not in captured, (
         f"orchestrator.main was invoked despite validation failure; "
         f"captured={captured!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# scan-config-bootstrap: --init flag wiring
+# ---------------------------------------------------------------------------
+#
+# Tests that exercise the new ``--init`` flag wired into the scan/gate
+# subcommands in Task 3 (scanner/cli.py:_add_scan_flags, _handle_scan,
+# _handle_gate). ``_init_handler_short_circuits`` is mocked to keep the
+# suite hermetic; real subprocess invocations are deliberately avoided.
+
+
+def test_init_flag_appears_in_scan_help(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``pacioli scan --help`` lists the new ``--init`` flag and its scope mention.
+
+    The help text is the contract the user reads; losing the flag (or
+    its scope/baseline mention) silently breaks first-time adopters, so
+    we assert the literal token ``--init`` AND the ``pci_scope.yaml``
+    substring so any future help-text rewrite that drops the scope
+    reference fails fast.
+    """
+    result = _run_cli("scan", "--help")
+    captured = capsys.readouterr()  # noqa: F841 -- not used, just for symmetry
+    assert result.returncode == 0, (
+        f"pacioli scan --help returned rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "--init" in result.stdout, (
+        f"--init flag missing from pacioli scan --help; stdout={result.stdout[:600]!r}"
+    )
+    assert "pci_scope.yaml" in result.stdout, (
+        f"--init help text should mention pci_scope.yaml; "
+        f"stdout={result.stdout[:600]!r}"
+    )
+
+
+def test_init_flag_appears_in_gate_help() -> None:
+    """``pacioli gate --help`` lists the new ``--init`` flag.
+
+    Gate reuses ``_add_scan_flags`` so the flag must appear in both
+    subcommands' ``--help`` banners. This guards against a future
+    refactor that splits scan/gate parsers without re-registering the
+    bootstrap flag.
+    """
+    result = _run_cli("gate", "--help")
+    assert result.returncode == 0, (
+        f"pacioli gate --help returned rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "--init" in result.stdout, (
+        f"--init flag missing from pacioli gate --help; stdout={result.stdout[:600]!r}"
+    )
+
+
+def test_handle_scan_invokes_bootstrap_when_init_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When ``args.init=True``, ``_handle_scan`` calls ``config_bootstrap.auto_create``.
+
+    Mirrors scanner/cli.py:_maybe_bootstrap_config line 1061: a bare
+    ``args.init=True`` forces the auto-create branch regardless of
+    interactive / non-interactive state. We capture the bootstrap call
+    to verify the args/paths flow through unchanged, and stub the
+    orchestrator so we don't actually scan.
+
+    Both files are reported missing by the patched ``missing_config_files``
+    helper, so the auto_create branch must be the one that executes
+    (it's the only branch in the boolean tree that calls ``auto_create``).
+    """
+    from scanner import cli, config_bootstrap
+    import scanner.orchestrator as orchestrator_mod
+
+    bootstrap_calls: list[dict[str, object]] = []
+
+    def fake_auto_create(args, target_repo, scope_path, baseline_path):
+        bootstrap_calls.append({
+            "args": args,
+            "target_repo": target_repo,
+            "scope_path": scope_path,
+            "baseline_path": baseline_path,
+        })
+        return []  # nothing actually written
+
+    def fake_missing_config_files(target_repo: Path):
+        # Both files missing → forces _maybe_bootstrap_config down the
+        # auto_create branch when args.init=True.
+        return (target_repo / "pci_scope.yaml", target_repo / "pci_baseline.yaml")
+
+    monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto_create)
+    monkeypatch.setattr(config_bootstrap, "missing_config_files",
+                        fake_missing_config_files)
+    monkeypatch.setattr(config_bootstrap, "is_bootstrap_interactive",
+                        lambda a: True)  # would otherwise prompt; init must win
+
+    orchestrator_called: list[list[str]] = []
+
+    def fake_orchestrator_main(argv: list[str]) -> int:
+        orchestrator_called.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(orchestrator_mod, "main", fake_orchestrator_main)
+
+    args = _make_args(
+        init=True,
+        target_dir=str(tmp_path),
+        non_interactive=True,
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    assert len(bootstrap_calls) == 1, (
+        f"--init=True should call config_bootstrap.auto_create exactly once; "
+        f"got {len(bootstrap_calls)} calls: {bootstrap_calls!r}"
+    )
+    call = bootstrap_calls[0]
+    assert call["args"] is args, (
+        f"_handle_scan must pass the same args namespace through to auto_create; "
+        f"got {call['args']!r}"
+    )
+    assert Path(call["target_repo"]) == tmp_path.resolve(), (
+        f"target_repo must be the resolved tmp_path; got {call['target_repo']!r}"
+    )
+    # Orchestrator runs AFTER bootstrap completes successfully.
+    assert len(orchestrator_called) == 1, (
+        f"orchestrator.main should be called once after bootstrap; "
+        f"got {len(orchestrator_called)} calls"
+    )
+
+
+def test_handle_scan_skips_bootstrap_when_non_interactive_no_init(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When ``args.init=False`` and non-interactive, no bootstrap function is called.
+
+    Mirrors scanner/cli.py:_maybe_bootstrap_config line 1083 comment:
+    "non-interactive and no --init -> skip silently (current behavior)".
+    We verify BOTH ``auto_create`` and ``prompt_and_create`` are
+    untouched, and that the orchestrator still runs normally.
+    """
+    from scanner import cli, config_bootstrap
+    import scanner.orchestrator as orchestrator_mod
+
+    auto_called = {"flag": False}
+    prompt_called = {"flag": False}
+
+    def fake_auto(*args, **kwargs):  # pragma: no cover -- failure path
+        auto_called["flag"] = True
+        return []
+
+    def fake_prompt(*args, **kwargs):  # pragma: no cover -- failure path
+        prompt_called["flag"] = True
+        return []
+
+    monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto)
+    monkeypatch.setattr(config_bootstrap, "prompt_and_create", fake_prompt)
+    monkeypatch.setattr(config_bootstrap, "missing_config_files",
+                        lambda r: (r / "pci_scope.yaml", r / "pci_baseline.yaml"))
+    monkeypatch.setattr(config_bootstrap, "is_bootstrap_interactive",
+                        lambda a: False)
+
+    orchestrator_called: list[list[str]] = []
+
+    def fake_orchestrator_main(argv: list[str]) -> int:
+        orchestrator_called.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(orchestrator_mod, "main", fake_orchestrator_main)
+
+    args = _make_args(
+        init=False,
+        target_dir=str(tmp_path),
+        non_interactive=True,
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    assert not auto_called["flag"], (
+        "auto_create must NOT be called when args.init=False"
+    )
+    assert not prompt_called["flag"], (
+        "prompt_and_create must NOT be called when is_bootstrap_interactive=False"
+    )
+    assert len(orchestrator_called) == 1, (
+        f"orchestrator.main should still run with rc=0; "
+        f"got {len(orchestrator_called)} calls"
+    )
+
+
+def test_handle_gate_invokes_bootstrap_when_init_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``_handle_gate`` also routes through ``_maybe_bootstrap_config`` when init=True.
+
+    Mirrors scanner/cli.py line 1154: gate shares the same bootstrap
+    gate as scan (both handlers call ``_maybe_bootstrap_config``). The
+    test only adds init coverage for gate to lock the parity contract
+    without duplicating the full logic verified on scan.
+    """
+    from scanner import cli, config_bootstrap
+    import scanner.orchestrator as orchestrator_mod
+
+    bootstrap_calls: list[Path] = []
+
+    def fake_auto_create(args, target_repo, scope_path, baseline_path):
+        bootstrap_calls.append(Path(target_repo))
+        return []
+
+    monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto_create)
+    monkeypatch.setattr(config_bootstrap, "missing_config_files",
+                        lambda r: (r / "pci_scope.yaml", r / "pci_baseline.yaml"))
+    monkeypatch.setattr(config_bootstrap, "is_bootstrap_interactive",
+                        lambda a: True)
+    monkeypatch.setattr(orchestrator_mod, "main", lambda argv: 0)
+
+    args = _make_args(
+        init=True,
+        target_dir=str(tmp_path),
+        non_interactive=True,
+        mode="report",  # gate overrides to "gate" internally
+    )
+    rc = cli._handle_gate(args)
+    assert rc == 0, f"_handle_gate returned {rc}; expected 0"
+    assert len(bootstrap_calls) == 1, (
+        f"--init=True on _handle_gate must call auto_create exactly once; "
+        f"got {len(bootstrap_calls)} calls"
     )
