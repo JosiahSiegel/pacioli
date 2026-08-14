@@ -26,9 +26,12 @@ PACIOLI_DIR ?= ../pacioli
 # `pacioli-scan` is also accepted; set PACIOLI_BIN=pacioli-scan to use it.
 PACIOLI_BIN ?= pacioli
 
-# Scope + baseline live in THIS repo (consumer-owned).
-SCOPE_FILE ?= pci_scope.yaml
-BASELINE_FILE ?= pci_baseline.yaml
+# Scope + baseline live in THIS repo (consumer-owned), under the
+# `.pacioli/` directory. The previous repo-root config filenames are
+# silently ignored after upgrading Pacioli; see the CHANGELOG and
+# TROUBLESHOOTING migration notes for the clean-break steps.
+SCOPE_FILE ?= .pacioli/scope.yaml
+BASELINE_FILE ?= .pacioli/baseline.yaml
 
 # Mapping pack to use. Default: PCI DSS v4.0.1 from the pacioli install.
 MAPPING_FILE ?= $(PACIOLI_DIR)/mappings/pci_dss_4.0.1.yaml

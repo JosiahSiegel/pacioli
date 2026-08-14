@@ -93,14 +93,15 @@ This is the scanner doing its job. If the command is genuinely
 necessary, open a discussion in an issue — never bypass the
 guard.
 
-### `required file not found: .../pci_scope.yaml`
+### `required file not found: .../.pacioli/scope.yaml`
 
-`pci_scope.yaml` (or `pci_baseline.yaml`) is missing from the
+`.pacioli/scope.yaml` (or `.pacioli/baseline.yaml`) is missing from the
 consumer's Terraform repo. Copy from the templates:
 
 ```bash
-cp examples/scope.yaml.example ./pci_scope.yaml
-cp examples/baseline.yaml.example ./pci_baseline.yaml
+mkdir -p .pacioli
+cp examples/scope.yaml.example ./.pacioli/scope.yaml
+cp examples/baseline.yaml.example ./.pacioli/baseline.yaml
 ```
 
 Edit them for your projects. See
@@ -367,6 +368,113 @@ Solution: re-run `pacioli scan --tier state` after a fresh
   - The full output (including `pci_log` lines).
   - `checkov --version`, `python --version`, `uname -a`.
   - A minimal `.tf` snippet if the failure is in a specific check.
+
+## Migrating from `pci_scope.yaml`/`pci_baseline.yaml` to `.pacioli/`
+
+Pacioli no longer reads `pci_scope.yaml` or `pci_baseline.yaml` at the
+consumer repo root. The new locations are `.pacioli/scope.yaml` and
+`.pacioli/baseline.yaml`. This is a **clean break** — there is **no
+auto-migration, no fallback, no compatibility shim, and no warning when
+the old files are left in place**. Existing repos must be migrated by
+hand. Plan for a half-hour of triage if you have a curated scope or
+baseline.
+
+### Three clean-break consequences
+
+1. **Old files are silently ignored.** A repo with only
+   `pci_scope.yaml` and `pci_baseline.yaml` at its root after upgrading
+   will be scanned as if no scope or baseline existed. Pacioli does
+   **not** read the old files, does **not** warn, and does **not** move
+   them. Any tooling that reads from the old paths (custom CI glue,
+   hand-written `cat`/`grep` snippets, third-party dashboards) must be
+   updated to point at `.pacioli/scope.yaml` and `.pacioli/baseline.yaml`.
+
+2. **Baseline suppressions stop applying.** A previously-green CI gate
+   that relied on suppressions in the old `pci_baseline.yaml` can
+   **start failing** until the baseline is recreated at
+   `.pacioli/baseline.yaml`. Concretely: if your gate was green because
+   the baseline suppressed a finding, the upgrade can flip the gate red
+   the next time the scanner runs. Re-run `pacioli baseline init
+   <run_dir>` against a current run directory, populate the top-N
+   entries (especially the ones with high `hit_count`), and commit the
+   new `.pacioli/baseline.yaml`. The aggregator requires
+   `expires_on >= today` and `owner != "TBD"` for an entry to suppress;
+   stubs with `TBD` do **not** carry over.
+
+3. **The bootstrap regenerates scope with everything `in_scope`.** If
+   you re-run `pacioli scan --init` (or accept the bootstrap prompt)
+   on a repo with no new `.pacioli/scope.yaml`, the freshly generated
+   file marks every discovered project and environment as `in_scope`.
+   Curated `pending`/`excluded` statuses from the old file are **not**
+   carried over — they must be re-marked by hand. Audit trail in Git is
+   not enough: the parser reads the file at scan time, so a `pending`
+   status from a year-old commit counts for nothing unless it is still
+   present in the current `.pacioli/scope.yaml`.
+
+### Manual migration steps
+
+1. Create `.pacioli/` at the consumer repo root if it does not exist:
+
+   ```bash
+   mkdir -p .pacioli
+   ```
+
+2. Move (or recreate) both files into `.pacioli/`. If you want to keep
+   the old content as-is:
+
+   ```bash
+   git mv pci_scope.yaml   .pacioli/scope.yaml
+   git mv pci_baseline.yaml .pacioli/baseline.yaml
+   ```
+
+   If you do not want to preserve history on the rename, a fresh copy
+   from the templates is also fine:
+
+   ```bash
+   mkdir -p .pacioli
+   cp ../pacioli/examples/scope.yaml.example    ./.pacioli/scope.yaml
+   cp ../pacioli/examples/baseline.yaml.example ./.pacioli/baseline.yaml
+   ```
+
+3. Re-apply any `pending`/`excluded` statuses and `reason` fields you
+   curated in the old scope file. The bootstrap above resets every
+   entry to `in_scope`, so anything you want excluded from the audit
+   boundary must be re-marked. `reason` is optional in the parser but
+   **strongly recommended** for the audit trail; record the ticket ID
+   or policy reference so the next reviewer knows why the env is out of
+   scope.
+
+4. Re-apply any baseline suppressions you curated. The clean break
+   means entries in the old file do not carry over automatically. `git
+   diff` the old baseline against the new one to confirm coverage. The
+   fastest path for high-fidelity recovery:
+
+   ```bash
+   # 1. Run a fresh scan to seed the SARIF.
+   pacioli scan <repo> --non-interactive --mode report
+
+   # 2. Generate stub baseline entries from the latest run.
+   pacioli baseline init ~/.pacioli/runs/current/<run-id>
+
+   # 3. Copy entries from the old baseline (manual triage).
+   ```
+
+   Stubs (`TBD` for `owner`/`ticket_id`/`expires_on`) never suppress
+   findings, so do not commit a stub-only baseline and expect it to
+   behave like the old one.
+
+5. Delete the old files from the repo if they are still present:
+
+   ```bash
+   git rm pci_scope.yaml pci_baseline.yaml
+   ```
+
+6. Run `pacioli scan <repo> --non-interactive` and confirm the scan
+   reads `.pacioli/scope.yaml` and `.pacioli/baseline.yaml` — the
+   run-dir is created under `~/.pacioli/runs/current/` and the gate
+   behaves as before. If a `Traceback` appears, the file you moved has
+   a stale or unsupported schema; re-check it against
+   [Consuming Pacioli → Step 2](CONSUMING_GUIDE.md#step-2-create-the-scope-file).
 
 ## See also
 

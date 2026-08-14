@@ -1,13 +1,18 @@
 # Example Pacioli scope manifest.
-# Copy this to your IaC repo as `pci_scope.yaml` and customize.
+# Copy this to your IaC repo as `.pacioli/scope.yaml` and customize:
+#   mkdir -p .pacioli
+#   cp examples/scope.yaml.example ./.pacioli/scope.yaml
 #
 # The required root key is `projects:`. Each project is a logical grouping
 # (usually a Terraform module); the scanner walks env/<project>/<env>/ for
 # every project and environment whose status is `in_scope`.
 #
-# `pending` and `excluded` require a non-blank reason. They are never scanned
-# and do not enter a newly generated report. The scope file lives in YOUR IaC
-# repo (not in Pacioli) because the audit boundary is tenant-specific.
+# `pending` and `excluded` are never scanned and do not enter a newly
+# generated report. `reason` is OPTIONAL for both — the parser accepts an
+# entry without one — but a non-blank reason is strongly recommended so
+# the audit trail in Git explains why the env is out of scope. The scope
+# file lives in YOUR IaC repo (not in Pacioli) because the audit boundary
+# is tenant-specific.
 
 projects:
   - project: myapp

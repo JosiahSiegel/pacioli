@@ -28,7 +28,7 @@ the picker is skipped and the default mapping is used; to force a specific
 mapping, pass `--mapping <path>` or set `PACIOLI_MAPPING=<path>`.
 
 The first time you run `pacioli scan`, you'll be prompted to scaffold
-`pci_scope.yaml` and `pci_baseline.yaml` from your discovered IaC
+`.pacioli/scope.yaml` and `.pacioli/baseline.yaml` from your discovered IaC
 stacks. Pass `--init` to auto-create them silently (works in CI).
 
 The report is written under `~/.pacioli/runs/<run-id>/aggregate/report.html`.

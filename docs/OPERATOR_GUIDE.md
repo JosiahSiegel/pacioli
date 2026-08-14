@@ -3,7 +3,7 @@
 > **Read [Consuming Pacioli](CONSUMING_GUIDE.md) first** if you are
 > setting up the scanner in an IaC repo for the first time. This
 > guide assumes that setup is already done and you have a working
-> `pci_scope.yaml`, `pci_baseline.yaml`, and `pci_mapping.yaml` in your
+> `.pacioli/scope.yaml`, `.pacioli/baseline.yaml`, and `pci_mapping.yaml` in your
 > consumer repo.
 
 ## What Pacioli is
@@ -257,8 +257,8 @@ When a new HIGH/CRITICAL finding appears:
    - **Fix it**: update the `.tf` and run `terraform plan` (NOT apply)
      against the env to verify the change is what Terraform will do.
      Then re-run the scan to confirm the finding is gone.
-   - **Accept the risk**: add a baseline entry to `pci_baseline.yaml`
-     with `owner`, `ticket_id`, `expires_on` populated.
+    - **Accept the risk**: add a baseline entry to `.pacioli/baseline.yaml`
+      with `owner`, `ticket_id`, `expires_on` populated.
    - **Suppress inline**: use
      `# checkov:skip=CKV_AZURE_xxx:PR_OWNER=team:PR_EXPIRES=2027-01-01|justification="..."`
      on the `.tf` line. The `PR_OWNER` and `PR_EXPIRES` keys are
@@ -338,7 +338,7 @@ The baseline init command reads `combined.sarif` and emits stub entries
 2. For the top 50, populates `justification`, `owner`, `ticket_id`,
    `expires_on`.
 3. Removes entries that are real bugs (fix in `.tf` instead).
-4. Commits the new `pci_baseline.yaml` as a PR titled "PCI baseline:
+4. Commits the new `.pacioli/baseline.yaml` as a PR titled "PCI baseline:
    triage <date>".
 
 ## Golden env verification
@@ -391,7 +391,7 @@ Every 90 days:
 2. **Re-verify PCI source links** — the `doc_anchor` in
    `pci_mapping.yaml` must remain live. Bump `verified_against` after
    a clean pass.
-3. **Audit `pci_baseline.yaml` for stale / TBD** — every entry with
+3. **Audit `.pacioli/baseline.yaml` for stale / TBD** — every entry with
    `expires_on < today` is auto-dropped from suppression. Every entry
    with `owner: TBD` is silently dropped. The aggregator never credits
    an unsigned waiver; an unsigned waiver is not a waiver.
@@ -413,7 +413,7 @@ Every 90 days:
 
 ## Adding a new project to scope
 
-`pci_scope.yaml` defines **scan scope**: the version-controlled PCI audit
+`.pacioli/scope.yaml` defines **scan scope**: the version-controlled PCI audit
 boundary applied when Pacioli scans. It uses structured-only `envs` records.
 This is a **breaking change** from legacy manifests: a scalar environment such
 as `- prod` is rejected. Migrate every scalar item to `- name: prod` plus its
@@ -424,12 +424,15 @@ A `projects:` root admits only project records with `project` (non-blank
 string), optional `description` (string), `status`, optional `reason`
 (string), and `envs` (list). Each `envs` item admits only `name` (non-blank
 string), `status`, and optional `reason` (string). Status is exactly
-`in_scope`, `pending`, or `excluded`; `pending` and `excluded` require a
-non-blank reason. The only other root key is `scan_paths:`. A scan-path item
-requires `path` and may use `project`, `env`, `backend_key`, `workspace`, and
-`stack_label`; omitted project/env values default to `default` and the path
-basename respectively. Use `stack_label` to disambiguate duplicate
-`(project, env)` scan paths.
+`in_scope`, `pending`, or `excluded`. `reason` is **optional** for `pending`
+and `excluded` entries — the parser accepts the entry without one. A
+non-blank `reason` is still **strongly recommended** for the audit trail
+(it shows up in the report and the diff in Git); treat it as required in
+practice even though the parser does not enforce it. The only other root key
+is `scan_paths:`. A scan-path item requires `path` and may use `project`,
+`env`, `backend_key`, `workspace`, and `stack_label`; omitted project/env
+values default to `default` and the path basename respectively. Use
+`stack_label` to disambiguate duplicate `(project, env)` scan paths.
 
 ```yaml
 projects:
@@ -455,7 +458,7 @@ projects:
 2. Add each environment as a structured record and set its scan status.
 3. Run `pacioli scan --project <new_proj> --env prod` to validate.
 4. Verify against Azure Portal (Golden env workflow above).
-5. Commit `pci_scope.yaml` as a PR titled "PCI scope: add <new_proj>".
+5. Commit `.pacioli/scope.yaml` as a PR titled "PCI scope: add <new_proj>".
 
 ### Status field semantics
 
@@ -473,12 +476,13 @@ environment's status applies only to that environment when its project is
 Pending and excluded environments are omitted at scan time and never enter a
 newly generated report. To temporarily remove a project or a single
 environment from scans while keeping its declaration, set the relevant status
-to `pending` and record the reason. Use `excluded` only when that declared
-audit target is permanently out of scope.
+to `pending` and record a non-blank `reason` (recommended for the audit trail
+even though the parser no longer requires it). Use `excluded` only when that
+declared audit target is permanently out of scope.
 
 ### Scan scope versus report view
 
-`pci_scope.yaml` statuses are scan-scope decisions: they are permanent until
+`.pacioli/scope.yaml` statuses are scan-scope decisions: they are permanent until
 changed in version control and determine whether an environment is scanned at
 all. They are not browser controls.
 

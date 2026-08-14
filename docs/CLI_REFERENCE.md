@@ -51,11 +51,11 @@ pacioli scan [--mode MODE] [--project P] [--env E]
 | `--verbose` | flag | off | Enable INFO-level logging. Same as `PACIOLI_VERBOSE=1`. |
 | `--label` | `<text>` | (derived from scope) | Custom slug for the run-dir name. Sanitized to `[A-Za-z0-9_.-]`. Suffixes the UTC date. |
 | `--no-open` | flag | off | Do not auto-open `report.html` after a successful aggregate. |
-| `--init` | flag | off | Auto-create missing `pci_scope.yaml` and `pci_baseline.yaml` without prompting. Works in non-interactive environments (CI). |
+| `--init` | flag | off | Auto-create missing `.pacioli/scope.yaml` and `.pacioli/baseline.yaml` without prompting. Works in non-interactive environments (CI). |
 | `--non-interactive` | flag | off | Disable the interactive mapping picker. Same as `PACIOLI_NON_INTERACTIVE=1` or `CI=1`. |
 | `--help` / `-h` | flag | — | Show usage and exit. |
 
-`--project` and `--env` run after `pci_scope.yaml` has resolved the
+`--project` and `--env` run after `.pacioli/scope.yaml` has resolved the
 in-scope project/environment set (including `scan_paths:`). They narrow an
 already permitted scan scope; they do not change audit scope or override a
 `pending`/`excluded` declaration.
@@ -65,8 +65,8 @@ already permitted scan scope; they do not change audit scope or override a
 | Code | Meaning |
 |---|---|
 | 0 | Success (no HIGH/CRITICAL in gate mode, or report mode completed) |
-| 1 | Audit mode not implemented (or scan failed) |
-| 2 | Required input file missing (e.g. `pci_scope.yaml`, `pci_mapping.yaml`, `pci_baseline.yaml`) |
+| 1 | Audit mode not implemented; scope-manifest validation error (e.g. unknown field, wrong type in `.pacioli/scope.yaml`); or scan failed |
+| 2 | Required input file missing (e.g. `.pacioli/scope.yaml`, `.pacioli/baseline.yaml`) |
 | 7 | Aggregator found HIGH/CRITICAL findings (only used in gate mode where it matters; suppressed in report mode) |
 | 64 | Invalid command-line argument |
 | 99 | Safety guard refused a command (read-only invariant violation) |
@@ -75,7 +75,7 @@ already permitted scan scope; they do not change audit scope or override a
 
 | Variable | Default | Description |
 |---|---|---|
-| `PACIOLI_TARGET_REPO` | (cwd) | The consumer's Terraform repo (where `pci_scope.yaml`, `pci_baseline.yaml`, and `env/` live). |
+| `PACIOLI_TARGET_REPO` | (cwd) | The consumer's Terraform repo (where `.pacioli/scope.yaml`, `.pacioli/baseline.yaml`, and `env/` live). |
 | `PACIOLI_MAPPING` | `${PACIOLI_INSTALL_DIR}/mappings/pci_dss_4.0.1.yaml` | The framework mapping pack. Override with `--mapping <file>`. |
 | `PACIOLI_STATE_STORAGE_ACCOUNT` | (empty) | Azure storage account for tier 2/3 state-blob access. **Required** for tier 2/3 and `pacioli audit`; the scanner refuses to run without it. |
 | `PACIOLI_REPORTS_CONTAINER` | (empty) | Azure storage container for the `pacioli-reports` archive. **Required** for `pacioli audit`; refused if unset. |
@@ -120,8 +120,8 @@ See `scanner/mapping_picker.py` for the full contract.
 
 ### First-run scope+baseline bootstrap
 
-When `pacioli scan` or `pacioli gate` is run and either `pci_scope.yaml`
-or `pci_baseline.yaml` is missing, the CLI prompts you to create both
+When `pacioli scan` or `pacioli gate` is run and either `.pacioli/scope.yaml`
+or `.pacioli/baseline.yaml` is missing, the CLI prompts you to create both
 files (interactive shells only). The generated files use auto-discovered
 IaC projects and environments across all Checkov-supported frameworks
 (Terraform, CloudFormation, Kubernetes, Dockerfile, Bicep, Helm, OpenAPI,
@@ -206,7 +206,7 @@ pacioli baseline init <run_dir>
 |---|---|---|
 | `<run_dir>` | (required) | The run dir to read `combined.sarif` from. |
 
-The output `pci_baseline.yaml` entries have `TBD` for
+The output `.pacioli/baseline.yaml` entries have `TBD` for
 `justification`, `owner`, `ticket_id`, `expires_on`. Triage
 top-N by `hit_count`: populate the schema fields, and the
 suppression takes effect. See
@@ -236,7 +236,7 @@ pacioli aggregate <run_dir>
 | `<run_dir>` | (required) | The run dir produced by `pacioli scan`. |
 | `--out <path>` | `<run_dir>/aggregate/` | Output directory. |
 | `--mapping <path>` | `${PACIOLI_MAPPING}` | Override the framework mapping. |
-| `--baseline <path>` | `${PACIOLI_TARGET_REPO}/pci_baseline.yaml` | Override the baseline. |
+| `--baseline <path>` | `${PACIOLI_TARGET_REPO}/.pacioli/baseline.yaml` | Override the baseline. |
 | `--emit-fix-list` | off | Emit `fix_list.md` in the output dir. |
 
 ### Exit codes

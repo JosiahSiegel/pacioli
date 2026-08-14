@@ -10,7 +10,7 @@ extending the scanner, see [Developer Guide](DEVELOPER_GUIDE.md).
 
 ```text
 Consumer Terraform repo
-  pci_scope.yaml, pci_baseline.yaml, env/<project>/<env>/*.tf
+  .pacioli/scope.yaml, .pacioli/baseline.yaml, env/<project>/<env>/*.tf
           |
           v
 Pacioli
@@ -43,7 +43,7 @@ Terraform mutations, `-auto-approve`, Azure resource mutations, and Checkov
 
 `scanner/orchestrator.py` parses scope, discovers paths, coordinates each
 project and environment, and records SARIF output. Discovery supports
-`scan_paths:` in `pci_scope.yaml`, plus the `--scan-path` and `--scan-glob`
+`scan_paths:` in `.pacioli/scope.yaml`, plus the `--scan-path` and `--scan-glob`
 CLI flags.
 
 Plan-tier execution uses the privileged read-only composition

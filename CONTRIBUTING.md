@@ -57,8 +57,8 @@ that the read-only safety invariant and cleanup behavior remain intact.
 │   ├── REPORT_FORMAT.md             # Every output file
 │   └── TROUBLESHOOTING.md           # Common failures
 ├── examples/
-│   ├── scope.yaml.example           # Template pci_scope.yaml
-│   ├── baseline.yaml.example        # Template pci_baseline.yaml
+│   ├── scope.yaml.example           # Template .pacioli/scope.yaml
+│   ├── baseline.yaml.example        # Template .pacioli/baseline.yaml
 │   └── Makefile.consumer            # Wrapper Makefile template
 ├── mappings/
 │   └── pci_dss_4.0.1.yaml           # The shipped PCI mapping pack
