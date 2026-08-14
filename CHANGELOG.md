@@ -5,6 +5,21 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [1.4.0](https://github.com/JosiahSiegel/pacioli/compare/v1.3.0...v1.4.0) (2026-08-14)
+
+
+### Features
+
+* **cli:** wire --init flag and bootstrap prompt into scan/gate ([26d3fd4](https://github.com/JosiahSiegel/pacioli/commit/26d3fd487a29a10ca9057253d058bc0fff923d88))
+* **config_bootstrap:** scaffold scope+baseline yaml from discovered IaC pairs ([022bcf0](https://github.com/JosiahSiegel/pacioli/commit/022bcf06b0d9fd4123ec562a736c75db7441f8be))
+* **scan:** auto-scaffold pci_scope.yaml + pci_baseline.yaml on first run ([c7092c8](https://github.com/JosiahSiegel/pacioli/commit/c7092c8f637dc2ccd63c90e8f5572d4a384435d7))
+
+
+### Documentation
+
+* document --init flag and scan-time scope+baseline bootstrap ([269f7b6](https://github.com/JosiahSiegel/pacioli/commit/269f7b6f8189105362c9a276f3095fb5220b7f5c))
+* **examples:** fix baseline.yaml.example list-vs-mapping bug + add parity test ([1181c98](https://github.com/JosiahSiegel/pacioli/commit/1181c985f0b01f9134240ef5ca56f26d54f6bc7c))
+
 ## [1.3.0](https://github.com/JosiahSiegel/pacioli/compare/v1.2.1...v1.3.0) (2026-08-13)
 
 
