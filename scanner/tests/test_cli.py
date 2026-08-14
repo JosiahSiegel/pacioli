@@ -2735,7 +2735,7 @@ def test_init_flag_appears_in_scan_help(
 
     The help text is the contract the user reads; losing the flag (or
     its scope/baseline mention) silently breaks first-time adopters, so
-    we assert the literal token ``--init`` AND the ``pci_scope.yaml``
+    we assert the literal token ``--init`` AND the ``.pacioli/scope.yaml``
     substring so any future help-text rewrite that drops the scope
     reference fails fast.
     """
@@ -2748,8 +2748,8 @@ def test_init_flag_appears_in_scan_help(
     assert "--init" in result.stdout, (
         f"--init flag missing from pacioli scan --help; stdout={result.stdout[:600]!r}"
     )
-    assert "pci_scope.yaml" in result.stdout, (
-        f"--init help text should mention pci_scope.yaml; "
+    assert ".pacioli/scope.yaml" in result.stdout, (
+        f"--init help text should mention .pacioli/scope.yaml; "
         f"stdout={result.stdout[:600]!r}"
     )
 
@@ -2805,7 +2805,7 @@ def test_handle_scan_invokes_bootstrap_when_init_set(
     def fake_missing_config_files(target_repo: Path):
         # Both files missing → forces _maybe_bootstrap_config down the
         # auto_create branch when args.init=True.
-        return (target_repo / "pci_scope.yaml", target_repo / "pci_baseline.yaml")
+        return (target_repo / ".pacioli" / "scope.yaml", target_repo / ".pacioli" / "baseline.yaml")
 
     monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto_create)
     monkeypatch.setattr(config_bootstrap, "missing_config_files",
@@ -2875,7 +2875,7 @@ def test_handle_scan_skips_bootstrap_when_non_interactive_no_init(
     monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto)
     monkeypatch.setattr(config_bootstrap, "prompt_and_create", fake_prompt)
     monkeypatch.setattr(config_bootstrap, "missing_config_files",
-                        lambda r: (r / "pci_scope.yaml", r / "pci_baseline.yaml"))
+                        lambda r: (r / ".pacioli" / "scope.yaml", r / ".pacioli" / "baseline.yaml"))
     monkeypatch.setattr(config_bootstrap, "is_bootstrap_interactive",
                         lambda a: False)
 
@@ -2928,7 +2928,7 @@ def test_handle_gate_invokes_bootstrap_when_init_set(
 
     monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto_create)
     monkeypatch.setattr(config_bootstrap, "missing_config_files",
-                        lambda r: (r / "pci_scope.yaml", r / "pci_baseline.yaml"))
+                        lambda r: (r / ".pacioli" / "scope.yaml", r / ".pacioli" / "baseline.yaml"))
     monkeypatch.setattr(config_bootstrap, "is_bootstrap_interactive",
                         lambda a: True)
     monkeypatch.setattr(orchestrator_mod, "main", lambda argv: 0)
@@ -3001,8 +3001,8 @@ def stub_missing_configs(
     Y/n prompt (instead of skipping silently on the non-interactive branch).
     """
     from scanner import config_bootstrap
-    scope_path = tmp_path / "pci_scope.yaml"
-    baseline_path = tmp_path / "pci_baseline.yaml"
+    scope_path = tmp_path / ".pacioli" / "scope.yaml"
+    baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
     monkeypatch.setattr(
         config_bootstrap, "missing_config_files",
         lambda r: (scope_path, baseline_path),

@@ -497,7 +497,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument(
         "--baseline",
         default=None,
-        help="Destination baseline YAML (default: $PACIOLI_BASELINE_FILE or <target_repo>/pci_baseline.yaml).",
+        help="Destination baseline YAML (default: $PACIOLI_BASELINE_FILE or <target_repo>/.pacioli/baseline.yaml).",
     )
     ap.add_argument(
         "--top",
@@ -508,7 +508,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument(
         "--append",
         action="store_true",
-        help="Merge with existing pci_baseline.yaml (default: replace).",
+        help="Merge with existing .pacioli/baseline.yaml (default: replace).",
     )
     ap.add_argument(
         "--dry-run",

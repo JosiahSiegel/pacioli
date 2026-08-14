@@ -2233,7 +2233,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--baseline",
         default=None,
-        help="Baseline suppressions YAML (default: <target_repo>/pci_baseline.yaml).",
+        help="Baseline suppressions YAML (default: <target_repo>/.pacioli/baseline.yaml).",
     )
     parser.add_argument(
         "--state-account",
