@@ -91,6 +91,7 @@ from scanner.frameworks import (  # noqa: E402
     is_terraform_family,
 )
 from scanner.paths import (  # noqa: E402
+    BASELINE_FILENAME,
     PathResolutionError,
     resolve_mapping as resolve_mapping_path,
     resolve_paths,
@@ -281,7 +282,7 @@ class Orchestrator:
 
         Args:
             target_repo: Path to the consumer's Terraform repo (must
-                contain ``pci_scope.yaml`` or ``env/<project>/<env>/``
+                contain ``.pacioli/scope.yaml`` or ``env/<project>/<env>/``
                 or flat ``*.tf`` at the root).
             project: Optional ``--project`` filter.
             env: Optional ``--env`` filter.
@@ -533,7 +534,7 @@ class Orchestrator:
             if not resolved.is_file():
                 resolved = None
             return resolved
-        env_baseline = target_repo / "pci_baseline.yaml"
+        env_baseline = target_repo / BASELINE_FILENAME
         return env_baseline if env_baseline.is_file() else None
 
     @staticmethod
@@ -1009,8 +1010,8 @@ class Orchestrator:
         Precedence:
 
           1. ``stack_root`` (set by ``scan_paths:`` entries) → used
-             verbatim. This is the path the operator declared in
-             ``pci_scope.yaml::scan_paths:`` and is authoritative for
+              verbatim. This is the path the operator declared in
+              ``.pacioli/scope.yaml::scan_paths:`` and is authoritative for
              stacks that don't live under
              ``<target_repo>/env/<project>/<env>/`` (sibling checkouts,
              monorepo roots, etc.).

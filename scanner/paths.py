@@ -7,6 +7,7 @@ import importlib.resources
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from scanner.frameworks import scan_mapping_packs
 
@@ -18,6 +19,15 @@ from scanner.frameworks import scan_mapping_packs
 # plain glob; the tuple is the smallest contract that both call sites
 # can share.
 YAML_SUFFIXES: tuple[str, ...] = (".yaml", ".yml")
+
+#: Repo-relative path of the default baseline suppressions manifest under
+#: the target repo root. Centralised here (the lowest-level path module,
+#: below discovery/config_bootstrap) so every reader —
+#: :func:`resolve_baseline`, ``scanner.config_bootstrap``, and
+#: ``scanner.baseline_init`` — shares one canonical reference. Import
+#: direction is load-bearing: ``paths`` must never import
+#: ``config_bootstrap``/``baseline_init`` (they depend on ``paths``).
+BASELINE_FILENAME: Final[str] = ".pacioli/baseline.yaml"
 
 
 class PathResolutionError(ValueError):
@@ -271,7 +281,7 @@ def _probe_bundled_pack_filenames() -> list[str]:
 
 def resolve_baseline(args: argparse.Namespace, target_repo: TargetRepo) -> Baseline:
     value = _cli_value(args, "baseline") or _env_value("PACIOLI_BASELINE_FILE")
-    path = _canonical(value) if value else target_repo.path / "pci_baseline.yaml"
+    path = _canonical(value) if value else target_repo.path / BASELINE_FILENAME
     return Baseline(path=path if path.is_file() else None)
 
 
@@ -297,6 +307,7 @@ def resolve_paths(cli_args: argparse.Namespace) -> tuple[TargetRepo, MappingPack
 
 
 __all__ = [
+    "BASELINE_FILENAME",
     "Baseline",
     "MappingPack",
     "PathResolutionError",

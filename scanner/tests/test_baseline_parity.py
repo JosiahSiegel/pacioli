@@ -158,7 +158,7 @@ def run_dir_with_two_findings(tmp_path: Path) -> Path:
 @pytest.fixture
 def baseline_path(tmp_path: Path) -> Path:
     """Destination path for the generated baseline YAML."""
-    return tmp_path / "pci_baseline.yaml"
+    return tmp_path / ".pacioli" / "baseline.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ def test_baseline_init_emits_all_required_fields(
 def test_baseline_init_append_merges_with_existing(
     tmp_path: Path, baseline_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    """``--append`` merges new stubs with an existing pci_baseline.yaml.
+    """``--append`` merges new stubs with an existing .pacioli/baseline.yaml.
 
     Setup: pre-seed the baseline with a *promoted* entry (owner/person,
     future expiry → would actually suppress). Then run baseline_init
@@ -260,6 +260,7 @@ def test_baseline_init_append_merges_with_existing(
             }
         ],
     }
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         "# Pre-existing header — should be preserved by --append.\n"
         + yaml.safe_dump(promoted, sort_keys=False, allow_unicode=True),
@@ -330,6 +331,7 @@ def test_baseline_init_replaces_without_append(
             }
         ],
     }
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         yaml.safe_dump(pre_existing, sort_keys=False, allow_unicode=True),
         encoding="utf-8",

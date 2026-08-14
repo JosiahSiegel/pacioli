@@ -40,7 +40,7 @@ Multi-stack flags (Todo 8 — declared-stack-root workflow):
     --scan-path SPEC         Repeatable. Declare a single stack root as JSON
                              (keys: path, project?, env?, backend_key?,
                              workspace?, stack_label?). The JSON form mirrors
-                             ``pci_scope.yaml::scan_paths:`` 1:1 so an operator
+                             ``.pacioli/scope.yaml::scan_paths:`` 1:1 so an operator
                              can copy-paste between the two.
                              Example: --scan-path '{"path": "env/myapp/prod"}'
     --scan-glob PATTERN      Repeatable. Shell-style glob (resolved against the
@@ -165,7 +165,7 @@ DEPRECATION_TEMPLATE: str = (
 )
 
 # Allowed keys in a single ``--scan-path`` JSON spec. Matches the
-# ``pci_scope.yaml::scan_paths:`` schema field-for-field so an operator
+# ``.pacioli/scope.yaml::scan_paths:`` schema field-for-field so an operator
 # can copy-paste between the two surfaces. Anything else is rejected
 # with a clear validation error so a typo surfaces immediately.
 SCAN_PATH_KEYS: frozenset[str] = frozenset({
@@ -367,7 +367,7 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
     # ------------------------------------------------------------------
     # --scan-path is ``action="append"`` so the user can pass it
     # multiple times (``--scan-path A --scan-path B``); each entry is a
-    # JSON object whose keys mirror the pci_scope.yaml::scan_paths:
+    # JSON object whose keys mirror the .pacioli/scope.yaml::scan_paths:
     # schema. The JSON form is chosen because it keeps the surface
     # trivially copy-pasteable between the CLI and the YAML, and it
     # avoids the ambiguity of comma-separated key=value strings.

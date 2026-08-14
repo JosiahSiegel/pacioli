@@ -39,7 +39,6 @@ from scanner.config_bootstrap import (  # noqa: E402
     prompt_and_create,
 )
 from scanner.discovery import (
-    SCOPE_FILENAME,
     _parse_scope_manifest,
 )
 from scanner.aggregate import load_baseline
@@ -128,9 +127,10 @@ class TestMissingConfigFiles:
     """Verify missing_config_files returns the right tuple shape."""
 
     def test_both_exist_returns_none_none(self, tmp_path: Path) -> None:
-        """Both pci_scope.yaml and pci_baseline.yaml exist -> (None, None)."""
-        (tmp_path / SCOPE_FILENAME).write_text("projects: []\n", encoding="utf-8")
-        (tmp_path / "pci_baseline.yaml").write_text(
+        """Both .pacioli/scope.yaml and .pacioli/baseline.yaml exist -> (None, None)."""
+        (tmp_path / ".pacioli").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".pacioli" / "scope.yaml").write_text("projects: []\n", encoding="utf-8")
+        (tmp_path / ".pacioli" / "baseline.yaml").write_text(
             "version: 1\nsuppressions: []\n", encoding="utf-8"
         )
         scope, baseline = missing_config_files(tmp_path)
@@ -139,7 +139,8 @@ class TestMissingConfigFiles:
 
     def test_only_scope_missing(self, tmp_path: Path) -> None:
         """Scope missing, baseline exists -> (scope_path, None)."""
-        (tmp_path / "pci_baseline.yaml").write_text(
+        (tmp_path / ".pacioli").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".pacioli" / "baseline.yaml").write_text(
             "version: 1\nsuppressions: []\n", encoding="utf-8"
         )
         scope, baseline = missing_config_files(tmp_path)
@@ -148,7 +149,8 @@ class TestMissingConfigFiles:
 
     def test_only_baseline_missing(self, tmp_path: Path) -> None:
         """Baseline missing, scope exists -> (None, baseline_path)."""
-        (tmp_path / SCOPE_FILENAME).write_text("projects: []\n", encoding="utf-8")
+        (tmp_path / ".pacioli").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".pacioli" / "scope.yaml").write_text("projects: []\n", encoding="utf-8")
         scope, baseline = missing_config_files(tmp_path)
         assert scope is None
         assert baseline is not None
@@ -183,7 +185,8 @@ class TestRenderScopeYaml:
         )
         rendered = render_scope_yaml(repo)
         # Write to a temp file so _parse_scope_manifest can read it.
-        scope_file = repo / SCOPE_FILENAME
+        scope_file = repo / ".pacioli" / "scope.yaml"
+        scope_file.parent.mkdir(parents=True, exist_ok=True)
         scope_file.write_text(rendered, encoding="utf-8")
         manifest = _parse_scope_manifest(scope_file)
         # Both projects must be declared in_scope.
@@ -198,7 +201,8 @@ class TestRenderScopeYaml:
         """
         repo = _make_flat_repo(tmp_path)
         rendered = render_scope_yaml(repo)
-        scope_file = repo / SCOPE_FILENAME
+        scope_file = repo / ".pacioli" / "scope.yaml"
+        scope_file.parent.mkdir(parents=True, exist_ok=True)
         scope_file.write_text(rendered, encoding="utf-8")
         manifest = _parse_scope_manifest(scope_file)
         assert len(manifest.in_scope_pairs) >= 1
@@ -273,7 +277,8 @@ def test_render_baseline_yaml_round_trips(tmp_path: Path) -> None:
     """
     rendered = render_baseline_yaml()
     assert rendered, "render_baseline_yaml returned empty string"
-    baseline_path = tmp_path / "pci_baseline.yaml"
+    baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(rendered, encoding="utf-8")
     entries = load_baseline(baseline_path)
     assert isinstance(entries, list)
@@ -290,8 +295,8 @@ class TestAutoCreate:
 
     def test_writes_both_when_missing(self, tmp_path: Path) -> None:
         """Both files missing -> writes both, returns list of created paths."""
-        scope_path = tmp_path / SCOPE_FILENAME
-        baseline_path = tmp_path / "pci_baseline.yaml"
+        scope_path = tmp_path / ".pacioli" / "scope.yaml"
+        baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
         # Need IaC files so render_scope_yaml doesn't fall back to scan_paths.
         _make_flat_repo(tmp_path)
         created = auto_create(_ns(), tmp_path, scope_path, baseline_path)
@@ -302,8 +307,9 @@ class TestAutoCreate:
 
     def test_skips_when_both_exist(self, tmp_path: Path) -> None:
         """Both files exist -> no-op, returns empty list."""
-        scope_path = tmp_path / SCOPE_FILENAME
-        baseline_path = tmp_path / "pci_baseline.yaml"
+        scope_path = tmp_path / ".pacioli" / "scope.yaml"
+        baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
+        scope_path.parent.mkdir(parents=True, exist_ok=True)
         scope_path.write_text("projects: []\n", encoding="utf-8")
         baseline_path.write_text(
             "version: 1\nsuppressions: []\n", encoding="utf-8"
@@ -326,10 +332,11 @@ def test_auto_create_never_overwrites_existing(
     Pre-seed both files with known content, run auto_create, then verify
     the file bytes are byte-identical to the pre-seeded content.
     """
-    scope_path = tmp_path / SCOPE_FILENAME
-    baseline_path = tmp_path / "pci_baseline.yaml"
+    scope_path = tmp_path / ".pacioli" / "scope.yaml"
+    baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
     scope_content = "# pre-existing scope\nprojects: []\n"
     baseline_content = "# pre-existing baseline\nversion: 1\nsuppressions: []\n"
+    scope_path.parent.mkdir(parents=True, exist_ok=True)
     scope_path.write_text(scope_content, encoding="utf-8")
     baseline_path.write_text(baseline_content, encoding="utf-8")
     auto_create(_ns(), tmp_path, scope_path, baseline_path)
@@ -361,8 +368,8 @@ def test_auto_create_calls_validate_safe_path(
 
     monkeypatch.setattr(cb_mod, "_validate_safe_path", _tracking_validate)
 
-    scope_path = tmp_path / SCOPE_FILENAME
-    baseline_path = tmp_path / "pci_baseline.yaml"
+    scope_path = tmp_path / ".pacioli" / "scope.yaml"
+    baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
     _make_flat_repo(tmp_path)
     auto_create(_ns(), tmp_path, scope_path, baseline_path)
     assert call_count["n"] > 0, "_validate_safe_path was never called"
@@ -386,8 +393,8 @@ class TestPromptAndCreate:
         monkeypatch.delenv("PACIOLI_NON_INTERACTIVE", raising=False)
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
-        scope_path = tmp_path / SCOPE_FILENAME
-        baseline_path = tmp_path / "pci_baseline.yaml"
+        scope_path = tmp_path / ".pacioli" / "scope.yaml"
+        baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
         _make_flat_repo(tmp_path)
         created = prompt_and_create(_ns(), tmp_path, scope_path, baseline_path)
         assert isinstance(created, list)
@@ -405,8 +412,8 @@ class TestPromptAndCreate:
         monkeypatch.delenv("PACIOLI_NON_INTERACTIVE", raising=False)
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
-        scope_path = tmp_path / SCOPE_FILENAME
-        baseline_path = tmp_path / "pci_baseline.yaml"
+        scope_path = tmp_path / ".pacioli" / "scope.yaml"
+        baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
         created = prompt_and_create(_ns(), tmp_path, scope_path, baseline_path)
         assert isinstance(created, list)
         assert len(created) == 0
@@ -426,8 +433,8 @@ class TestPromptAndCreate:
         monkeypatch.delenv("PACIOLI_NON_INTERACTIVE", raising=False)
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
-        scope_path = tmp_path / SCOPE_FILENAME
-        baseline_path = tmp_path / "pci_baseline.yaml"
+        scope_path = tmp_path / ".pacioli" / "scope.yaml"
+        baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
         created = prompt_and_create(_ns(), tmp_path, scope_path, baseline_path)
         assert isinstance(created, list)
         assert len(created) == 0
@@ -515,3 +522,59 @@ def test_baseline_yaml_shape(tmp_path: Path) -> None:
     suppressions = data.get("suppressions")
     assert isinstance(suppressions, list), "suppressions must be a list"
     assert len(suppressions) == 0, "fresh baseline must have empty suppressions"
+
+
+# ===========================================================================
+# (m) QA scenarios -- .pacioli/ bootstrap happy path + clean break
+# ===========================================================================
+
+
+def test_auto_create_scaffolds_under_pacioli_dir(tmp_path: Path) -> None:
+    """QA happy path: auto_create on an empty repo writes both files under .pacioli/.
+
+    The scaffold must land at ``<repo>/.pacioli/scope.yaml`` and
+    ``<repo>/.pacioli/baseline.yaml`` (the ``.pacioli/`` directory is
+    created by the writer, after allow-list validation).
+    """
+    _make_flat_repo(tmp_path)
+    created = auto_create(
+        _ns(),
+        tmp_path,
+        tmp_path / ".pacioli" / "scope.yaml",
+        tmp_path / ".pacioli" / "baseline.yaml",
+    )
+    assert len(created) == 2
+    assert (tmp_path / ".pacioli" / "scope.yaml").is_file()
+    assert (tmp_path / ".pacioli" / "baseline.yaml").is_file()
+
+
+def test_legacy_pci_scope_yaml_is_ignored_clean_break(tmp_path: Path) -> None:
+    """QA clean break: a legacy ``pci_scope.yaml`` at the repo root is NOT read.
+
+    The rename is a clean break with no legacy fallback. A manifest
+    left at the old location must have zero effect on discovery, so its
+    ``excluded`` statuses never gate anything.
+    """
+    (tmp_path / "pci_scope.yaml").write_text(
+        """
+projects:
+  - project: payments
+    status: excluded
+    reason: legacy location must not be read
+    envs:
+      - name: prod
+        status: in_scope
+""",
+        encoding="utf-8",
+    )
+    from discovery import discover_pairs  # noqa: E402
+
+    env_dir = tmp_path / "env" / "payments" / "prod"
+    env_dir.mkdir(parents=True)
+    (env_dir / "main.tf").write_text("", encoding="utf-8")
+
+    pairs = discover_pairs(tmp_path)
+
+    # The legacy file's exclusion did NOT apply: payments/prod is
+    # discovered via the env/ tree as if no scope manifest existed.
+    assert [(p.project, p.env) for p in pairs] == [("payments", "prod")]
