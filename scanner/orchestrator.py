@@ -278,6 +278,8 @@ class Orchestrator:
         ignore_lockfile: bool = False,
         registry_mirror: Optional[str] = None,
         framework: Optional[str] = None,
+        clean: bool = False,
+        clean_allowed: bool = False,
     ) -> int:
         """Run the full scan and return the SCAN_RC.
 
@@ -311,6 +313,18 @@ class Orchestrator:
                 defers tier/framework validation to the per-pair loop,
                 which auto-detects and skips the heavy passes
                 accordingly.
+            clean: When ``True``, wipe stale per-env result dirs under
+                the resolved ``run_root`` before scanning. Opt-in via
+                the CLI ``--clean`` flag; used after editing
+                ``.pacioli/scope.yaml`` to drop excluded envs that
+                still linger in the aggregate report.
+            clean_allowed: Safety rail for ``clean``. The wipe only
+                proceeds when this is ``True`` (operator passed an
+                explicit ``--output-dir``) OR the resolved ``run_root``
+                is inside ``~/.pacioli/runs/``. Otherwise
+                :class:`OrchestratorError` is raised so accidental
+                misuse surfaces as a clear error rather than a silent
+                wipe of an arbitrary directory.
 
         Returns:
             The shell-style SCAN_RC. ``gate`` mode may return any non-
@@ -379,7 +393,9 @@ class Orchestrator:
 
             output_dir = Path(output_dir).resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
-            run_root = self._setup_run_root(output_dir, label)
+            run_root = self._setup_run_root(
+                output_dir, label, clean=clean, clean_allowed=clean_allowed
+            )
 
             self._emit_scan_banner(self.mode, self.tier, output_dir, resolved_mapping, resolved_baseline, pairs, framework=framework)
 
@@ -508,7 +524,13 @@ class Orchestrator:
             )
 
     @staticmethod
-    def _setup_run_root(output_dir: Path, label: Optional[str]) -> Path:
+    def _setup_run_root(
+        output_dir: Path,
+        label: Optional[str],
+        *,
+        clean: bool = False,
+        clean_allowed: bool = False,
+    ) -> Path:
         """Return the per-run root, creating it if a ``label`` was supplied.
 
         ``label`` (from ``--label``) is an optional slug that
@@ -518,11 +540,107 @@ class Orchestrator:
         ``<output_dir>/<label>/<project>/<env>/`` instead of
         ``<output_dir>/<project>/<env>/``. When ``None`` (the default),
         the layout is unchanged.
+
+        When ``clean=True`` (opt-in via the CLI ``--clean`` flag), any
+        stale per-env result dirs under the resolved ``run_root`` are
+        wiped BEFORE the scan proceeds. A child dir counts as a stale
+        per-env result when it contains a ``pacioli_environment.json``
+        OR a ``results_*.sarif`` file at any depth (the layout is
+        ``<run_root>/<project>/<env>/`` so the marker file lives one
+        level below the project dir). The wipe is refused with
+        :class:`OrchestratorError` unless ``clean_allowed=True``
+        (operator passed an explicit ``--output-dir``) OR the resolved
+        ``run_root`` is inside ``~/.pacioli/runs/`` — this catches
+        accidental misuse against arbitrary directories.
+
+        NEVER deletes ``run_root`` itself. NEVER deletes files outside
+        ``run_root``.
         """
         run_root = output_dir / label if label else output_dir
         if label:
             run_root.mkdir(parents=True, exist_ok=True)
+
+        if clean:
+            Orchestrator._wipe_stale_per_env_dirs(
+                run_root, clean_allowed=clean_allowed
+            )
+
         return run_root
+
+    @staticmethod
+    def _wipe_stale_per_env_dirs(
+        run_root: Path,
+        *,
+        clean_allowed: bool,
+    ) -> None:
+        """Remove stale per-env result dirs under ``run_root``.
+
+        Safety rail: refuses unless ``clean_allowed=True`` (explicit
+        ``--output-dir``) OR ``run_root`` resolves inside
+        ``~/.pacioli/runs/``. Logs the count BEFORE wiping so the
+        operator sees what is about to be removed.
+        """
+        resolved_root = run_root.resolve()
+        default_runs_root = (Path.home() / ".pacioli" / "runs").resolve()
+
+        inside_default_runs = False
+        try:
+            resolved_root.relative_to(default_runs_root)
+            inside_default_runs = True
+        except ValueError:
+            inside_default_runs = False
+
+        if not (clean_allowed or inside_default_runs):
+            raise OrchestratorError(
+                f"--clean refused: {resolved_root} is outside "
+                f"~/.pacioli/runs/ and no explicit --output-dir was "
+                f"passed; rerun with an explicit --output-dir to allow "
+                f"the wipe"
+            )
+
+        if not resolved_root.is_dir():
+            # Nothing to wipe — first run against this run_root.
+            _log(
+                "INFO",
+                f"--clean: removed 0 stale per-env dir(s) from {resolved_root}",
+            )
+            return
+
+        # A child dir counts as a stale per-env result when it contains
+        # a ``pacioli_environment.json`` OR a ``results_*.sarif`` file
+        # at any depth below it. We collect the TOP-LEVEL child that
+        # encloses the marker so the whole ``<project>/<env>/`` subtree
+        # is removed in one rmtree.
+        stale_children: list[Path] = []
+        for child in sorted(resolved_root.iterdir()):
+            if not child.is_dir():
+                continue
+            # Never touch the aggregate output dir — it is regenerated
+            # by the aggregate step and is not a per-env result.
+            if child.name == "aggregate":
+                continue
+            has_marker = (child / "pacioli_environment.json").is_file()
+            if not has_marker:
+                # Check one level deeper (the <project>/<env>/ layout)
+                # and for any results_*.sarif at any depth.
+                try:
+                    has_marker = any(
+                        (sub / "pacioli_environment.json").is_file()
+                        for sub in child.iterdir()
+                        if sub.is_dir()
+                    ) or any(child.rglob("results_*.sarif"))
+                except OSError:
+                    has_marker = False
+            if has_marker:
+                stale_children.append(child)
+
+        _log(
+            "INFO",
+            f"--clean: removed {len(stale_children)} stale per-env "
+            f"dir(s) from {resolved_root}",
+        )
+        for child in stale_children:
+            shutil.rmtree(child)
 
     @staticmethod
     def _write_environment_metadata(env_run_dir: Path, pair: DiscoveredPair) -> None:
@@ -2247,6 +2365,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Root directory for per-pair output (default: ~/.pacioli/runs/current).",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        default=False,
+        help=(
+            "Wipe stale per-env results in the run-dir before scanning "
+            "(use after editing .pacioli/scope.yaml to drop excluded envs "
+            "that still linger in the report)."
+        ),
+    )
+    parser.add_argument(
+        "--clean-allowed",
+        action="store_true",
+        default=False,
+        help=(
+            "Internal safety rail emitted by scanner.cli when the operator "
+            "passed an explicit --output-dir. The orchestrator refuses "
+            "--clean without this flag unless the resolved run-dir is "
+            "inside ~/.pacioli/runs/."
+        ),
+    )
+    parser.add_argument(
         "--mapping",
         default=None,
         help="Mapping pack YAML (default: $PACIOLI_MAPPING or ~/.pacioli/config).",
@@ -2457,6 +2596,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             ignore_lockfile=bool(getattr(args, "ignore_lockfile", False)),
             registry_mirror=getattr(args, "registry_mirror", None),
             framework=getattr(args, "framework", None),
+            clean=bool(getattr(args, "clean", False)),
+            clean_allowed=bool(getattr(args, "clean_allowed", False)),
         )
     except OrchestratorError as exc:
         _log("ERROR", str(exc))

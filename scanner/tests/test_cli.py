@@ -310,6 +310,107 @@ def test_pacioli_aggregate_reemits_report(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 8b. pacioli scan --clean wipes stale per-env dirs before scanning
+# ---------------------------------------------------------------------------
+
+
+def test_pacioli_scan_clean_wipes_stale_per_env_dirs(tmp_path: Path) -> None:
+    """``pacioli scan --clean`` removes stale per-env dirs from the run-dir.
+
+    Regression guard for the user-reported bug: excluded envs reappear
+    in the aggregate report because the aggregator reads leftover
+    per-env dirs from previous runs under the run-dir. ``--clean``
+    wipes those stale per-env children before scanning so the report
+    only reflects the current scope.
+
+    Fixture: pre-populate ``<output_dir>/CR_Test/dev/`` with a fake
+    ``pacioli_environment.json`` (mimicking a leftover from a prior
+    run). Run ``pacioli scan <tmp> --clean --non-interactive
+    --output-dir <output_dir>``. Assert (i) rc=0, (ii) the fake
+    per-env dir was removed, (iii) the ``INFO --clean: removed N stale
+    per-env dir(s)`` line was logged.
+    """
+    target_repo = _make_minimal_tf_repo(tmp_path / "repo")
+    output_dir = tmp_path / "runs"
+
+    # Pre-populate a stale per-env dir (mimics a leftover from a prior
+    # run that included an env the operator has since excluded).
+    stale_pair = output_dir / "CR_Test" / "dev"
+    stale_pair.mkdir(parents=True, exist_ok=True)
+    (stale_pair / "pacioli_environment.json").write_text(
+        '{"schema_version": 1, "project": "CR_Test", "env": "dev", "stack_label": null}\n',
+        encoding="utf-8",
+    )
+    assert stale_pair.is_dir(), "setup: stale per-env dir was not created"
+
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(output_dir),
+        "--clean",
+        "--non-interactive",
+        timeout=180,
+    )
+
+    assert result.returncode == 0, (
+        f"pacioli scan --clean returned rc={result.returncode}; "
+        f"stdout={result.stdout[-1000:]!r} "
+        f"stderr={result.stderr[-1000:]!r}"
+    )
+
+    # The stale per-env dir must be gone (only freshly-scanned ones remain).
+    assert not stale_pair.exists(), (
+        f"--clean did not remove stale per-env dir {stale_pair}; "
+        f"contents of {output_dir}: {sorted(p.name for p in output_dir.rglob('*'))}"
+    )
+
+    # The INFO log line surfaces the wipe count so operators can see
+    # the cleanup happened. _log() writes to stderr (orchestrator._log).
+    combined = result.stdout + result.stderr
+    assert "INFO" in combined and "--clean: removed" in combined, (
+        f"expected 'INFO --clean: removed N stale per-env dir(s)' in output; "
+        f"stdout={result.stdout[-500:]!r} stderr={result.stderr[-500:]!r}"
+    )
+
+
+def test_pacioli_scan_without_clean_preserves_stale_per_env_dirs(tmp_path: Path) -> None:
+    """``pacioli scan`` WITHOUT ``--clean`` leaves stale per-env dirs alone.
+
+    Counterpart to the ``--clean`` test: confirms the default behavior
+    is unchanged (opt-in wipe). Without ``--clean``, a pre-existing
+    per-env dir under the run-dir must still be there after the scan.
+    """
+    target_repo = _make_minimal_tf_repo(tmp_path / "repo")
+    output_dir = tmp_path / "runs"
+
+    stale_pair = output_dir / "CR_Test" / "dev"
+    stale_pair.mkdir(parents=True, exist_ok=True)
+    (stale_pair / "pacioli_environment.json").write_text(
+        '{"schema_version": 1, "project": "CR_Test", "env": "dev", "stack_label": null}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(output_dir),
+        "--non-interactive",
+        timeout=180,
+    )
+
+    assert result.returncode == 0, (
+        f"pacioli scan returned rc={result.returncode}; "
+        f"stderr={result.stderr[-500:]!r}"
+    )
+    assert stale_pair.is_dir(), (
+        "default scan (no --clean) must NOT remove stale per-env dirs; "
+        f"missing: {stale_pair}"
+    )
+
+
 def test_main_exits_99_when_subprocess_operation_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3629,4 +3730,77 @@ def test_e2e_fixture_d_unknown_root_field_returns_friendly_error(tmp_path: Path)
     assert ".pacioli/scope.yaml.root: contains unknown field(s): foo" in result.stderr, (
         f"fixture D: stderr missing the plan-mandated exact message; "
         f"got: {result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Aggregator scope: echo — subprocess coverage
+# ---------------------------------------------------------------------------
+
+
+def test_pacioli_aggregate_echoes_target_repo_scope(tmp_path: Path) -> None:
+    """``pacioli aggregate <run_dir>`` echoes the scan's target repo scope path.
+
+    Regression guard for the stale-echo bug: when the run-dir lives
+    outside the consumer repo (e.g. ``~/.pacioli/runs/<label>/``), the
+    legacy ``.git`` walk-up falls back to ``run_dir.parent`` and the
+    ``scope:`` echo points at a nonexistent path. The fix reads
+    ``target_repo`` from each per-env ``pacioli_environment.json``.
+
+    This test runs a real scan, then injects ``target_repo`` into the
+    produced metadata (simulating todo 3's orchestrator change), then
+    runs aggregate and asserts the echo names the original target repo.
+    """
+    import json as _json
+
+    target_repo = _make_minimal_tf_repo(tmp_path / "repo")
+    output_dir = tmp_path / "runs"
+    label = "echo-test"
+
+    scan_result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(output_dir),
+        "--label",
+        label,
+        "--non-interactive",
+        timeout=180,
+    )
+    assert scan_result.returncode == 0, (
+        f"setup scan failed rc={scan_result.returncode}; "
+        f"stderr={scan_result.stderr[-500:]!r}"
+    )
+
+    run_dir = output_dir / label
+    # Inject target_repo into each per-env metadata file (simulates
+    # todo 3's orchestrator change so this test is self-contained).
+    metadata_files = list(run_dir.rglob("pacioli_environment.json"))
+    assert metadata_files, (
+        f"setup: no pacioli_environment.json under {run_dir}; "
+        f"contents: {sorted(p.name for p in run_dir.rglob('*'))}"
+    )
+    for mf in metadata_files:
+        data = _json.loads(mf.read_text(encoding="utf-8"))
+        data["target_repo"] = str(target_repo.resolve())
+        mf.write_text(_json.dumps(data), encoding="utf-8")
+
+    agg_result = _run_cli(
+        "aggregate", str(run_dir),
+        timeout=60,
+    )
+    assert agg_result.returncode == 0, (
+        f"pacioli aggregate returned rc={agg_result.returncode}; "
+        f"stdout={agg_result.stdout[-1000:]!r} "
+        f"stderr={agg_result.stderr[-1000:]!r}"
+    )
+    expected_scope = target_repo.resolve() / ".pacioli" / "scope.yaml"
+    assert f"scope:   {expected_scope}" in agg_result.stdout, (
+        f"expected scope echo to name {expected_scope}; "
+        f"stdout={agg_result.stdout!r}"
+    )
+    # The stale fallback would echo a path under the run-dir parent.
+    stale = run_dir.parent / ".pacioli" / "scope.yaml"
+    assert f"scope:   {stale}" not in agg_result.stdout, (
+        f"stale scope echo {stale} still present; stdout={agg_result.stdout!r}"
     )
