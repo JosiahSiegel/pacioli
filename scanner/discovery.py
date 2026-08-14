@@ -7,11 +7,11 @@ list. ``projects:`` records have this exact shape::
     - project: <non-blank string>
       description: <optional string>
       status: in_scope | pending | excluded
-      reason: <required non-blank string for pending/excluded>
+      reason: <optional string; recommended when status is pending or excluded>
       envs:
         - name: <non-blank string>
           status: in_scope | pending | excluded
-          reason: <required non-blank string for pending/excluded>
+          reason: <optional string; recommended when status is pending or excluded>
 
 Legacy scalar environments (for example, ``- prod``) are invalid. Only pairs
 whose project and environment are both ``in_scope`` are discovered. A pending
@@ -280,13 +280,16 @@ def _optional_string(raw: dict, key: str, location: str) -> Optional[str]:
 
 
 def _scope_status(raw: dict, location: str) -> tuple[str, Optional[str]]:
-    """Parse a scope status and its required exclusion reason."""
+    """Parse a scope status and its optional exclusion reason.
+
+    ``reason`` is optional for ``pending`` and ``excluded`` statuses — it is
+    recommended for an audit trail but not required by the schema. If a
+    ``reason`` is supplied, it must be a string (the type check survives).
+    """
     status = _required_string(raw, "status", location)
     if status not in {"in_scope", "pending", "excluded"}:
         raise _scope_error(f"{location}.status", "must be in_scope, pending, or excluded")
     reason = _optional_string(raw, "reason", location)
-    if status in {"pending", "excluded"} and (reason is None or not reason.strip()):
-        raise _scope_error(f"{location}.reason", "is required and must be non-blank for pending or excluded status")
     return status, reason
 
 
@@ -373,8 +376,9 @@ def _parse_scope_manifest(scope_file: Path) -> _ScopeManifest:
     a non-empty list. Project records accept only ``project``, ``description``,
     ``status``, ``reason``, and ``envs``. Environment records accept only
     ``name``, ``status``, and ``reason``. Both statuses are one of ``in_scope``,
-    ``pending``, or ``excluded``; pending and excluded records require a
-    non-blank reason. Scalar environment names and unknown keys are rejected.
+    ``pending``, or ``excluded``; ``reason`` is optional (recommended for an
+    audit trail when status is pending or excluded). Scalar environment names
+    and unknown keys are rejected.
 
     The returned in-scope pairs require both project and environment status to
     be ``in_scope``. A non-in-scope project overrides its child environment's

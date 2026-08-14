@@ -84,7 +84,8 @@ _SCOPE_HEADER: str = (
     "#   envs:       list of env records (each with name, status, reason)\n"
     "#   scan_paths: explicit stack-root entries (alternative to projects:)\n"
     "#\n"
-    "# Status values: in_scope, pending, excluded. Pending/excluded require a reason.\n"
+    "# Status values: in_scope, pending, excluded. ``reason`` is optional but\n"
+    "# recommended for pending or excluded entries (provides an audit trail).\n"
     "#\n"
     "# Example -- in_scope project with in_scope env:\n"
     "# projects:\n"
@@ -102,7 +103,7 @@ _SCOPE_HEADER: str = (
     "#\n"
     "# Next steps:\n"
     "#   1. Edit this file to set status=in_scope for what you want scanned\n"
-    "#   2. Set status=pending or excluded with a reason for the rest\n"
+    "#   2. Set status=pending or excluded for the rest (reason optional)\n"
     "#   3. Run `pacioli scan` again\n"
 )
 

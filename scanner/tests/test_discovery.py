@@ -923,11 +923,9 @@ projects:
         ("projects: []", "root"),
         ("projects: {}", "projects"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs: [prod]", "projects[0].envs[0]"),
-        ("projects:\n  - project: payments\n    status: excluded\n    envs: []", "projects[0].reason"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs: scalar", "projects[0].envs"),
         ("projects:\n  - project: payments\n    status: invalid\n    envs: []", "projects[0].status"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: in_scope\n      - name: prod\n        status: in_scope", "projects[0].envs[1]"),
-        ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: excluded", "projects[0].envs[0].reason"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: in_scope\n        extra: no", "projects[0].envs[0]"),
     ],
 )
@@ -943,6 +941,108 @@ def test_scope_manifest_rejects_malformed_records(
         discover_pairs(tmp_path)
 
     assert location in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "yaml_text, expected_pairs, absent_pairs",
+    [
+        # Project-level excluded (no reason) is now valid; in_scope sibling survives.
+        (
+            """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+  - project: legacy
+    status: excluded
+    envs:
+      - name: old
+        status: in_scope
+""",
+            [("payments", "prod")],
+            [("legacy", "old")],
+        ),
+        # Env-level excluded (no reason) is now valid; in_scope sibling survives.
+        (
+            """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: excluded
+""",
+            [("payments", "prod")],
+            [("payments", "staging")],
+        ),
+        # Env-level pending (no reason) is now valid; in_scope sibling survives.
+        (
+            """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: sandbox
+        status: pending
+""",
+            [("payments", "prod")],
+            [("payments", "sandbox")],
+        ),
+    ],
+)
+def test_scope_manifest_reason_optional_for_pending_and_excluded(
+    tmp_path: Path,
+    yaml_text: str,
+    expected_pairs: list[tuple[str, str]],
+    absent_pairs: list[tuple[str, str]],
+) -> None:
+    """Pending/excluded records may omit ``reason``; excluded entries are not discovered.
+
+    Each fixture keeps an ``in_scope`` sibling so :func:`discover_pairs` does
+    not raise :class:`NoIaCFoundError` for an all-excluded manifest.
+    """
+    _write_yaml(tmp_path / ".pacioli" / "scope.yaml", yaml_text)
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == expected_pairs
+    for absent in absent_pairs:
+        assert absent not in _pairs(pairs)
+
+
+def test_scope_manifest_rejects_non_string_reason(tmp_path: Path) -> None:
+    """A ``reason`` that is present but not a string still raises with location prefix.
+
+    Covers ``_optional_string`` at discovery.py:287 — the type check survives
+    even though the requirement was relaxed in TODO 3.
+    """
+    _write_yaml(
+        tmp_path / ".pacioli" / "scope.yaml",
+        """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: excluded
+        reason: 123
+""",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        discover_pairs(tmp_path)
+
+    message = str(excinfo.value)
+    assert ".pacioli/scope.yaml" in message
+    assert "reason" in message
 
 
 def test_scope_manifest_excludes_declared_pairs_but_keeps_unmatched_scan_paths(
