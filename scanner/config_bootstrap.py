@@ -46,8 +46,8 @@ from typing import Optional
 
 import yaml
 
-from scanner.baseline_init import _validate_safe_path, _is_under
-from scanner.discovery import discover_pairs, SCOPE_FILENAME, _parse_scope_manifest, NoIaCFoundError
+from scanner.baseline_init import _validate_safe_path
+from scanner.discovery import discover_pairs, SCOPE_FILENAME, NoIaCFoundError
 
 
 # ---------------------------------------------------------------------------

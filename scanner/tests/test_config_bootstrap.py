@@ -40,10 +40,8 @@ from scanner.config_bootstrap import (  # noqa: E402
 )
 from scanner.discovery import (
     SCOPE_FILENAME,
-    NoIaCFoundError,
     _parse_scope_manifest,
 )
-from scanner.frameworks import detect_frameworks
 from scanner.aggregate import load_baseline
 
 
