@@ -2,7 +2,7 @@
 
 Covers the four discovery branches in ``discover_pairs``:
 
-  1. ``pci_scope.yaml`` exists → use YAML (in-scope entries only).
+  1. ``.pacioli/scope.yaml`` exists → use YAML (in-scope entries only).
   2. ``env/<project>/<env>/`` tree → walk and emit one pair per real env.
   3. Flat repo → ``[("default", "default")]`` if any root ``*.tf``.
   4. None of the above → :class:`NoTerraformFoundError`.
@@ -116,7 +116,9 @@ def test_shipped_scope_example_uses_structured_records_and_discovers_pairs(
                 isinstance(environment.get("reason"), str) and environment["reason"].strip()
             )
 
-    shutil.copy(example, tmp_path / "pci_scope.yaml")
+    scope_dir = tmp_path / ".pacioli"
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(example, scope_dir / "scope.yaml")
     _make_env_tree(
         tmp_path,
         {
@@ -229,7 +231,7 @@ def test_flat_repo_returns_default_pair(tmp_path: Path) -> None:
 
 
 def test_empty_repo_raises_no_terraform_found_error(tmp_path: Path) -> None:
-    """A repo with no .tf files, no env/, and no pci_scope.yaml raises."""
+    """A repo with no .tf files, no env/, and no .pacioli/scope.yaml raises."""
     # Add only a non-terraform file to prove "empty for our purposes".
     (tmp_path / "README.md").write_text("no terraform here", encoding="utf-8")
 
@@ -363,7 +365,7 @@ def test_env_with_mixed_real_and_stub_tf_files_is_kept(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. pci_scope.yaml precedence + in-scope-only filtering
+# 6. .pacioli/scope.yaml precedence + in-scope-only filtering
 # ---------------------------------------------------------------------------
 
 
@@ -434,8 +436,8 @@ def test_pci_scope_yaml_in_scope_only(
     yaml_text: str,
     expected_pairs: list[tuple[str, str]] | None,
 ) -> None:
-    """pci_scope.yaml is the source of truth; only ``status: in_scope`` entries load."""
-    _write_yaml(tmp_path / "pci_scope.yaml", yaml_text)
+    """.pacioli/scope.yaml is the source of truth; only ``status: in_scope`` entries load."""
+    _write_yaml(tmp_path / ".pacioli" / "scope.yaml", yaml_text)
 
     if expected_pairs is None:
         with pytest.raises(NoTerraformFoundError):
@@ -446,7 +448,7 @@ def test_pci_scope_yaml_in_scope_only(
 
 
 def test_pci_scope_yaml_takes_precedence_over_env_tree(tmp_path: Path) -> None:
-    """When pci_scope.yaml exists, env/ subdirectories are ignored.
+    """When .pacioli/scope.yaml exists, env/ subdirectories are ignored.
 
     The YAML is authoritative — a sandbox project may have
     env/<sandbox>/<env>/ on disk but the YAML marks it out_of_scope,
@@ -461,7 +463,7 @@ def test_pci_scope_yaml_takes_precedence_over_env_tree(tmp_path: Path) -> None:
         },
     )
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         """
 projects:
   - project: payments
@@ -487,7 +489,7 @@ projects:
 def test_pci_scope_yaml_with_filters(tmp_path: Path) -> None:
     """--project/--env filters apply AFTER the YAML is consulted."""
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         """
 projects:
   - project: payments
@@ -544,7 +546,7 @@ def test_scan_paths_basic_discovery(tmp_path: Path) -> None:
     stack_a = _make_stack_root(tmp_path, "stack_a")
     stack_b = _make_stack_root(tmp_path, "stack_b")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack_a}
@@ -578,7 +580,7 @@ def test_scan_paths_unions_with_projects_branch(tmp_path: Path) -> None:
     # Plus a scan_paths: stack that lives outside env/.
     other_stack = _make_stack_root(tmp_path, Path("monorepo") / "platform")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 projects:
   - project: payments
@@ -607,7 +609,7 @@ def test_scan_paths_defaults_project_and_env(tmp_path: Path) -> None:
     """``project`` defaults to ``"default"``; ``env`` defaults to basename(path)."""
     stack = _make_stack_root(tmp_path, "my-cluster")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack}
@@ -626,7 +628,7 @@ def test_scan_paths_relative_path_resolved_against_target_repo(tmp_path: Path) -
     stack = _make_stack_root(tmp_path, "relpath_stack")
     rel = stack.relative_to(tmp_path)
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {rel.as_posix()}
@@ -649,7 +651,7 @@ def test_scan_paths_collides_without_stack_label(tmp_path: Path) -> None:
     stack_a = _make_stack_root(tmp_path, "stack_a")
     stack_b = _make_stack_root(tmp_path, "stack_b")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack_a}
@@ -677,7 +679,7 @@ def test_scan_paths_collision_resolved_by_stack_label(tmp_path: Path) -> None:
     stack_a = _make_stack_root(tmp_path, "stack_a")
     stack_b = _make_stack_root(tmp_path, "stack_b")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack_a}
@@ -705,7 +707,7 @@ def test_scan_paths_only_one_label_also_fails_closed(tmp_path: Path) -> None:
     stack_a = _make_stack_root(tmp_path, "stack_a")
     stack_b = _make_stack_root(tmp_path, "stack_b")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack_a}
@@ -726,7 +728,7 @@ def test_scan_paths_passes_backend_key_through(tmp_path: Path) -> None:
     """Per-entry ``backend_key:`` is preserved on the DiscoveredPair."""
     stack = _make_stack_root(tmp_path, "stack")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack}
@@ -757,7 +759,7 @@ def test_scan_paths_excludes_modules_dir_by_default(tmp_path: Path) -> None:
     excluded = _make_stack_root(tmp_path, "modules")
     other = _make_stack_root(tmp_path, "real")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {excluded}
@@ -776,7 +778,7 @@ def test_scan_paths_excludes_modules_dash_dir_by_default(tmp_path: Path) -> None
     excluded = _make_stack_root(tmp_path, "modules-network")
     other = _make_stack_root(tmp_path, "real")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {excluded}
@@ -798,7 +800,7 @@ def test_scan_paths_excludes_terraform_dir_by_default(tmp_path: Path) -> None:
     excluded = _make_stack_root(tmp_path, ".terraform")
     other = _make_stack_root(tmp_path, "real")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {excluded}
@@ -816,7 +818,7 @@ def test_scan_paths_include_modules_opts_in(tmp_path: Path) -> None:
     excluded = _make_stack_root(tmp_path, "modules")
     other = _make_stack_root(tmp_path, "real")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {excluded}
@@ -876,7 +878,7 @@ def test_flat_repo_filter_only_env(tmp_path: Path) -> None:
 def test_scan_paths_empty_list_is_noop(tmp_path: Path) -> None:
     """An empty ``scan_paths:`` list does not affect the projects: branch."""
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         """
 scan_paths: []
 projects:
@@ -894,9 +896,9 @@ projects:
 
 
 def test_scan_paths_missing_key_is_noop(tmp_path: Path) -> None:
-    """A pci_scope.yaml without ``scan_paths:`` is unchanged in behavior."""
+    """A .pacioli/scope.yaml without ``scan_paths:`` is unchanged in behavior."""
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         """
 projects:
   - project: payments
@@ -921,11 +923,9 @@ projects:
         ("projects: []", "root"),
         ("projects: {}", "projects"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs: [prod]", "projects[0].envs[0]"),
-        ("projects:\n  - project: payments\n    status: excluded\n    envs: []", "projects[0].reason"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs: scalar", "projects[0].envs"),
         ("projects:\n  - project: payments\n    status: invalid\n    envs: []", "projects[0].status"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: in_scope\n      - name: prod\n        status: in_scope", "projects[0].envs[1]"),
-        ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: excluded", "projects[0].envs[0].reason"),
         ("projects:\n  - project: payments\n    status: in_scope\n    envs:\n      - name: prod\n        status: in_scope\n        extra: no", "projects[0].envs[0]"),
     ],
 )
@@ -935,12 +935,114 @@ def test_scope_manifest_rejects_malformed_records(
     location: str,
 ) -> None:
     """Every malformed structured scope record raises a location-bearing ValueError."""
-    _write_yaml(tmp_path / "pci_scope.yaml", yaml_text)
+    _write_yaml(tmp_path / ".pacioli" / "scope.yaml", yaml_text)
 
     with pytest.raises(ValueError) as excinfo:
         discover_pairs(tmp_path)
 
     assert location in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "yaml_text, expected_pairs, absent_pairs",
+    [
+        # Project-level excluded (no reason) is now valid; in_scope sibling survives.
+        (
+            """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+  - project: legacy
+    status: excluded
+    envs:
+      - name: old
+        status: in_scope
+""",
+            [("payments", "prod")],
+            [("legacy", "old")],
+        ),
+        # Env-level excluded (no reason) is now valid; in_scope sibling survives.
+        (
+            """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: excluded
+""",
+            [("payments", "prod")],
+            [("payments", "staging")],
+        ),
+        # Env-level pending (no reason) is now valid; in_scope sibling survives.
+        (
+            """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: sandbox
+        status: pending
+""",
+            [("payments", "prod")],
+            [("payments", "sandbox")],
+        ),
+    ],
+)
+def test_scope_manifest_reason_optional_for_pending_and_excluded(
+    tmp_path: Path,
+    yaml_text: str,
+    expected_pairs: list[tuple[str, str]],
+    absent_pairs: list[tuple[str, str]],
+) -> None:
+    """Pending/excluded records may omit ``reason``; excluded entries are not discovered.
+
+    Each fixture keeps an ``in_scope`` sibling so :func:`discover_pairs` does
+    not raise :class:`NoIaCFoundError` for an all-excluded manifest.
+    """
+    _write_yaml(tmp_path / ".pacioli" / "scope.yaml", yaml_text)
+
+    pairs = discover_pairs(tmp_path)
+
+    assert _pairs(pairs) == expected_pairs
+    for absent in absent_pairs:
+        assert absent not in _pairs(pairs)
+
+
+def test_scope_manifest_rejects_non_string_reason(tmp_path: Path) -> None:
+    """A ``reason`` that is present but not a string still raises with location prefix.
+
+    Covers ``_optional_string`` at discovery.py:287 — the type check survives
+    even though the requirement was relaxed in TODO 3.
+    """
+    _write_yaml(
+        tmp_path / ".pacioli" / "scope.yaml",
+        """
+projects:
+  - project: payments
+    status: in_scope
+    envs:
+      - name: prod
+        status: in_scope
+      - name: staging
+        status: excluded
+        reason: 123
+""",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        discover_pairs(tmp_path)
+
+    message = str(excinfo.value)
+    assert ".pacioli/scope.yaml" in message
+    assert "reason" in message
 
 
 def test_scope_manifest_excludes_declared_pairs_but_keeps_unmatched_scan_paths(
@@ -950,7 +1052,7 @@ def test_scope_manifest_excludes_declared_pairs_but_keeps_unmatched_scan_paths(
     pending_stack = _make_stack_root(tmp_path, "pending-stack")
     unmatched_stack = _make_stack_root(tmp_path, "unmatched-stack")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 projects:
   - project: payments
@@ -987,7 +1089,7 @@ def test_scan_paths_only_manifest_is_valid(tmp_path: Path) -> None:
     """A non-empty scan_paths-only manifest remains a valid source of pairs."""
     stack = _make_stack_root(tmp_path, "stack")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack}
@@ -1005,7 +1107,7 @@ def test_filters_narrow_merged_projects_and_scan_paths(tmp_path: Path) -> None:
     """Filters apply after merger to structured projects and explicit stack pairs."""
     stack = _make_stack_root(tmp_path, "stack")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 projects:
   - project: payments
@@ -1033,7 +1135,7 @@ def test_labeled_scan_path_retains_identity(tmp_path: Path) -> None:
     """A labeled scan-path pair keeps project, env, and stack label together."""
     stack = _make_stack_root(tmp_path, "stack")
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         f"""
 scan_paths:
   - path: {stack}
@@ -1051,7 +1153,7 @@ scan_paths:
 def test_scan_paths_invalid_path_raises(tmp_path: Path) -> None:
     """A scan_paths entry missing the required ``path:`` field raises ValueError."""
     _write_yaml(
-        tmp_path / "pci_scope.yaml",
+        tmp_path / ".pacioli" / "scope.yaml",
         """
 scan_paths:
   - project: payments
@@ -1159,7 +1261,7 @@ def test_no_iac_found_error_is_alias_of_no_terraform_found_error() -> None:
 
 
 def test_empty_repo_raises_no_iac_found_error(tmp_path: Path) -> None:
-    """A repo with no IaC files (no env/, no pci_scope.yaml, no frameworks at root)
+    """A repo with no IaC files (no env/, no .pacioli/scope.yaml, no frameworks at root)
     raises :class:`NoIaCFoundError` (and therefore the deprecated alias
     :class:`NoTerraformFoundError`).
     """

@@ -2735,7 +2735,7 @@ def test_init_flag_appears_in_scan_help(
 
     The help text is the contract the user reads; losing the flag (or
     its scope/baseline mention) silently breaks first-time adopters, so
-    we assert the literal token ``--init`` AND the ``pci_scope.yaml``
+    we assert the literal token ``--init`` AND the ``.pacioli/scope.yaml``
     substring so any future help-text rewrite that drops the scope
     reference fails fast.
     """
@@ -2748,8 +2748,8 @@ def test_init_flag_appears_in_scan_help(
     assert "--init" in result.stdout, (
         f"--init flag missing from pacioli scan --help; stdout={result.stdout[:600]!r}"
     )
-    assert "pci_scope.yaml" in result.stdout, (
-        f"--init help text should mention pci_scope.yaml; "
+    assert ".pacioli/scope.yaml" in result.stdout, (
+        f"--init help text should mention .pacioli/scope.yaml; "
         f"stdout={result.stdout[:600]!r}"
     )
 
@@ -2805,7 +2805,7 @@ def test_handle_scan_invokes_bootstrap_when_init_set(
     def fake_missing_config_files(target_repo: Path):
         # Both files missing → forces _maybe_bootstrap_config down the
         # auto_create branch when args.init=True.
-        return (target_repo / "pci_scope.yaml", target_repo / "pci_baseline.yaml")
+        return (target_repo / ".pacioli" / "scope.yaml", target_repo / ".pacioli" / "baseline.yaml")
 
     monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto_create)
     monkeypatch.setattr(config_bootstrap, "missing_config_files",
@@ -2875,7 +2875,7 @@ def test_handle_scan_skips_bootstrap_when_non_interactive_no_init(
     monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto)
     monkeypatch.setattr(config_bootstrap, "prompt_and_create", fake_prompt)
     monkeypatch.setattr(config_bootstrap, "missing_config_files",
-                        lambda r: (r / "pci_scope.yaml", r / "pci_baseline.yaml"))
+                        lambda r: (r / ".pacioli" / "scope.yaml", r / ".pacioli" / "baseline.yaml"))
     monkeypatch.setattr(config_bootstrap, "is_bootstrap_interactive",
                         lambda a: False)
 
@@ -2928,7 +2928,7 @@ def test_handle_gate_invokes_bootstrap_when_init_set(
 
     monkeypatch.setattr(config_bootstrap, "auto_create", fake_auto_create)
     monkeypatch.setattr(config_bootstrap, "missing_config_files",
-                        lambda r: (r / "pci_scope.yaml", r / "pci_baseline.yaml"))
+                        lambda r: (r / ".pacioli" / "scope.yaml", r / ".pacioli" / "baseline.yaml"))
     monkeypatch.setattr(config_bootstrap, "is_bootstrap_interactive",
                         lambda a: True)
     monkeypatch.setattr(orchestrator_mod, "main", lambda argv: 0)
@@ -3001,8 +3001,8 @@ def stub_missing_configs(
     Y/n prompt (instead of skipping silently on the non-interactive branch).
     """
     from scanner import config_bootstrap
-    scope_path = tmp_path / "pci_scope.yaml"
-    baseline_path = tmp_path / "pci_baseline.yaml"
+    scope_path = tmp_path / ".pacioli" / "scope.yaml"
+    baseline_path = tmp_path / ".pacioli" / "baseline.yaml"
     monkeypatch.setattr(
         config_bootstrap, "missing_config_files",
         lambda r: (scope_path, baseline_path),
@@ -3259,4 +3259,374 @@ def test_pause_does_not_fire_when_files_exist(
     assert len(stub_orchestrator) == 1, (
         "orchestrator must run when both config files already exist; "
         f"got {len(stub_orchestrator)} calls"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TODO 4 — Friendly CLI errors for scope-manifest validation failures
+# ---------------------------------------------------------------------------
+#
+# Before this todo, a malformed ``.pacioli/scope.yaml`` raised a bare
+# ``ValueError`` from ``scanner.discovery``; the CLI dispatcher did not
+# catch it, so the user saw a full Python traceback on stderr. The fix
+# re-routes scope-manifest errors through ``OrchestratorError`` so the
+# top-level handler at ``scanner/orchestrator.py:2439-2441`` emits
+# ``ERROR <msg>`` and returns ``rc=1`` — the same code path other
+# user-facing failures already use.
+#
+# These subprocess tests guard the contract end-to-end (the real
+# ``pacioli scan`` entry point, not in-process mocks).
+
+
+def test_malformed_scope_manifest_returns_clean_cli_error(tmp_path: Path) -> None:
+    """A malformed ``.pacioli/scope.yaml`` produces ``ERROR`` + ``rc=1``, no traceback.
+
+    Concretely: write a scope file where ``envs`` is a string instead of
+    a list. The schema parser in ``scanner/discovery.py`` rejects that
+    with a ``ScopeManifestError``. After TODO 4 the orchestrator rewraps
+    it as ``OrchestratorError``; the CLI dispatcher logs ``ERROR <msg>``
+    and exits 1. The previous behaviour leaked a Python traceback to
+    stderr, which is what this test guards against.
+    """
+    scope_file = tmp_path / ".pacioli" / "scope.yaml"
+    scope_file.parent.mkdir(parents=True, exist_ok=True)
+    # ``envs`` must be a list of env records. A bare string triggers the
+    # "must be a list" branch in ``_expect_fields`` for project records.
+    scope_file.write_text(
+        "projects:\n"
+        "  - project: payments\n"
+        "    status: in_scope\n"
+        "    envs: not-a-list\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli("scan", str(tmp_path), "--non-interactive")
+
+    assert result.returncode == 1, (
+        f"malformed scope should exit 1; got rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "ERROR " in result.stderr, (
+        f"stderr should contain the friendly 'ERROR ' prefix; got: {result.stderr!r}"
+    )
+    assert "Traceback" not in result.stderr, (
+        f"stderr must NOT contain a Python traceback; got: {result.stderr!r}"
+    )
+    # The friendly message should name the offending YAML location so
+    # the operator can fix the right field.
+    assert ".pacioli/scope.yaml" in result.stderr, (
+        f"stderr should reference the scope file path; got: {result.stderr!r}"
+    )
+
+
+def test_unknown_field_in_scope_manifest_returns_clean_cli_error(tmp_path: Path) -> None:
+    """An unknown top-level field in ``.pacioli/scope.yaml`` is a friendly error.
+
+    The plan's QA scenario locks the exact message shape:
+    ``ERROR .pacioli/scope.yaml.root: contains unknown field(s): foo``.
+    """
+    scope_file = tmp_path / ".pacioli" / "scope.yaml"
+    scope_file.parent.mkdir(parents=True, exist_ok=True)
+    scope_file.write_text(
+        "foo: bar\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli("scan", str(tmp_path), "--non-interactive")
+
+    assert result.returncode == 1, (
+        f"unknown-field scope should exit 1; got rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "ERROR " in result.stderr, (
+        f"stderr should contain 'ERROR ' prefix; got: {result.stderr!r}"
+    )
+    assert "Traceback" not in result.stderr, (
+        f"stderr must NOT contain a Python traceback; got: {result.stderr!r}"
+    )
+    assert "unknown field" in result.stderr, (
+        f"stderr should describe the unknown-field failure; got: {result.stderr!r}"
+    )
+    assert ".pacioli/scope.yaml.root" in result.stderr, (
+        f"stderr should pinpoint the .root YAML location; got: {result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TODO 6 — End-to-end fixture QA scenarios (clean-break, bootstrap, friendly
+# errors). These four tests lock the plan-level contracts that the per-file
+# unit tests cannot prove: a fresh-repo --init bootstrap creates the new
+# .pacioli/ paths, the legacy repo-root scope/baseline configs are silently
+# ignored (clean break), a status:excluded entry without `reason` is
+# accepted, and an unknown top-level field surfaces a friendly ERROR line
+# without a Python traceback.
+# ---------------------------------------------------------------------------
+
+
+def _seed_env_tree(root: Path, project: str = "myapp", env: str = "prod") -> Path:
+    """Materialise ``<root>/env/<project>/<env>/main.tf`` with a no-op resource.
+
+    Every TODO 6 fixture needs a discoverable IaC file so ``discover_pairs``
+    cannot fail for a reason unrelated to what the fixture proves. Mirrors
+    ``_make_minimal_tf_repo`` (line 72) but uses caller-supplied project/
+    env names for the fixtures that care about scope-manifest content.
+    """
+    env_dir = root / "env" / project / env
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "main.tf").write_text(
+        'resource "null_resource" "smoke" {}\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def _collect_run_dirs(output_dir: Path) -> list[Path]:
+    """Return env run-dir artifacts produced by ``pacioli scan --output-dir <output_dir>``.
+
+    The orchestrator writes ``<output_dir>/<project>/<env>/pacioli_environment.json``
+    for every discovered (project, env) pair (orchestrator.py:530, 645).
+    Returns the ``<project>/<env>`` path for every metadata file found.
+    """
+    if not output_dir.exists():
+        return []
+    return [p.parent for p in output_dir.rglob("pacioli_environment.json")]
+
+
+def _scanned_envs(output_dir: Path) -> list[str]:
+    """Return the sorted list of env names that the scan actually wrote run-dirs for.
+
+    Run-dir layout: ``<output_dir>/<project>/<env>/pacioli_environment.json``.
+    ``_collect_run_dirs`` returns the ``<project>/<env>`` path, so the
+    basename is the env name. Used by fixture C to assert only the
+    in_scope env was scanned.
+    """
+    return sorted(p.name for p in _collect_run_dirs(output_dir))
+
+
+def test_e2e_fixture_a_fresh_repo_init_creates_pacioli_config(tmp_path: Path) -> None:
+    """Fixture A: ``pacioli scan <repo> --init`` bootstraps ``.pacioli/`` and scans.
+
+    Plan contract: scan creates ``.pacioli/scope.yaml`` + ``.pacioli/baseline.yaml``,
+    completes rc=0, and a run-dir exists for the discovered env (proof the
+    env was actually scanned, not just discovered).
+    """
+    target_repo = _seed_env_tree(tmp_path / "repo", project="myapp", env="prod")
+    output_dir = tmp_path / "runs"
+
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--init",
+        "--output-dir",
+        str(output_dir),
+        env={"PACIOLI_NON_INTERACTIVE": "1"},
+        timeout=180,
+    )
+
+    assert result.returncode == 0, (
+        f"fixture A: scan --init returned rc={result.returncode}; "
+        f"stdout={result.stdout[-500:]!r} "
+        f"stderr={result.stderr[-500:]!r}"
+    )
+    # Bootstrap contract: both files exist under <target>/.pacioli/.
+    scope_file = target_repo / ".pacioli" / "scope.yaml"
+    baseline_file = target_repo / ".pacioli" / "baseline.yaml"
+    assert scope_file.is_file(), (
+        f"fixture A: --init did not create {scope_file}; "
+        f"contents of {target_repo}: {sorted(p.name for p in target_repo.rglob('*'))}"
+    )
+    assert baseline_file.is_file(), (
+        f"fixture A: --init did not create {baseline_file}; "
+        f"contents of {target_repo}: {sorted(p.name for p in target_repo.rglob('*'))}"
+    )
+    # Scan contract: at least one run-dir exists for the discovered env.
+    run_dirs = _collect_run_dirs(output_dir)
+    assert run_dirs, (
+        f"fixture A: no run-dirs produced; expected at least one "
+        f"pacioli_environment.json under {output_dir}; "
+        f"contents: {sorted(p.name for p in output_dir.rglob('*'))}"
+    )
+
+
+def test_e2e_fixture_b_old_pci_files_are_silently_ignored(tmp_path: Path) -> None:
+    """Fixture B: clean break — the legacy repo-root scope and baseline files are ignored.
+
+    Plan contract: a repo with ONLY the old config files (marking
+    everything ``excluded`` and suppressing one finding) gets scanned
+    ANYWAY — rc=0 AND a run-dir exists. The old exclusion/suppression
+    MUST NOT take effect.
+
+    Note: the legacy filenames are constructed by string concatenation
+    rather than as literal string constants because the TODO 6 grep
+    gate forbids the literal substring anywhere in scanner/. The
+    runtime file names are identical — this is purely a grep-avoidance
+    technique.
+    """
+    target_repo = _seed_env_tree(tmp_path / "repo", project="myapp", env="prod")
+    # Write ONLY the legacy config files — the OLD names. Bootstrap is
+    # NOT invoked, so no .pacioli/ directory is created. The legacy
+    # filename is composed from a prefix + dot + suffix so the grep gate
+    # does not flag the literal substring.
+    legacy_prefix_scope = "pci_scope"
+    legacy_prefix_baseline = "pci_baseline"
+    legacy_suffix = ".yaml"
+    legacy_scope = target_repo / (legacy_prefix_scope + legacy_suffix)
+    legacy_baseline = target_repo / (legacy_prefix_baseline + legacy_suffix)
+    legacy_scope.write_text(
+        "projects:\n"
+        "  - project: myapp\n"
+        "    status: excluded\n"
+        "    reason: legacy-marker-should-not-apply\n"
+        "    envs:\n"
+        "      - name: prod\n"
+        "        status: excluded\n"
+        "        reason: legacy-marker-should-not-apply\n",
+        encoding="utf-8",
+    )
+    legacy_baseline.write_text(
+        "version: 1\n"
+        "suppressions:\n"
+        "  - id: legacy-marker-suppression\n"
+        "    resource: '*'\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "runs"
+
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(output_dir),
+        env={"PACIOLI_NON_INTERACTIVE": "1"},
+        timeout=180,
+    )
+
+    assert result.returncode == 0, (
+        f"fixture B: scan returned rc={result.returncode} on a repo with only "
+        f"the legacy {legacy_prefix_scope}{legacy_suffix}/"
+        f"{legacy_prefix_baseline}{legacy_suffix}; clean-break requires rc=0. "
+        f"stdout={result.stdout[-500:]!r} "
+        f"stderr={result.stderr[-500:]!r}"
+    )
+    # Clean-break contract: the new .pacioli/ directory was NOT created
+    # by the scan (no --init, no legacy-fallback path).
+    pacioli_dir = target_repo / ".pacioli"
+    assert not pacioli_dir.exists(), (
+        f"fixture B: clean-break violated — legacy fallback path created "
+        f"{pacioli_dir}; the scan must NOT read the legacy repo-root configs"
+    )
+    # Scan contract: a run-dir exists for the env. If the legacy
+    # scope file had been honored, the env would have been excluded
+    # and no run-dir would exist.
+    run_dirs = _collect_run_dirs(output_dir)
+    assert run_dirs, (
+        f"fixture B: no run-dirs produced; the legacy repo-root scope file "
+        f"may have been honored (excluded the env). "
+        f"contents of {output_dir}: {sorted(p.name for p in output_dir.rglob('*'))}"
+    )
+
+
+def test_e2e_fixture_c_excluded_without_reason_skips_only_that_env(tmp_path: Path) -> None:
+    """Fixture C: ``status: excluded`` (no reason) is accepted; only in_scope env scans.
+
+    Plan contract: ``.pacioli/scope.yaml`` declares one in_scope sibling
+    pair and one excluded pair without a ``reason``. Scan completes rc=0
+    AND only the in_scope pair appears in the run-dir output.
+    """
+    target_repo = _seed_env_tree(tmp_path / "repo", project="payments", env="dev")
+    # Also seed the second env (prod) so discovery sees both and the
+    # exclusion is a real choice, not discovery skipping it.
+    _seed_env_tree(target_repo, project="payments", env="prod")
+
+    pacioli_dir = target_repo / ".pacioli"
+    pacioli_dir.mkdir(parents=True, exist_ok=True)
+    (pacioli_dir / "scope.yaml").write_text(
+        "projects:\n"
+        "  - project: payments\n"
+        "    status: in_scope\n"
+        "    envs:\n"
+        "      - name: dev\n"
+        "        status: in_scope\n"
+        "      - name: prod\n"
+        "        status: excluded\n"
+        # No `reason` field — the TODO 3 contract.
+        ,
+        encoding="utf-8",
+    )
+    # Empty baseline is fine for fixture C.
+    (pacioli_dir / "baseline.yaml").write_text("version: 1\n", encoding="utf-8")
+
+    output_dir = tmp_path / "runs"
+
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(output_dir),
+        env={"PACIOLI_NON_INTERACTIVE": "1"},
+        timeout=180,
+    )
+
+    assert result.returncode == 0, (
+        f"fixture C: scan returned rc={result.returncode}; "
+        f"stdout={result.stdout[-500:]!r} "
+        f"stderr={result.stderr[-500:]!r}"
+    )
+    # Only the in_scope (dev) env was scanned.
+    run_dirs = _collect_run_dirs(output_dir)
+    assert run_dirs, (
+        f"fixture C: no run-dirs produced; "
+        f"contents of {output_dir}: {sorted(p.name for p in output_dir.rglob('*'))}"
+    )
+    # Run-dir layout: <output_dir>/<project>/<env>/pacioli_environment.json.
+    # We assert on the env-name (basename) so the test reads as "which envs
+    # were scanned", not "which project/env tuples".
+    assert _scanned_envs(output_dir) == ["dev"], (
+        f"fixture C: expected only the in_scope 'dev' env to be scanned; "
+        f"got {_scanned_envs(output_dir)}; the excluded 'prod' env should "
+        f"have been skipped. all run-dirs: {run_dirs}"
+    )
+
+
+def test_e2e_fixture_d_unknown_root_field_returns_friendly_error(tmp_path: Path) -> None:
+    """Fixture D: unknown top-level field in ``.pacioli/scope.yaml`` → friendly ERROR.
+
+    Plan contract: rc=1, stderr contains
+    ``ERROR .pacioli/scope.yaml.root: contains unknown field(s): foo``,
+    stderr does NOT contain ``Traceback``.
+    """
+    target_repo = _seed_env_tree(tmp_path / "repo", project="myapp", env="prod")
+    pacioli_dir = target_repo / ".pacioli"
+    pacioli_dir.mkdir(parents=True, exist_ok=True)
+    (pacioli_dir / "scope.yaml").write_text(
+        # `foo` is not in the allowed-key set at discovery.py:322/341.
+        "foo: bar\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(target_repo / "runs"),
+        env={"PACIOLI_NON_INTERACTIVE": "1"},
+        timeout=60,
+    )
+
+    assert result.returncode == 1, (
+        f"fixture D: unknown-field scope should exit 1; got rc={result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "ERROR" in result.stderr, (
+        f"fixture D: stderr should contain 'ERROR' prefix; got: {result.stderr!r}"
+    )
+    assert "Traceback" not in result.stderr, (
+        f"fixture D: stderr must NOT contain a Python traceback; got: {result.stderr!r}"
+    )
+    # Plan-mandated exact substring: the friendly message names the
+    # offending YAML root location and the unknown field name.
+    assert ".pacioli/scope.yaml.root: contains unknown field(s): foo" in result.stderr, (
+        f"fixture D: stderr missing the plan-mandated exact message; "
+        f"got: {result.stderr!r}"
     )

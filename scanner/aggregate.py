@@ -22,9 +22,9 @@ Usage:
 
 Defaults:
   --run-dir  .checkov/<run_id>/
-  --scope    <repo>/pci_scope.yaml
+  --scope    <repo>/.pacioli/scope.yaml
   --mapping  <pacioli>/mappings/pci_dss_4.0.1.yaml
-  --baseline <repo>/pci_baseline.yaml
+  --baseline <repo>/.pacioli/baseline.yaml
   --out      <run-dir>/aggregate/
 
 Exit codes:
@@ -3652,9 +3652,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True, help="Run dir produced by scan.sh")
     ap.add_argument("--out", help="Output dir (default: <run-dir>/aggregate)")
-    ap.add_argument("--scope", default="pci_scope.yaml", help="Scope manifest")
+    ap.add_argument("--scope", default=".pacioli/scope.yaml", help="Scope manifest")
     ap.add_argument("--mapping", default="pci_mapping.yaml", help="PCI mapping")
-    ap.add_argument("--baseline", default="pci_baseline.yaml", help="Baseline suppressions")
+    ap.add_argument("--baseline", default=".pacioli/baseline.yaml", help="Baseline suppressions")
     ap.add_argument(
         "--source-framework",
         default="terraform",

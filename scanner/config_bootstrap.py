@@ -1,6 +1,6 @@
 """scanner/config_bootstrap.py -- Interactive scope+baseline scaffold for first-time users.
 
-Auto-creates ``pci_scope.yaml`` and ``pci_baseline.yaml`` when missing, mirroring the
+Auto-creates ``.pacioli/scope.yaml`` and ``.pacioli/baseline.yaml`` when missing, mirroring the
 mapping picker pattern. Reuses :func:`scanner.discovery.discover_pairs` for framework-
 agnostic IaC discovery. Reuses :func:`scanner.baseline_init._validate_safe_path` and
 :func:`scanner.baseline_init._is_under` for S2083-safe writes. Never overwrites
@@ -48,6 +48,7 @@ import yaml
 
 from scanner.baseline_init import _validate_safe_path
 from scanner.discovery import discover_pairs, SCOPE_FILENAME, NoIaCFoundError
+from scanner.paths import BASELINE_FILENAME as _BASELINE_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +65,11 @@ _TRUTHY_ENV: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 #: discovery internals.
 SCOPE_FILENAME = SCOPE_FILENAME  # noqa: F821  -- re-exported constant from discovery
 
-#: Filename for the baseline manifest.
-BASELINE_FILENAME: str = "pci_baseline.yaml"
+#: Filename for the baseline manifest. Re-exported from :mod:`scanner.paths`
+#: (mirroring the SCOPE_FILENAME re-export above) so callers can import
+#: everything from this module; the canonical definition lives in
+#: :data:`scanner.paths.BASELINE_FILENAME`.
+BASELINE_FILENAME = _BASELINE_FILENAME  # noqa: F821  -- re-exported constant from paths
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +84,8 @@ _SCOPE_HEADER: str = (
     "#   envs:       list of env records (each with name, status, reason)\n"
     "#   scan_paths: explicit stack-root entries (alternative to projects:)\n"
     "#\n"
-    "# Status values: in_scope, pending, excluded. Pending/excluded require a reason.\n"
+    "# Status values: in_scope, pending, excluded. ``reason`` is optional but\n"
+    "# recommended for pending or excluded entries (provides an audit trail).\n"
     "#\n"
     "# Example -- in_scope project with in_scope env:\n"
     "# projects:\n"
@@ -98,7 +103,7 @@ _SCOPE_HEADER: str = (
     "#\n"
     "# Next steps:\n"
     "#   1. Edit this file to set status=in_scope for what you want scanned\n"
-    "#   2. Set status=pending or excluded with a reason for the rest\n"
+    "#   2. Set status=pending or excluded for the rest (reason optional)\n"
     "#   3. Run `pacioli scan` again\n"
 )
 
@@ -224,7 +229,7 @@ def missing_config_files(target_repo: Path) -> tuple[Optional[Path], Optional[Pa
 
 
 def render_scope_yaml(target_repo: Path) -> str:
-    """Render a ``pci_scope.yaml`` string auto-discovered from ``target_repo``.
+    """Render a ``.pacioli/scope.yaml`` string auto-discovered from ``target_repo``.
 
     Handles three layouts:
 
@@ -278,7 +283,7 @@ def render_scope_yaml(target_repo: Path) -> str:
 
 
 def render_baseline_yaml() -> str:
-    """Render an empty ``pci_baseline.yaml`` with rich comment header + 1 example.
+    """Render an empty ``.pacioli/baseline.yaml`` with rich comment header + 1 example.
 
     Returns a YAML string with the shape::
 

@@ -94,7 +94,7 @@ incomplete plan into a complete result.
 
 Discovery is not limited to one hard-coded directory layout. Consumer scope
 configuration can declare additional roots with `scan_paths:` in
-`pci_scope.yaml`. The CLI also accepts repeated `--scan-path` and
+`.pacioli/scope.yaml`. The CLI also accepts repeated `--scan-path` and
 `--scan-glob` flags for explicit runs.
 
 Use these mechanisms to identify the Terraform files that should be scanned:
@@ -179,7 +179,7 @@ case is safe or complete.
    request. Pacioli emits `ACCESS REQUIRED`, makes no firewall change, and
    skips the affected state-dependent layer.
 5. **Multiple Terraform roots.** `scan_paths:` names several roots in
-   `pci_scope.yaml`, or the operator supplies repeated `--scan-path` flags.
+   `.pacioli/scope.yaml`, or the operator supplies repeated `--scan-path` flags.
    The report covers only the discovered roots.
 6. **Glob-selected services.** `--scan-glob 'services/*'` selects matching
    directories. Unmatched directories are outside that run's coverage.

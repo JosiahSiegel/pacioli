@@ -227,7 +227,7 @@ def _build_aggregate_argv(
         "--run-dir", str(run_dir),
         "--out", str(out_dir),
         "--mapping", str(mapping_path),
-        # --scope defaults to "pci_scope.yaml"; aggregate.main only
+        # --scope defaults to ".pacioli/scope.yaml"; aggregate.main only
         # prints the resolved scope_path and never reads its content
         # for this test, so leaving it at the default is safe.
         "--baseline", "nonexistent_baseline.yaml",

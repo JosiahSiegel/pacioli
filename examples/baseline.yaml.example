@@ -1,5 +1,7 @@
 # Pacioli baseline — repo-wide suppressions for known/accepted findings.
-# Copy this to your IaC repo as `pci_baseline.yaml` and customize.
+# Copy this to your IaC repo as `.pacioli/baseline.yaml` and customize:
+#   mkdir -p .pacioli
+#   cp examples/baseline.yaml.example ./.pacioli/baseline.yaml
 #
 # Schema:
 #   version:          schema version (always 1)

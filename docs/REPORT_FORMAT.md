@@ -190,7 +190,7 @@ visible findings.` Clearing the exclusions restores the full report view.
 
 A report view never changes the generated scan evidence. SARIF, CSV, and
 JUnit evidence remains unchanged and represents the full scan, regardless of
-the browser-local filter or stored theme choice. Use `pci_scope.yaml` to make
+the browser-local filter or stored theme choice. Use `.pacioli/scope.yaml` to make
 a scan-scope decision instead; see [Operator Guide](OPERATOR_GUIDE.md#adding-a-new-project-to-scope).
 
 ### `#dashboard`
@@ -213,7 +213,7 @@ The filterable findings table. Filters:
 - Free-text search (matches `resource`, `check_id`, `message`, `file_path`).
 - Severity pills (`HIGH`, `MEDIUM`, `LOW`, `SUPPRESSED`).
 - Environment exclusions (checkboxes for the full scanned environment set;
-  this report view is client-side only and is not a `pci_scope.yaml` scan
+  this report view is client-side only and is not a `.pacioli/scope.yaml` scan
   scope control).
 - PCI requirement picker (one entry per in-scope req from `pci_mapping.yaml`).
 

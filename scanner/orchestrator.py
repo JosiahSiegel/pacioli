@@ -82,6 +82,7 @@ from scanner.checkov_runner import CheckovRunner  # noqa: E402
 from scanner.discovery import (  # noqa: E402
     DiscoveredPair,
     NoTerraformFoundError,
+    ScopeManifestError,
     discover_pairs,
     discover_skipped_scope_environments,
 )
@@ -91,6 +92,7 @@ from scanner.frameworks import (  # noqa: E402
     is_terraform_family,
 )
 from scanner.paths import (  # noqa: E402
+    BASELINE_FILENAME,
     PathResolutionError,
     resolve_mapping as resolve_mapping_path,
     resolve_paths,
@@ -281,7 +283,7 @@ class Orchestrator:
 
         Args:
             target_repo: Path to the consumer's Terraform repo (must
-                contain ``pci_scope.yaml`` or ``env/<project>/<env>/``
+                contain ``.pacioli/scope.yaml`` or ``env/<project>/<env>/``
                 or flat ``*.tf`` at the root).
             project: Optional ``--project`` filter.
             env: Optional ``--env`` filter.
@@ -350,6 +352,18 @@ class Orchestrator:
                     include_modules=include_modules,
                 )
             )
+            # Double-parse invariant: both ``discover_pairs`` (called
+            # inside ``_resolve_scan_inputs`` above) and
+            # ``discover_skipped_scope_environments`` (below) gate on
+            # ``scope_file.is_file()`` identically — see
+            # ``scanner.discovery.discover_pairs`` at
+            # ``scanner/discovery.py:767`` and
+            # ``scanner.discovery.discover_skipped_scope_environments``
+            # at ``scanner/discovery.py:445``. Once ``_resolve_scan_inputs``
+            # has succeeded, the re-parse below cannot raise
+            # ``ScopeManifestError``: a malformed file would have failed
+            # earlier and been rewrapped as ``OrchestratorError``. No
+            # second guard is needed.
             skipped_environments = discover_skipped_scope_environments(target_repo)
 
             for skipped in skipped_environments:
@@ -429,6 +443,14 @@ class Orchestrator:
                 include_modules=include_modules,
             )
         except NoTerraformFoundError as exc:
+            raise OrchestratorError(str(exc)) from exc
+        except ScopeManifestError as exc:
+            # Scope-manifest validation failed (malformed YAML, unknown
+            # field, wrong shape, etc.). Rewrap as OrchestratorError so
+            # the top-level handler at ``scan()`` emits a clean
+            # ``ERROR <msg>`` + ``rc=1`` instead of a Python traceback.
+            # ``ScanPathsCollisionError`` inherits from
+            # ``ScopeManifestError`` and is caught here too.
             raise OrchestratorError(str(exc)) from exc
 
         return target_repo, resolved_mapping, resolved_baseline, pairs
@@ -533,7 +555,7 @@ class Orchestrator:
             if not resolved.is_file():
                 resolved = None
             return resolved
-        env_baseline = target_repo / "pci_baseline.yaml"
+        env_baseline = target_repo / BASELINE_FILENAME
         return env_baseline if env_baseline.is_file() else None
 
     @staticmethod
@@ -1009,8 +1031,8 @@ class Orchestrator:
         Precedence:
 
           1. ``stack_root`` (set by ``scan_paths:`` entries) → used
-             verbatim. This is the path the operator declared in
-             ``pci_scope.yaml::scan_paths:`` and is authoritative for
+              verbatim. This is the path the operator declared in
+              ``.pacioli/scope.yaml::scan_paths:`` and is authoritative for
              stacks that don't live under
              ``<target_repo>/env/<project>/<env>/`` (sibling checkouts,
              monorepo roots, etc.).
@@ -2232,7 +2254,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--baseline",
         default=None,
-        help="Baseline suppressions YAML (default: <target_repo>/pci_baseline.yaml).",
+        help="Baseline suppressions YAML (default: <target_repo>/.pacioli/baseline.yaml).",
     )
     parser.add_argument(
         "--state-account",

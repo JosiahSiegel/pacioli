@@ -53,7 +53,7 @@ def test_load_mapping_unknown_path(tmp_path):
 
 def test_load_baseline_returns_list():
     """Baseline file loads as a list of dicts."""
-    baseline_path = Path(__file__).resolve().parents[3] / "pci_baseline.yaml"
+    baseline_path = Path(__file__).resolve().parents[3] / ".pacioli" / "baseline.yaml"
     if not baseline_path.exists():
         pytest.skip(f"{baseline_path} not present")
     baseline = load_baseline(baseline_path)

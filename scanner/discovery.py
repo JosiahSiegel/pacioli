@@ -1,17 +1,17 @@
 """Auto-discover the in-scope ``(project, env)`` pairs in an IaC repo.
 
-``<target>/pci_scope.yaml`` is authoritative when present. Its root may contain
+``<target>/.pacioli/scope.yaml`` is authoritative when present. Its root may contain
 only ``projects:`` and ``scan_paths:`` and must provide at least one non-empty
 list. ``projects:`` records have this exact shape::
 
     - project: <non-blank string>
       description: <optional string>
       status: in_scope | pending | excluded
-      reason: <required non-blank string for pending/excluded>
+      reason: <optional string; recommended when status is pending or excluded>
       envs:
         - name: <non-blank string>
           status: in_scope | pending | excluded
-          reason: <required non-blank string for pending/excluded>
+          reason: <optional string; recommended when status is pending or excluded>
 
 Legacy scalar environments (for example, ``- prod``) are invalid. Only pairs
 whose project and environment are both ``in_scope`` are discovered. A pending
@@ -86,16 +86,27 @@ class NoIaCFoundError(FileNotFoundError):
 NoTerraformFoundError = NoIaCFoundError
 
 
-# Filename of the optional in-scope YAML manifest at the repo root.
-# Centralised so a future rename updates every branch (legacy
-# ``projects:`` loader, ``scan_paths:`` parser, top-level precedence
-# check) in lockstep. SonarCloud flags a duplicated string literal
-# as a code smell (python:S119); the constant is the canonical
+# Repo-relative path of the optional in-scope YAML manifest under the
+# target repo root. Centralised so a future rename updates every branch
+# (legacy ``projects:`` loader, ``scan_paths:`` parser, top-level
+# precedence check) in lockstep. SonarCloud flags a duplicated string
+# literal as a code smell (python:S119); the constant is the canonical
 # reference.
-SCOPE_FILENAME: Final[str] = "pci_scope.yaml"
+SCOPE_FILENAME: Final[str] = ".pacioli/scope.yaml"
 
 
-class ScanPathsCollisionError(ValueError):
+class ScopeManifestError(ValueError):
+    """Raised on any validation failure in the ``.pacioli/scope.yaml`` manifest.
+
+    A typed parent so the orchestrator can catch scope-manifest errors
+    specifically and rewrap them as :class:`OrchestratorError`, giving
+    the user a clean ``ERROR <msg>`` + ``rc=1`` instead of a Python
+    traceback. Subclasses (e.g. :class:`ScanPathsCollisionError`)
+    inherit this catch.
+    """
+
+
+class ScanPathsCollisionError(ScopeManifestError):
     """Raised when two ``scan_paths:`` entries collide on ``(project, env)``.
 
     The collision contract is fail-closed: if two declared stack roots
@@ -103,6 +114,10 @@ class ScanPathsCollisionError(ValueError):
     ``stack_label:``, the scanner refuses to proceed rather than
     silently picking one. The exception message names both entries so
     the operator can add a ``stack_label:`` to disambiguate.
+
+    Inherits from :class:`ScopeManifestError` so the orchestrator's
+    scope-manifest catch picks it up and the user sees a friendly CLI
+    error rather than a traceback.
     """
 
 
@@ -145,7 +160,7 @@ def _is_excluded_module_dir(name: str) -> bool:
 
 @dataclass(frozen=True)
 class ScanPathEntry:
-    """A single declared stack root from ``pci_scope.yaml::scan_paths:``.
+    """A single declared stack root from ``.pacioli/scope.yaml::scan_paths:``.
 
     Attributes:
         path: Absolute (or relative-to-target-repo) path to the stack
@@ -190,7 +205,7 @@ class DiscoveredPair:
     orchestrator's ``_resolve_env_dir``) can pick the right directory
     without re-doing discovery.
 
-    For legacy branches (env/ tree, pci_scope.yaml ``projects:``,
+    For legacy branches (env/ tree, .pacioli/scope.yaml ``projects:``,
     flat-root fallback), ``stack_root`` is ``None`` and the
     orchestrator falls back to ``<target>/env/<project>/<env>/`` /
     ``<target>`` (the prior behavior).
@@ -258,9 +273,9 @@ class _ScopeManifest:
     raw: dict
 
 
-def _scope_error(location: str, message: str) -> ValueError:
+def _scope_error(location: str, message: str) -> ScopeManifestError:
     """Build a schema error which names the offending YAML location."""
-    return ValueError(f"pci_scope.yaml.{location}: {message}")
+    return ScopeManifestError(f"{SCOPE_FILENAME}.{location}: {message}")
 
 
 def _required_string(raw: dict, key: str, location: str) -> str:
@@ -280,13 +295,16 @@ def _optional_string(raw: dict, key: str, location: str) -> Optional[str]:
 
 
 def _scope_status(raw: dict, location: str) -> tuple[str, Optional[str]]:
-    """Parse a scope status and its required exclusion reason."""
+    """Parse a scope status and its optional exclusion reason.
+
+    ``reason`` is optional for ``pending`` and ``excluded`` statuses — it is
+    recommended for an audit trail but not required by the schema. If a
+    ``reason`` is supplied, it must be a string (the type check survives).
+    """
     status = _required_string(raw, "status", location)
     if status not in {"in_scope", "pending", "excluded"}:
         raise _scope_error(f"{location}.status", "must be in_scope, pending, or excluded")
     reason = _optional_string(raw, "reason", location)
-    if status in {"pending", "excluded"} and (reason is None or not reason.strip()):
-        raise _scope_error(f"{location}.reason", "is required and must be non-blank for pending or excluded status")
     return status, reason
 
 
@@ -367,14 +385,15 @@ def _record_environment_decision(
 
 
 def _parse_scope_manifest(scope_file: Path) -> _ScopeManifest:
-    """Parse the strict ``pci_scope.yaml`` schema into exclusion-gating data.
+    """Parse the strict ``.pacioli/scope.yaml`` schema into exclusion-gating data.
 
     Root keys are exactly ``projects`` and ``scan_paths``; at least one must be
     a non-empty list. Project records accept only ``project``, ``description``,
     ``status``, ``reason``, and ``envs``. Environment records accept only
     ``name``, ``status``, and ``reason``. Both statuses are one of ``in_scope``,
-    ``pending``, or ``excluded``; pending and excluded records require a
-    non-blank reason. Scalar environment names and unknown keys are rejected.
+    ``pending``, or ``excluded``; ``reason`` is optional (recommended for an
+    audit trail when status is pending or excluded). Scalar environment names
+    and unknown keys are rejected.
 
     The returned in-scope pairs require both project and environment status to
     be ``in_scope``. A non-in-scope project overrides its child environment's
@@ -383,7 +402,7 @@ def _parse_scope_manifest(scope_file: Path) -> _ScopeManifest:
     """
     if not _HAVE_YAML:
         raise RuntimeError(
-            f"pci_scope.yaml was found at {scope_file} but PyYAML is not installed; install pyyaml or remove pci_scope.yaml."
+            f"{SCOPE_FILENAME} was found at {scope_file} but PyYAML is not installed; install pyyaml or remove {SCOPE_FILENAME}."
         )
     root = _validate_root(_read_scope_yaml(scope_file))
     projects = root.get("projects") or []
@@ -490,7 +509,7 @@ def _discover_from_env_tree(
     if not pairs:
         raise NoIaCFoundError(
             f"No IaC files found under {target_repo}. "
-            "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
+            "Expected one of: .pacioli/scope.yaml, env/<project>/<env>/, "
             "or framework files (*.tf, *.yaml, Dockerfile, *.bicep, "
             "*.template.json, etc.) at the repo root."
         )
@@ -524,7 +543,7 @@ def _discover_flat_repo(
         return [(label_project, label_env)]
     raise NoIaCFoundError(
         f"No IaC files found under {target_repo}. "
-        "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
+        "Expected one of: .pacioli/scope.yaml, env/<project>/<env>/, "
         "or framework files (*.tf, *.yaml, Dockerfile, *.bicep, "
         "*.template.json, etc.) at the repo root."
     )
@@ -557,7 +576,7 @@ def _load_scan_paths(
     scope_file: Path,
     target_repo: Path,
 ) -> list[ScanPathEntry]:
-    """Parse the optional ``scan_paths:`` list from a pci_scope.yaml.
+    """Parse the optional ``scan_paths:`` list from .pacioli/scope.yaml.
 
     Per-entry shape (only ``path`` is required):
 
@@ -577,9 +596,9 @@ def _load_scan_paths(
     """
     if not _HAVE_YAML:
         raise RuntimeError(
-            "pci_scope.yaml was found at "
+            f"{SCOPE_FILENAME} was found at "
             f"{scope_file} but PyYAML is not installed; "
-            "install pyyaml or remove pci_scope.yaml."
+            f"install pyyaml or remove {SCOPE_FILENAME}."
         )
 
     data = _parse_scope_manifest(scope_file).raw
@@ -588,9 +607,9 @@ def _load_scan_paths(
     entries: list[ScanPathEntry] = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            raise ValueError(
-                f"pci_scope.yaml: scan_paths[{index}] must be a mapping, "
-                f"got {type(item).__name__}"
+            raise _scope_error(
+                f"scan_paths[{index}]",
+                f"must be a mapping, got {type(item).__name__}",
             )
         entries.append(_parse_scan_path_entry(item, index, target_repo))
     return entries
@@ -716,7 +735,7 @@ def _discover_from_scan_paths(
     target_repo: Path,
     include_modules: bool,
 ) -> list[DiscoveredPair]:
-    """Handle the ``pci_scope.yaml::scan_paths:`` discovery branch.
+    """Handle the ``.pacioli/scope.yaml::scan_paths:`` discovery branch.
 
     Returns ``[]`` when the YAML has no ``scan_paths:`` list. The
     caller (in :func:`discover_pairs`) unions this list with the
@@ -741,7 +760,7 @@ def discover_pairs(
 ) -> list[DiscoveredPair]:
     """Return the resolved in-scope ``(project, env)`` pairs to scan.
 
-    If ``pci_scope.yaml`` exists, its strict ``projects:`` and optional
+    If ``.pacioli/scope.yaml`` exists, its strict ``projects:`` and optional
     ``scan_paths:`` records are authoritative. A projects pair is returned only
     when both statuses are ``in_scope``. A manifest may instead contain only
     ``scan_paths:``; declared paths are excluded only when the same manifest
@@ -773,7 +792,7 @@ def discover_pairs(
     else:
         legacy = _discover_flat_repo(target_repo, project_filter, env_filter)
 
-    # scan_paths is OPTIONAL and only meaningful when pci_scope.yaml
+    # scan_paths is OPTIONAL and only meaningful when .pacioli/scope.yaml
     # exists (it's a YAML key). An explicitly declared stack is omitted
     # only when its logical pair is pending/excluded in the same manifest.
     scan_path_pairs: list[DiscoveredPair] = []
@@ -821,7 +840,7 @@ def discover_pairs(
     if not merged and project_filter is None and env_filter is None:
         raise NoIaCFoundError(
             f"No IaC files found under {target_repo}. "
-            "Expected one of: pci_scope.yaml, env/<project>/<env>/, "
+            "Expected one of: .pacioli/scope.yaml, env/<project>/<env>/, "
             "or framework files (*.tf, *.yaml, Dockerfile, *.bicep, "
             "*.template.json, etc.) at the repo root."
         )

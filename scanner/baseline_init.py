@@ -3,7 +3,7 @@
 Python port of ``scanner/scan_baseline_init.sh``. Reads a prior scan's
 ``aggregate/combined.sarif`` (produced by :mod:`scanner.aggregate`) and
 emits one stub entry per (check_id, resource) pair into the consumer's
-``pci_baseline.yaml``.
+``.pacioli/baseline.yaml``.
 
 Stub semantics
 --------------
@@ -45,7 +45,7 @@ except ImportError:
     print("ERROR: PyYAML is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
-from scanner.paths import PathResolutionError
+from scanner.paths import BASELINE_FILENAME, PathResolutionError
 from scanner.frameworks import (  # noqa: E402  (SARIF property name contract)
     SARIF_PROPERTY_ENV,
     SARIF_PROPERTY_PROJECT,
@@ -178,7 +178,7 @@ def _build_stub_entries(combined_sarif: Path, top_n: int) -> list[dict]:
 
     Returns:
         List of stub dicts ready to be YAML-serialized into
-        ``pci_baseline.yaml``.
+        ``.pacioli/baseline.yaml``.
     """
     del top_n  # see docstring — every distinct pair gets a stub
 
@@ -277,7 +277,7 @@ def _validate_safe_path(path: Path, allowed_roots: list[Path]) -> Path:
         allowed_roots: Canonical roots the write is permitted to land
             under. Typically ``Path.home()`` (for the
             ``~/.pacioli/config.yaml`` family) and ``Path.cwd()``
-            (for ``<run-dir>/pci_baseline.yaml`` style destinations).
+            (for ``<run-dir>/.pacioli/baseline.yaml`` style destinations).
 
     Returns:
         The resolved absolute ``Path`` on success.
@@ -375,8 +375,8 @@ def _write_baseline(
     # symlink / ``..`` traversal in ``--baseline`` cannot redirect the
     # write outside the consumer's intended location (S2083).
     # The allow-list covers:
-    #   - Path.home()           -> ~/.pacioli/..., ~/<repo>/pci_baseline.yaml
-    #   - Path.cwd()            -> <cwd>/pci_baseline.yaml
+    #   - Path.home()           -> ~/.pacioli/..., ~/<repo>/.pacioli/baseline.yaml
+    #   - Path.cwd()            -> <cwd>/.pacioli/baseline.yaml
     #   - tempfile.gettempdir() -> CI tmp paths (pytest, mktemp, /tmp/...)
     import tempfile
     safe_path = _validate_safe_path(
@@ -446,8 +446,8 @@ def _resolve_run_dir(run_dir: Optional[str]) -> Path:
 def _resolve_target_baseline(args: argparse.Namespace) -> Path:
     """Locate the destination baseline file.
 
-    Priority: ``--baseline`` > ``$PACIOLI_BASELINE_FILE`` > ``$PACIOLI_TARGET_REPO/pci_baseline.yaml``
-    > ``$PCI_REPO_ROOT/pci_baseline.yaml`` > ``./pci_baseline.yaml`` (cwd).
+    Priority: ``--baseline`` > ``$PACIOLI_BASELINE_FILE`` > ``$PACIOLI_TARGET_REPO/.pacioli/baseline.yaml``
+    > ``$PCI_REPO_ROOT/.pacioli/baseline.yaml`` > ``./.pacioli/baseline.yaml`` (cwd).
 
     Mirrors the bash version's ``$PCI_BASELINE_FILE`` defaulting chain.
     """
@@ -462,10 +462,10 @@ def _resolve_target_baseline(args: argparse.Namespace) -> Path:
     for env_name in ("PACIOLI_TARGET_REPO", "PCI_REPO_ROOT"):
         repo = os.environ.get(env_name, "").strip()
         if repo:
-            candidate = Path(repo).expanduser() / "pci_baseline.yaml"
+            candidate = Path(repo).expanduser() / BASELINE_FILENAME
             return candidate.resolve()
 
-    return (Path.cwd() / "pci_baseline.yaml").resolve()
+    return (Path.cwd() / BASELINE_FILENAME).resolve()
 
 
 def _log(level: str, msg: str) -> None:
@@ -497,7 +497,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument(
         "--baseline",
         default=None,
-        help="Destination baseline YAML (default: $PACIOLI_BASELINE_FILE or <target_repo>/pci_baseline.yaml).",
+        help="Destination baseline YAML (default: $PACIOLI_BASELINE_FILE or <target_repo>/.pacioli/baseline.yaml).",
     )
     ap.add_argument(
         "--top",
@@ -508,7 +508,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument(
         "--append",
         action="store_true",
-        help="Merge with existing pci_baseline.yaml (default: replace).",
+        help="Merge with existing .pacioli/baseline.yaml (default: replace).",
     )
     ap.add_argument(
         "--dry-run",

@@ -5,6 +5,38 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [Unreleased]
+
+
+### ⚠ BREAKING CHANGES
+
+* **Config files moved to `.pacioli/`**: `pci_scope.yaml` and `pci_baseline.yaml` at the consumer repo root are silently ignored. Pacioli now reads `.pacioli/scope.yaml` and `.pacioli/baseline.yaml`. This is a clean break — there is **no auto-migration, no fallback, no compatibility shim**. Existing consumer repos must migrate by hand; the three consequences below can silently change behavior after upgrade.
+* **`reason` is now optional for `pending`/`excluded` scope entries** (project and environment level). `status` is still required and must be `in_scope`/`pending`/`excluded`. The parser still rejects non-string `reason` values when present.
+* **Scope manifest validation failures no longer print a Python traceback.** A malformed `.pacioli/scope.yaml` exits with rc=1 and emits a single `ERROR .pacioli/scope.yaml.<location>: <message>` line on stderr.
+
+Three clean-break consequences to be aware of after upgrade:
+
+1. **Old files are silently ignored.** A repo that has only `pci_scope.yaml` and `pci_baseline.yaml` at its root after upgrading will be scanned as if no scope/baseline existed. The scanner does **not** warn, does **not** read the old files, and does **not** move them.
+2. **Baseline suppressions stop applying.** A previously-green CI gate that relied on suppressions in the old `pci_baseline.yaml` can start failing until the baseline is recreated at `.pacioli/baseline.yaml`. Re-run `pacioli baseline init <run_dir>` against a current run, populate the top-N entries, and commit the new file.
+3. **The bootstrap regenerates scope with everything `in_scope`.** Curated `pending`/`excluded` statuses from the old `pci_scope.yaml` are **not** carried over; if you re-run `pacioli scan --init` (or accept the bootstrap prompt) on a repo with no new `.pacioli/scope.yaml`, the new file marks every discovered project/env as `in_scope`. Re-mark any previously `pending`/`excluded` entries after the bootstrap.
+
+#### Manual migration steps
+
+1. Create `.pacioli/` at the consumer repo root: `mkdir -p .pacioli`.
+2. Move (or recreate) both files into `.pacioli/`. If you want to keep the old content as-is:
+   ```bash
+   mkdir -p .pacioli
+   git mv pci_scope.yaml .pacioli/scope.yaml
+   git mv pci_baseline.yaml .pacioli/baseline.yaml
+   ```
+3. Re-apply any `pending`/`excluded` statuses and `reason` fields you curated in the old scope file (the bootstrap above resets them to `in_scope`).
+4. Re-apply any baseline suppressions you curated — the clean break means entries in the old file do not carry over automatically. `git diff` the old baseline against the new one to confirm coverage.
+5. Delete the old files from the repo if they were still present: `git rm pci_scope.yaml pci_baseline.yaml`.
+6. Run `pacioli scan <repo> --non-interactive` and confirm it reads `.pacioli/scope.yaml` and `.pacioli/baseline.yaml` (the run-dir is created and the gate behaves as before).
+
+See the new "Migrating from `pci_scope.yaml`/`pci_baseline.yaml`" section in
+[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#migrating-from-pci_scope-yamlpci_baseline-yaml-to-pacioli) for the full walkthrough.
+
 ## [1.5.0](https://github.com/JosiahSiegel/pacioli/compare/v1.4.0...v1.5.0) (2026-08-14)
 
 

@@ -3,7 +3,7 @@
 Covers the plan's MUST-DO contract for this file:
 
   * source-only scan produces SARIFs in the per-pair output dir
-  * baseline-applied scan: a target_repo's ``pci_baseline.yaml`` is
+  * baseline-applied scan: a target_repo's ``.pacioli/baseline.yaml`` is
     discovered and passed through to the aggregate step
   * missing-mapping-pack surfaces as :class:`OrchestratorError`
   * audit-pin enforcement: ``importlib.metadata.version('checkov')``
@@ -288,7 +288,9 @@ def test_environment_metadata_is_written_before_first_checkov_pass(
 
 def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) -> None:
     """Scope validation fails before a run root or output directory is created."""
-    (tmp_path / "pci_scope.yaml").write_text("projects: scalar", encoding="utf-8")
+    scope_file = tmp_path / ".pacioli" / "scope.yaml"
+    scope_file.parent.mkdir(parents=True, exist_ok=True)
+    scope_file.write_text("projects: scalar", encoding="utf-8")
     output_dir = tmp_path / "runs"
 
     def _invoke_scan() -> None:
@@ -303,14 +305,14 @@ def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) ->
             state_account=None,
         )
 
-    with pytest.raises(ValueError, match="pci_scope.yaml.projects"):
+    with pytest.raises(OrchestratorError, match=r"\.pacioli/scope\.yaml\.projects:"):
         _invoke_scan()
 
     assert not output_dir.exists()
 
 
 # ---------------------------------------------------------------------------
-# 2. Baseline-applied scan: pci_baseline.yaml auto-discovered
+# 2. Baseline-applied scan: .pacioli/baseline.yaml auto-discovered
 # ---------------------------------------------------------------------------
 
 
@@ -319,15 +321,16 @@ def test_baseline_applied_scan_picks_up_repo_baseline(
     fake_checkov_module: type[_FakeCheckov],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``pci_baseline.yaml`` in the target repo is auto-discovered.
+    """A ``.pacioli/baseline.yaml`` in the target repo is auto-discovered.
 
     The orchestrator resolves baseline via CLI > env >
-    ``<target_repo>/pci_baseline.yaml``. When the file is present and no
+    ``<target_repo>/.pacioli/baseline.yaml``. When the file is present and no
     explicit CLI/env override exists, the orchestrator passes its
     absolute path to ``aggregate.py``.
     """
     _make_env_tree(tmp_path, {"payments": {"prod": ["main.tf"]}})
-    baseline = tmp_path / "pci_baseline.yaml"
+    baseline = tmp_path / ".pacioli" / "baseline.yaml"
+    baseline.parent.mkdir(parents=True, exist_ok=True)
     baseline.write_text(
         "- check_id: CKV_AZURE_211\n  resource: null_resource.x\n",
         encoding="utf-8",

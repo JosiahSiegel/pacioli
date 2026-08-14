@@ -427,7 +427,8 @@ def test_baseline_cli_flag_wins(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    repo_default = repo / "pci_baseline.yaml"
+    repo_default = repo / ".pacioli" / "baseline.yaml"
+    repo_default.parent.mkdir(parents=True, exist_ok=True)
     repo_default.write_text("# default\n")
 
     cli_baseline = tmp_path / "cli_baseline.yaml"
@@ -449,7 +450,8 @@ def test_baseline_env_var_wins_over_default(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "pci_baseline.yaml").write_text("# default\n")
+    (repo / ".pacioli" / "baseline.yaml").parent.mkdir(parents=True, exist_ok=True)
+    (repo / ".pacioli" / "baseline.yaml").write_text("# default\n")
 
     env_baseline = tmp_path / "env_baseline.yaml"
     env_baseline.write_text("# env\n")
@@ -462,12 +464,13 @@ def test_baseline_env_var_wins_over_default(
     assert result.path == env_baseline.resolve()
 
 
-def test_baseline_defaults_to_target_repo_pci_baseline(
+def test_baseline_defaults_to_target_repo_pacioli_baseline(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    default = repo / "pci_baseline.yaml"
+    default = repo / ".pacioli" / "baseline.yaml"
+    default.parent.mkdir(parents=True, exist_ok=True)
     default.write_text("# default\n")
 
     monkeypatch.delenv("PACIOLI_BASELINE_FILE", raising=False)
@@ -485,7 +488,7 @@ def test_baseline_defaults_to_none_when_missing(
     """Plan quote: 'baseline default to None'."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    # No pci_baseline.yaml inside repo.
+    # No .pacioli/baseline.yaml inside repo.
     monkeypatch.delenv("PACIOLI_BASELINE_FILE", raising=False)
 
     args = _ns()
@@ -562,7 +565,8 @@ def test_resolve_paths_uses_all_precedence_layers(
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "pci_baseline.yaml").write_text("# default\n")
+    (repo / ".pacioli" / "baseline.yaml").parent.mkdir(parents=True, exist_ok=True)
+    (repo / ".pacioli" / "baseline.yaml").write_text("# default\n")
 
     mapping_override = tmp_path / "soc2.yaml"
     mapping_override.write_text("# soc2\n")

@@ -40,7 +40,7 @@ Multi-stack flags (Todo 8 — declared-stack-root workflow):
     --scan-path SPEC         Repeatable. Declare a single stack root as JSON
                              (keys: path, project?, env?, backend_key?,
                              workspace?, stack_label?). The JSON form mirrors
-                             ``pci_scope.yaml::scan_paths:`` 1:1 so an operator
+                             ``.pacioli/scope.yaml::scan_paths:`` 1:1 so an operator
                              can copy-paste between the two.
                              Example: --scan-path '{"path": "env/myapp/prod"}'
     --scan-glob PATTERN      Repeatable. Shell-style glob (resolved against the
@@ -165,7 +165,7 @@ DEPRECATION_TEMPLATE: str = (
 )
 
 # Allowed keys in a single ``--scan-path`` JSON spec. Matches the
-# ``pci_scope.yaml::scan_paths:`` schema field-for-field so an operator
+# ``.pacioli/scope.yaml::scan_paths:`` schema field-for-field so an operator
 # can copy-paste between the two surfaces. Anything else is rejected
 # with a clear validation error so a typo surfaces immediately.
 SCAN_PATH_KEYS: frozenset[str] = frozenset({
@@ -296,7 +296,7 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--baseline",
         default=None,
-        help="Baseline suppressions YAML (default: <target_repo>/pci_baseline.yaml).",
+        help="Baseline suppressions YAML (default: <target_repo>/.pacioli/baseline.yaml).",
     )
     parser.add_argument(
         "--output-dir",
@@ -352,7 +352,7 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
         "--init",
         action="store_true",
         help=(
-            "Auto-create missing pci_scope.yaml and pci_baseline.yaml "
+            "Auto-create missing .pacioli/scope.yaml and .pacioli/baseline.yaml "
             "without prompting. Works in non-interactive environments."
         ),
     )
@@ -367,7 +367,7 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
     # ------------------------------------------------------------------
     # --scan-path is ``action="append"`` so the user can pass it
     # multiple times (``--scan-path A --scan-path B``); each entry is a
-    # JSON object whose keys mirror the pci_scope.yaml::scan_paths:
+    # JSON object whose keys mirror the .pacioli/scope.yaml::scan_paths:
     # schema. The JSON form is chosen because it keeps the surface
     # trivially copy-pasteable between the CLI and the YAML, and it
     # avoids the ambiguity of comma-separated key=value strings.
@@ -1849,7 +1849,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "baseline",
         help="Baseline-suppressions maintenance commands.",
         description=(
-            "Subcommands for maintaining the repo's pci_baseline.yaml "
+            "Subcommands for maintaining the repo's .pacioli/baseline.yaml "
             "suppressions file."
         ),
     )
@@ -1865,7 +1865,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Read <run_dir>/aggregate/combined.sarif and emit one stub "
             "suppression per (check_id, resource) pair into "
-            "pci_baseline.yaml. Stubs require manual triage "
+            ".pacioli/baseline.yaml. Stubs require manual triage "
             "(owner != TBD AND expires_on >= today) before the aggregator "
             "treats them as real suppressions."
         ),
@@ -1879,7 +1879,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init_p.add_argument(
         "--baseline",
         default=None,
-        help="Destination baseline YAML (default: $PACIOLI_BASELINE_FILE or <target_repo>/pci_baseline.yaml).",
+        help="Destination baseline YAML (default: $PACIOLI_BASELINE_FILE or <target_repo>/.pacioli/baseline.yaml).",
     )
     init_p.add_argument(
         "--top",
@@ -1890,7 +1890,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init_p.add_argument(
         "--append",
         action="store_true",
-        help="Merge with existing pci_baseline.yaml (default: replace).",
+        help="Merge with existing .pacioli/baseline.yaml (default: replace).",
     )
     init_p.add_argument(
         "--dry-run",

@@ -595,7 +595,7 @@ remediations:
       verification_step: |
         After `terraform apply`, run `az appservice plan show --name <n> --resource-group <rg> --query "numberOfWorkers"`
         and confirm >= 2. Re-run `checkov --check CKV_AZURE_212` and expect 0 findings.
-        For Y1 / Consumption plans, document a `pci_baseline.yaml` waiver (instance_count is a no-op).
+        For Y1 / Consumption plans, document a `.pacioli/baseline.yaml` waiver (instance_count is a no-op).
       provenance: "https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/service_plan"
   CKV_AZURE_225:
     - resource_type: azurerm_service_plan

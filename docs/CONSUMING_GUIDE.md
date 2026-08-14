@@ -1,8 +1,8 @@
 # Pacioli — Consuming Guide
 
 > **First-time setup for adding Pacioli to an IaC repo.** If you
-> already have a working `pci_scope.yaml` and `pci_baseline.yaml` and
-> are just running scans, you want [Operator Guide](OPERATOR_GUIDE.md)
+> already have a working `.pacioli/scope.yaml` and `.pacioli/baseline.yaml`
+> and are just running scans, you want [Operator Guide](OPERATOR_GUIDE.md)
 > instead.
 
 This guide walks through, end to end, what you need to do to start
@@ -108,15 +108,15 @@ checkov --version
 
 ## Step 2: create the scope file
 
-`pci_scope.yaml` declares **scan scope**, the version-controlled PCI audit
+`.pacioli/scope.yaml` declares **scan scope**, the version-controlled PCI audit
 boundary. For `projects:` entries, the scanner walks
 `env/<project>/<env>/` only when both the project and environment are
 `in_scope`.
 
 Instead of copying the example file by hand, run `pacioli scan --init`
 from the repo root. The CLI auto-discovers your IaC projects and
-environments and populates both `pci_scope.yaml` and `pci_baseline.yaml`
-atomically:
+environments and populates both `.pacioli/scope.yaml` and
+`.pacioli/baseline.yaml` atomically:
 
 ```bash
 pacioli scan --init .
@@ -125,22 +125,26 @@ pacioli scan --init .
 Output:
 
 ```
-INFO  created /path/to/repo/pci_scope.yaml
-INFO  created /path/to/repo/pci_baseline.yaml
+INFO  created /path/to/repo/.pacioli/scope.yaml
+INFO  created /path/to/repo/.pacioli/baseline.yaml
 ```
 
-The generated `pci_scope.yaml` includes one `project:` entry per
+The generated `.pacioli/scope.yaml` includes one `project:` entry per
 discovered stack, with every `envs:` set to `in_scope` by default. The
-generated `pci_baseline.yaml` starts with an empty `suppressions: []`
+generated `.pacioli/baseline.yaml` starts with an empty `suppressions: []`
 list plus a comment header documenting the schema and discovery
 coverage. Existing files are never overwritten; if either already
-exists, the bootstrap is skipped silently.
+exists, the bootstrap is skipped silently. **Note:** the bootstrap
+regenerates with everything `in_scope` — curated `pending`/`excluded`
+statuses from a previous file are **not** carried over and must be
+re-marked after the bootstrap.
 
 If you prefer to start from the curated example template instead of an
-auto-discovered manifest, the legacy command still works:
+auto-discovered manifest:
 
 ```bash
-cp ../pacioli/examples/scope.yaml.example ./pci_scope.yaml
+mkdir -p .pacioli
+cp ../pacioli/examples/scope.yaml.example ./.pacioli/scope.yaml
 ```
 
 > **Breaking change:** legacy scalar environment names are rejected. Migrate
@@ -149,7 +153,7 @@ cp ../pacioli/examples/scope.yaml.example ./pci_scope.yaml
 > every project. The parser rejects a manifest that does not use this
 > structured schema.
 
-Edit `pci_scope.yaml` for your project names:
+Edit `.pacioli/scope.yaml` for your project names:
 
 ```yaml
 projects:
@@ -211,17 +215,18 @@ Light, or System theme locally in the browser. See
 
 ## Step 3: create the baseline file (initially empty)
 
-`pci_baseline.yaml` lists per-finding suppressions. Initially it
+`.pacioli/baseline.yaml` lists per-finding suppressions. Initially it
 should be an empty list — you populate it after the first scan.
 
 If you used `pacioli scan --init` in Step 2, this file already exists
-at the repo root with an empty `suppressions: []` list and a comment
-header. Skip to the **Headless / CI** section.
+at `.pacioli/baseline.yaml` with an empty `suppressions: []` list and a
+comment header. Skip to the **Headless / CI** section.
 
-If you copied the example file by hand instead, use the legacy command:
+If you copied the example file by hand instead:
 
 ```bash
-cp ../pacioli/examples/baseline.yaml.example ./pci_baseline.yaml
+mkdir -p .pacioli
+cp ../pacioli/examples/baseline.yaml.example ./.pacioli/baseline.yaml
 ```
 
 Edit it down to:
@@ -318,7 +323,7 @@ open ~/.pacioli/runs/myapp-prod-2026-08-06/aggregate/report.html
 2. Click each HIGH/CRITICAL finding:
    - Click the **file:line** link to jump to the `.tf` line.
    - Read the in-line remediation HCL block.
-   - Either fix the `.tf` (preferred), add a `pci_baseline.yaml`
+   - Either fix the `.tf` (preferred), add a `.pacioli/baseline.yaml`
      entry (accepted risk with an owner and ticket), or use an
      inline `# checkov:skip=` comment (one-off).
 3. Re-run the scan to confirm the finding is gone.
@@ -386,14 +391,14 @@ operations; there is no tenant-agnostic default.
 
 ## Step 9: commit your config
 
-Commit `pci_scope.yaml`, `pci_baseline.yaml`, and the CI wiring to
+Commit `.pacioli/scope.yaml`, `.pacioli/baseline.yaml`, and the CI wiring to
 your Terraform repo. If you also use the legacy wrapper, commit
 `Makefile.pacioli` (or the merged `Makefile` targets). Run outputs
 live under `~/.pacioli/runs/` (outside the repo), so nothing in your
 target repo needs to be gitignored.
 
 ```bash
-git add pci_scope.yaml pci_baseline.yaml .gitignore
+git add .pacioli/scope.yaml .pacioli/baseline.yaml .gitignore
 git commit -m "feat: add pacioli PCI compliance scanning"
 ```
 
@@ -427,7 +432,7 @@ Verify in the Azure Portal. If it really is wrong:
 - File a bug at <https://github.com/bridgecrewio/checkov/issues>
   (Pacioli is downstream of Checkov and inherits all Checkov bugs).
 - If you can patch it in the local copy, add an entry to
-  `pci_baseline.yaml` with the evidence (Azure Portal screenshot
+  `.pacioli/baseline.yaml` with the evidence (Azure Portal screenshot
   URL or ticket ID) in `justification`.
 
 ### A new Checkov version ships
