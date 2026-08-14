@@ -1080,8 +1080,28 @@ def _maybe_bootstrap_config(args: argparse.Namespace, target_repo: Path) -> Opti
         except (EOFError, KeyboardInterrupt):
             # No-op on cancellation (matches mapping picker pattern).
             return None
+        if _pause_for_user_edit(written) == 2:
+            return 2
     # else: non-interactive and no --init -> skip silently (current behavior).
 
+    return None
+
+
+def _pause_for_user_edit(written: Sequence[Path]) -> Optional[int]:
+    """After bootstrap writes config files, pause for the user to edit them.
+
+    Logs a summary line and waits for Enter. Returns 2 on Ctrl+C/EOF
+    (so the caller aborts the scan with a non-zero exit code); returns
+    None when the user pressed Enter (or when ``written`` was empty and
+    the pause was skipped).
+    """
+    if not written:
+        return None
+    _log("INFO", "config files created -- edit now or press Enter to continue")
+    try:
+        input("Press Enter to continue (or Ctrl+C to abort)... ")
+    except (EOFError, KeyboardInterrupt):
+        return 2
     return None
 
 

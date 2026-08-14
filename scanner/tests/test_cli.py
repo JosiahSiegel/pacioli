@@ -2945,3 +2945,318 @@ def test_handle_gate_invokes_bootstrap_when_init_set(
         f"--init=True on _handle_gate must call auto_create exactly once; "
         f"got {len(bootstrap_calls)} calls"
     )
+
+
+# ---------------------------------------------------------------------------
+# 11. "Press Enter to continue" pause behavior in _maybe_bootstrap_config
+# ---------------------------------------------------------------------------
+# The pause (scanner/cli.py lines 1083-1088) fires AFTER prompt_and_create
+# successfully writes one or more config files. It gives the user a chance
+# to edit the freshly-created scope/baseline YAMLs before the scan starts.
+# These tests pin down all five reachable states:
+#   (a) files written -> pause fires, Y/n + Enter pressed, scan runs (rc=0)
+#   (b) user said 'n' -> nothing written, no pause, scan runs (rc=0)
+#   (c) user pressed Ctrl+C during pause -> scan aborts with rc=2
+#   (d) --init mode -> no pause (auto_create branch is silent)
+#   (e) both config files already exist -> no pause (early-return path)
+# All tests monkeypatch builtins.input so nothing reads the real terminal.
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures for the pause tests
+# ---------------------------------------------------------------------------
+# All five pause tests stub `orchestrator.main` to capture call args without
+# actually running a scan. Four of them also fake a "files are missing"
+# bootstrap state (scope + baseline paths returned from missing_config_files
+# plus is_bootstrap_interactive=True). These two pieces are extracted into
+# fixtures so the per-test body only carries the test-specific input/branch
+# wiring (fake_input, prompt_wrapper / auto_create) and its assertions.
+
+@pytest.fixture
+def stub_orchestrator(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Stub ``orchestrator.main`` and return a list that records every call.
+
+    Tests inspect ``len(<list>)`` / ``<list>[i]`` to assert the orchestrator
+    ran (or didn't) after bootstrap. The orchestrator stub always returns
+    rc=0 so a stray call after an abort doesn't mask the test failure.
+    """
+    import scanner.orchestrator as orchestrator_mod
+    orchestrator_called: list[list[str]] = []
+    monkeypatch.setattr(
+        orchestrator_mod, "main",
+        lambda argv: (orchestrator_called.append(list(argv)) or 0),
+    )
+    return orchestrator_called
+
+
+@pytest.fixture
+def stub_missing_configs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> tuple[Path, Path]:
+    """Make ``missing_config_files`` report BOTH scope + baseline as missing.
+
+    Returns the ``(scope_path, baseline_path)`` tuple so tests can reuse the
+    exact paths in their custom prompt/auto stubs. Also forces
+    ``is_bootstrap_interactive`` to True so control flow reaches the
+    Y/n prompt (instead of skipping silently on the non-interactive branch).
+    """
+    from scanner import config_bootstrap
+    scope_path = tmp_path / "pci_scope.yaml"
+    baseline_path = tmp_path / "pci_baseline.yaml"
+    monkeypatch.setattr(
+        config_bootstrap, "missing_config_files",
+        lambda r: (scope_path, baseline_path),
+    )
+    monkeypatch.setattr(
+        config_bootstrap, "is_bootstrap_interactive", lambda a: True,
+    )
+    return scope_path, baseline_path
+
+
+def test_pause_fires_when_files_created(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_orchestrator: list[list[str]],
+    stub_missing_configs: tuple[Path, Path],
+) -> None:
+    """When prompt_and_create writes files, the pause must fire (Y/n + Enter)."""
+    from scanner import cli, config_bootstrap
+
+    scope_path, baseline_path = stub_missing_configs
+
+    # Real prompt_and_create would call input() once for the Y/n prompt and
+    # then return the list of written files. Our stub mirrors that so the
+    # full control flow runs: Y/n -> written -> Press Enter pause -> scan.
+    input_prompts: list[str] = []
+    responses = iter(["y", ""])  # y = yes to Y/n; "" = Enter on pause
+
+    def fake_input(*args: object, **kwargs: object) -> str:
+        prompt_text = str(args[0]) if args else ""
+        input_prompts.append(prompt_text)
+        return next(responses)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    def prompt_wrapper(*a: object, **kw: object) -> list[Path]:
+        # Match the real prompt_and_create signature: one Y/n input() call.
+        input("Create missing config files? [Y/n]: ")
+        return [scope_path, baseline_path]
+
+    monkeypatch.setattr(
+        config_bootstrap, "prompt_and_create", prompt_wrapper,
+    )
+
+    args = _make_args(
+        init=False,
+        target_dir=str(tmp_path),
+        non_interactive=False,
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    assert len(input_prompts) == 2, (
+        f"input() must be called exactly twice (Y/n + Enter pause); "
+        f"got {len(input_prompts)} calls with prompts={input_prompts!r}"
+    )
+    # First call: Y/n prompt. Second call: Press Enter pause.
+    assert "Press Enter" in input_prompts[1], (
+        f"second input() call must be the Press Enter pause prompt; "
+        f"got prompt={input_prompts[1]!r}"
+    )
+    assert len(stub_orchestrator) == 1, (
+        "orchestrator must run after user dismisses the pause; "
+        f"got {len(stub_orchestrator)} calls"
+    )
+
+
+def test_pause_does_not_fire_when_user_says_no(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_orchestrator: list[list[str]],
+    stub_missing_configs: tuple[Path, Path],
+) -> None:
+    """When user answers 'n' to Y/n, nothing is written and the pause is skipped."""
+    from scanner import cli, config_bootstrap
+
+    input_prompts: list[str] = []
+    responses = iter(["n"])  # user declined Y/n
+
+    def fake_input(*args: object, **kwargs: object) -> str:
+        prompt_text = str(args[0]) if args else ""
+        input_prompts.append(prompt_text)
+        return next(responses)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    def prompt_wrapper(*a: object, **kw: object) -> list[Path]:
+        # Same Y/n call as the real function, but returns [] (declined).
+        input("Create missing config files? [Y/n]: ")
+        return []
+
+    monkeypatch.setattr(
+        config_bootstrap, "prompt_and_create", prompt_wrapper,
+    )
+
+    args = _make_args(
+        init=False,
+        target_dir=str(tmp_path),
+        non_interactive=False,
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    assert len(input_prompts) == 1, (
+        f"input() must be called only ONCE (the Y/n prompt, no Enter pause); "
+        f"got {len(input_prompts)} calls with prompts={input_prompts!r}"
+    )
+    assert "Press Enter" not in input_prompts[0], (
+        f"the single input() call must be the Y/n prompt, not the pause; "
+        f"got prompt={input_prompts[0]!r}"
+    )
+    assert len(stub_orchestrator) == 1, (
+        "orchestrator must still run even when user declined bootstrap; "
+        f"got {len(stub_orchestrator)} calls"
+    )
+
+
+def test_ctrl_c_during_pause_returns_2(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_orchestrator: list[list[str]],
+    stub_missing_configs: tuple[Path, Path],
+) -> None:
+    """KeyboardInterrupt during the Enter pause -> scan aborts with rc=2."""
+    from scanner import cli, config_bootstrap
+
+    input_prompts: list[str] = []
+    call_count = {"n": 0}
+
+    def fake_input(*args: object, **kwargs: object) -> str:
+        prompt_text = str(args[0]) if args else ""
+        input_prompts.append(prompt_text)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return "y"  # Y/n -> yes
+        # Second call = the Press Enter pause; simulate Ctrl+C.
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    def prompt_wrapper(*a: object, **kw: object) -> list[Path]:
+        input("Create missing config files? [Y/n]: ")
+        return [stub_missing_configs[0], stub_missing_configs[1]]
+
+    monkeypatch.setattr(
+        config_bootstrap, "prompt_and_create", prompt_wrapper,
+    )
+
+    args = _make_args(
+        init=False,
+        target_dir=str(tmp_path),
+        non_interactive=False,
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 2, (
+        f"Ctrl+C during the Enter pause must abort with rc=2; got rc={rc!r}"
+    )
+    assert len(input_prompts) == 2, (
+        f"input() must be called twice (Y/n + pause) before the abort; "
+        f"got {len(input_prompts)} calls with prompts={input_prompts!r}"
+    )
+    assert "Press Enter" in input_prompts[1], (
+        f"second input() call must be the Press Enter pause prompt; "
+        f"got prompt={input_prompts[1]!r}"
+    )
+    assert len(stub_orchestrator) == 0, (
+        "orchestrator must NOT be called when pause raises KeyboardInterrupt; "
+        f"got {len(stub_orchestrator)} calls"
+    )
+
+
+def test_pause_does_not_fire_in_init_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_orchestrator: list[list[str]],
+    stub_missing_configs: tuple[Path, Path],
+) -> None:
+    """--init mode takes the auto_create branch, which never prompts or pauses."""
+    from scanner import cli, config_bootstrap
+
+    scope_path, baseline_path = stub_missing_configs
+    monkeypatch.setattr(
+        config_bootstrap, "auto_create",
+        lambda *a, **kw: [scope_path, baseline_path],
+    )
+
+    # input() must never be invoked on the --init branch. If it is, the
+    # test fails immediately with a clear assertion (rather than blocking
+    # on real stdin).
+    def fake_input(*args: object, **kwargs: object) -> str:
+        raise AssertionError(
+            "input() must not be called in --init mode; got "
+            f"args={args!r}"
+        )
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    args = _make_args(
+        init=True,
+        target_dir=str(tmp_path),
+        non_interactive=False,
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    assert len(stub_orchestrator) == 1, (
+        "orchestrator must run after --init bootstrap; "
+        f"got {len(stub_orchestrator)} calls"
+    )
+
+
+def test_pause_does_not_fire_when_files_exist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_orchestrator: list[list[str]],
+) -> None:
+    """When both config files exist, _maybe_bootstrap_config early-returns (no pause)."""
+    from scanner import cli, config_bootstrap
+
+    # missing_config_files returns (None, None) -> nothing missing -> early return.
+    # This branch is intentionally NOT covered by the ``stub_missing_configs``
+    # fixture: it represents the negative case (files already present).
+    monkeypatch.setattr(
+        config_bootstrap, "missing_config_files",
+        lambda r: (None, None),
+    )
+
+    # If the early return is broken, these would fire and trip the
+    # AssertionError. The negative list makes that obvious in the trace.
+    monkeypatch.setattr(
+        config_bootstrap, "is_bootstrap_interactive",
+        lambda a: (_ for _ in ()).throw(AssertionError("must not be called")),
+    )
+    monkeypatch.setattr(
+        config_bootstrap, "auto_create",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not be called")),
+    )
+    monkeypatch.setattr(
+        config_bootstrap, "prompt_and_create",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not be called")),
+    )
+
+    def fake_input(*args: object, **kwargs: object) -> str:
+        raise AssertionError(
+            "input() must not be called when both config files exist; "
+            f"got args={args!r}"
+        )
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    args = _make_args(
+        init=False,
+        target_dir=str(tmp_path),
+        non_interactive=False,
+    )
+    rc = cli._handle_scan(args)
+    assert rc == 0, f"_handle_scan returned {rc}; expected 0"
+    assert len(stub_orchestrator) == 1, (
+        "orchestrator must run when both config files already exist; "
+        f"got {len(stub_orchestrator)} calls"
+    )
