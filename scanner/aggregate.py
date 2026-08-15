@@ -2384,11 +2384,11 @@ def write_html_report(
      <div class="subtitle">{framework_full} Compliance Report</div>
    </div>
    <fieldset id="environment-exclusions" class="environment-exclusions">
-     <legend>Hide environments</legend>
-     <div class="environment-exclusion-actions">
-       <button type="button" id="environment-select-visible">Select all visible</button>
-       <button type="button" id="environment-reset">Full-report reset</button>
-     </div>
+     <legend>Environments</legend>
+      <div class="environment-exclusion-actions">
+        <button type="button" id="environment-select-all">Select all</button>
+        <button type="button" id="environment-select-none">Select none</button>
+      </div>
      <div id="environment-exclusion-status" class="environment-exclusion-status" role="status" aria-live="polite"></div>
      <div id="environment-exclusion-options" class="environment-exclusion-options"></div>
    </fieldset>
