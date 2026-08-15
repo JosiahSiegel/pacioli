@@ -3226,8 +3226,8 @@ def write_html_report(
   function reset() { state.q = ''; state.sev = 'ALL'; state.req = ''; state.excluded.clear(); update(); }
   function addRequirementOptions() { const values = model.requirements.map(function (requirement) { return requirement.id; }); document.querySelectorAll('#req-filter, #global-req').forEach(function (select) { values.forEach(function (value) { const option = make('option', value); option.value = value; select.appendChild(option); }); }); }
   restore(); addRequirementOptions();
-  document.getElementById('environment-select-visible').addEventListener('click', function () { identities.forEach(function (identity) { state.excluded.add(identity); }); update(); });
-  document.getElementById('environment-reset').addEventListener('click', reset);
+  document.getElementById('environment-select-all').addEventListener('click', function () { state.excluded.clear(); update(); });
+  document.getElementById('environment-select-none').addEventListener('click', function () { identities.forEach(function (identity) { state.excluded.add(identity); }); update(); });
   document.querySelectorAll('#finding-search').forEach(function (input) { input.addEventListener('input', function () { state.q = input.value.toLowerCase(); update(); }); });
   document.querySelectorAll('[data-severity-filter]').forEach(function (button) { button.addEventListener('click', function () { state.sev = button.dataset.severityFilter; update(); }); });
   document.querySelectorAll('#req-filter').forEach(function (select) { select.addEventListener('change', function () { state.req = select.value; update(); }); });
