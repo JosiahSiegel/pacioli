@@ -304,6 +304,16 @@ def _add_scan_flags(parser: argparse.ArgumentParser) -> None:
         help="Run-dir root (default: ~/.pacioli/runs/current).",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        default=False,
+        help=(
+            "Wipe stale per-env results in the run-dir before scanning "
+            "(use after editing .pacioli/scope.yaml to drop excluded envs "
+            "that still linger in the report)."
+        ),
+    )
+    parser.add_argument(
         "--project",
         default=None,
         help="Restrict to one project (matches --project in scan.sh).",
@@ -947,6 +957,14 @@ def _build_orchestrator_argv(
     _append_value_pair(argv, args, "mapping", "--mapping")
     _append_value_pair(argv, args, "baseline", "--baseline")
     _append_value_pair(argv, args, "output_dir", "--output-dir")
+    # ``--clean`` is opt-in (default False). ``--clean-allowed`` is
+    # emitted when the operator passed an explicit ``--output-dir`` —
+    # the orchestrator refuses ``--clean`` without it unless the
+    # resolved run-dir is inside ``~/.pacioli/runs/`` (safety rail
+    # against accidental wipes of arbitrary directories).
+    _append_bool_flag(argv, args, "clean", "--clean")
+    if getattr(args, "clean", False) and getattr(args, "output_dir", None):
+        argv += ["--clean-allowed"]
     _append_value_pair(argv, args, "project", "--project")
     _append_value_pair(argv, args, "env", "--env")
     _append_value_pair(argv, args, "label", "--label")

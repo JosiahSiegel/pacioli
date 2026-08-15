@@ -3426,9 +3426,10 @@ def _read_environment_metadata(env_dir: Path, directory_project: str, directory_
     if not isinstance(metadata, dict):
         raise ValueError(f"invalid environment metadata at {metadata_path}: expected object")
     expected_keys = {"schema_version", "project", "env", "stack_label"}
-    if set(metadata) != expected_keys:
+    missing = expected_keys - set(metadata)
+    if missing:
         raise ValueError(
-            f"invalid environment metadata at {metadata_path}: expected keys {sorted(expected_keys)}"
+            f"invalid environment metadata at {metadata_path}: missing keys {sorted(missing)}"
         )
     if metadata["schema_version"] != 1:
         raise ValueError(
@@ -3648,6 +3649,41 @@ def sarif_is_empty(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+def _resolve_repo_root_from_env_metadata(run_dir: Path) -> Path | None:
+    """Scan *run_dir* for per-env ``pacioli_environment.json`` files and
+    extract the ``target_repo`` field.
+
+    Returns the single distinct ``target_repo`` as a ``Path``, or ``None``
+    when no metadata files carry the field.  Prints an ERROR and raises
+    ``SystemExit(2)`` when multiple *distinct* values are found — the
+    caller must treat this as a fatal misconfiguration.
+    """
+    target_repos: set[str] = set()
+    for metadata_path in run_dir.rglob("pacioli_environment.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        value = metadata.get("target_repo")
+        if isinstance(value, str) and value:
+            target_repos.add(value)
+    if len(target_repos) > 1:
+        print(
+            "ERROR --scan mixed multiple target_repo values across per-env "
+            "dirs; rerun pacioli scan with a consistent --label or run "
+            "pacioli aggregate on a single-run-dir",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if len(target_repos) == 1:
+        return Path(target_repos.pop())
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True, help="Run dir produced by scan.sh")
@@ -3689,21 +3725,34 @@ def main() -> int:
     # Locate the three PCI config files. Priority order:
     #   1. PACIOLI_TARGET_REPO env var (set by scan.sh, the consumer's
     #      Terraform repo where the scope/baseline live)
-    #   2. CLI --scope/--mapping/--baseline absolute path
-    #   3. Walk up from run_dir looking for a .git directory (legacy
+    #   2. CLI --scope passed as an absolute path (parent dir = repo_root)
+    #   3. Per-env pacioli_environment.json target_repo field
+    #   4. Walk up from run_dir looking for a .git directory (legacy
     #      fallback for callers who don't set the env var)
     # The default values for --scope/--mapping/--baseline are bare
     # filenames, which are resolved relative to the resolved root.
     env_target = os.environ.get("PACIOLI_TARGET_REPO", "").strip()
     if env_target and Path(env_target).is_dir():
         repo_root = Path(env_target).resolve()
+    elif Path(args.scope).is_absolute():
+        # Explicit absolute --scope: trust its parent as repo_root.
+        repo_root = Path(args.scope).resolve().parent
     else:
-        repo_root = run_dir
-        while repo_root.parent != repo_root and not (repo_root / ".git").exists():
-            repo_root = repo_root.parent
-        if repo_root.parent == repo_root:
-            # No .git found — fall back to run_dir's parent.
-            repo_root = run_dir.parent
+        # Try per-env metadata before falling back to the .git walk-up.
+        try:
+            metadata_root = _resolve_repo_root_from_env_metadata(run_dir)
+        except SystemExit:
+            return 2
+        if metadata_root is not None:
+            repo_root = metadata_root.resolve()
+        else:
+            # No env metadata found — legacy .git walk-up.
+            repo_root = run_dir
+            while repo_root.parent != repo_root and not (repo_root / ".git").exists():
+                repo_root = repo_root.parent
+            if repo_root.parent == repo_root:
+                # No .git found — fall back to run_dir's parent.
+                repo_root = run_dir.parent
     scope_path = repo_root / args.scope
     mapping_path = repo_root / args.mapping
     baseline_path = repo_root / args.baseline

@@ -282,8 +282,58 @@ def test_environment_metadata_is_written_before_first_checkov_pass(
             "project": "payments",
             "env": "prod",
             "stack_label": "east",
+            "target_repo": str(tmp_path.resolve()),
         }
     ]
+
+
+def test_scan_writes_target_repo_into_environment_metadata(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    stub_aggregate: list[list[str]],
+) -> None:
+    """Orchestrator.scan() echoes the resolved target_repo into per-env metadata.
+
+    Todo 3: every ``<run_dir>/<project>/<env>/pacioli_environment.json``
+    carries a ``target_repo`` field equal to the absolute resolved path
+    passed to :meth:`Orchestrator.scan`. The aggregator (Todo 2's
+    ``_resolve_repo_root_from_env_metadata``) reads this field to resolve
+    the repo-root from scan artifacts instead of the ``.git`` walk-up.
+    """
+    _make_env_tree(
+        tmp_path,
+        {"payments": {"prod": ["main.tf", "variables.tf"]}},
+    )
+    output_dir = tmp_path / "runs"
+
+    orch = Orchestrator(mode="report", tier="source", no_aggregate=False)
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=None,
+    )
+
+    assert rc == 0
+    metadata_files = sorted(output_dir.rglob("pacioli_environment.json"))
+    assert metadata_files, (
+        f"no pacioli_environment.json written under {output_dir}"
+    )
+    for metadata_path in metadata_files:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert metadata["target_repo"] == str(tmp_path.resolve()), (
+            f"{metadata_path}: target_repo {metadata.get('target_repo')!r} "
+            f"!= {str(tmp_path.resolve())!r}"
+        )
+        # The additive field does not disturb the pre-existing schema.
+        assert metadata["schema_version"] == 1
+        assert metadata["project"] == "payments"
+        assert metadata["env"] == "prod"
+        assert metadata["stack_label"] is None
 
 
 def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) -> None:
@@ -309,6 +359,160 @@ def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) ->
         _invoke_scan()
 
     assert not output_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# 1b. --clean wipes stale per-env dirs before scanning
+# ---------------------------------------------------------------------------
+
+
+def test_scan_with_clean_removes_stale_per_env_dirs(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    stub_aggregate: list[list[str]],
+) -> None:
+    """``Orchestrator.scan(..., clean=True)`` wipes stale per-env dirs.
+
+    Unit-level guard for the ``--clean`` flag: pre-populate the
+    output_dir with a stale per-env dir (``CR_Test/dev/`` containing a
+    fake ``pacioli_environment.json``), then run the scan with
+    ``clean=True``. Assert the stale dir is removed and the freshly
+    scanned pair (``payments/prod``) is present.
+    """
+    _make_env_tree(
+        tmp_path,
+        {"payments": {"prod": ["main.tf", "variables.tf"]}},
+    )
+    output_dir = tmp_path / "runs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-populate a stale per-env dir (mimics a leftover from a prior
+    # run that included an env the operator has since excluded).
+    stale_pair = output_dir / "CR_Test" / "dev"
+    stale_pair.mkdir(parents=True, exist_ok=True)
+    (stale_pair / "pacioli_environment.json").write_text(
+        '{"schema_version": 1, "project": "CR_Test", "env": "dev", "stack_label": "x"}\n',
+        encoding="utf-8",
+    )
+    assert stale_pair.is_dir(), "setup: stale per-env dir was not created"
+
+    orch = Orchestrator(mode="report", tier="source", no_aggregate=False)
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=None,
+        clean=True,
+        clean_allowed=True,
+    )
+
+    assert rc == 0
+    # Stale dir removed.
+    assert not stale_pair.exists(), (
+        f"clean=True did not remove stale per-env dir {stale_pair}; "
+        f"contents of {output_dir}: {sorted(p.name for p in output_dir.rglob('*'))}"
+    )
+    # Freshly-scanned pair is present.
+    fresh_pair = output_dir / "payments" / "prod"
+    assert fresh_pair.is_dir(), f"missing fresh pair dir: {fresh_pair}"
+
+
+def test_scan_without_clean_preserves_stale_per_env_dirs(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    stub_aggregate: list[list[str]],
+) -> None:
+    """``Orchestrator.scan()`` (default) leaves stale per-env dirs alone.
+
+    Counterpart to the ``clean=True`` test: confirms the default
+    behavior is unchanged. Without ``clean=True``, a pre-existing
+    per-env dir under the run-dir must still be there after the scan.
+    """
+    _make_env_tree(
+        tmp_path,
+        {"payments": {"prod": ["main.tf"]}},
+    )
+    output_dir = tmp_path / "runs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    stale_pair = output_dir / "CR_Test" / "dev"
+    stale_pair.mkdir(parents=True, exist_ok=True)
+    (stale_pair / "pacioli_environment.json").write_text(
+        '{"schema_version": 1, "project": "CR_Test", "env": "dev", "stack_label": "x"}\n',
+        encoding="utf-8",
+    )
+
+    orch = Orchestrator(mode="report", tier="source", no_aggregate=False)
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=None,
+    )
+
+    assert rc == 0
+    assert stale_pair.is_dir(), (
+        "default scan (clean=False) must NOT remove stale per-env dirs; "
+        f"missing: {stale_pair}"
+    )
+
+
+def test_scan_clean_refused_when_not_allowed(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    stub_aggregate: list[list[str]],
+) -> None:
+    """``clean=True`` without ``clean_allowed=True`` is refused.
+
+    Safety rail: ``--clean`` is only honored when the caller
+    explicitly allows it (either the run-dir is inside
+    ``~/.pacioli/runs/`` or the operator passed an explicit
+    ``--output-dir``). When ``clean_allowed=False`` (the default),
+    ``clean=True`` must raise :class:`OrchestratorError` so accidental
+    misuse surfaces as a clear error rather than a silent wipe.
+    """
+    _make_env_tree(
+        tmp_path,
+        {"payments": {"prod": ["main.tf"]}},
+    )
+    output_dir = tmp_path / "runs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    stale_pair = output_dir / "CR_Test" / "dev"
+    stale_pair.mkdir(parents=True, exist_ok=True)
+    (stale_pair / "pacioli_environment.json").write_text(
+        '{"schema_version": 1, "project": "CR_Test", "env": "dev", "stack_label": "x"}\n',
+        encoding="utf-8",
+    )
+
+    orch = Orchestrator(mode="report", tier="source", no_aggregate=False)
+    with pytest.raises(OrchestratorError, match=r"--clean refused"):
+        orch.scan(
+            target_repo=tmp_path,
+            project=None,
+            env=None,
+            label=None,
+            output_dir=output_dir,
+            mapping_path=None,
+            baseline_path=None,
+            state_account=None,
+            clean=True,
+            clean_allowed=False,
+        )
+
+    # Stale dir must NOT have been removed (refusal happens before wipe).
+    assert stale_pair.is_dir(), (
+        "refused --clean must not remove anything; "
+        f"missing: {stale_pair}"
+    )
 
 
 # ---------------------------------------------------------------------------

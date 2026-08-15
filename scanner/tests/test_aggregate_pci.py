@@ -410,3 +410,151 @@ def test_resolve_severity_bundled_pci_pack_is_reachable() -> None:
     assert resolve_severity("CKV_AZURE_18") == "MEDIUM", (
         "CKV_AZURE_18 should be MEDIUM in the install-bundled PCI pack"
     )
+
+
+# ---------------------------------------------------------------------------
+# Aggregator scope: echo resolves repo_root from per-env metadata
+# ---------------------------------------------------------------------------
+
+
+def _write_env_metadata(env_dir: Path, target_repo: Path) -> None:
+    """Write a minimal ``pacioli_environment.json`` carrying ``target_repo``.
+
+    Mirrors the shape written by ``Orchestrator._write_environment_metadata``
+    plus the ``target_repo`` field added by todo 3. Todo 2 mocks this field
+    in fixtures so the aggregator's repo_root resolution can be tested
+    without running a full scan.
+    """
+    env_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "schema_version": 1,
+        "project": env_dir.parent.name,
+        "env": env_dir.name,
+        "stack_label": None,
+        "target_repo": str(target_repo),
+    }
+    (env_dir / "pacioli_environment.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+
+
+def test_aggregate_main_resolves_scope_from_env_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``aggregate.main()`` echoes ``scope: <target_repo>/.pacioli/scope.yaml``.
+
+    Regression guard for the stale-echo bug: when the run-dir lives
+    under ``~/.pacioli/runs/<label>/`` the legacy ``.git`` walk-up
+    falls back to ``run_dir.parent`` and the echo points at a
+    nonexistent path (``~/.pacioli/runs/.pacioli/scope.yaml``). The
+    fix is to read ``target_repo`` from each per-env
+    ``pacioli_environment.json`` and use that as ``repo_root``.
+
+    Setup: synthetic run-dir with one per-env dir whose metadata
+    carries ``target_repo: <fake_repo>``. The fake repo path is a
+    tmpdir so the assertion is portable across platforms.
+    """
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    run_dir = tmp_path / "runs" / "current"
+    _build_synthetic_run_dir(run_dir)
+    _write_env_metadata(run_dir / "myapp" / "prod", fake_repo)
+
+    monkeypatch.chdir(tmp_path)
+    out_dir = tmp_path / "aggregate_out"
+    rc = _invoke_aggregate_main(
+        ["aggregate.py", "--run-dir", str(run_dir), "--out", str(out_dir)]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0, (
+        f"aggregate.main() returned rc={rc}; "
+        f"stdout={captured.out!r}; stderr={captured.err!r}"
+    )
+    expected_scope = fake_repo / ".pacioli" / "scope.yaml"
+    assert f"scope:   {expected_scope}" in captured.out, (
+        f"expected scope echo to name {expected_scope}; "
+        f"stdout={captured.out!r}"
+    )
+    # The stale fallback would have echoed a path under the run-dir
+    # parent (``<tmp>/runs/.pacioli/scope.yaml``). Assert it is gone.
+    stale = run_dir.parent / ".pacioli" / "scope.yaml"
+    assert f"scope:   {stale}" not in captured.out, (
+        f"stale scope echo {stale} still present; stdout={captured.out!r}"
+    )
+
+
+def test_aggregate_main_errors_on_mixed_target_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mixed ``target_repo`` values across per-env dirs abort with rc=2.
+
+    If the user aggregates a run-dir that mixes scans from two
+    different consumer repos (e.g. by re-using a label across repos),
+    the aggregator cannot pick a single ``repo_root`` and must fail
+    loudly rather than silently picking one.
+    """
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    run_dir = tmp_path / "runs" / "mixed"
+    _build_synthetic_run_dir(run_dir)
+    _write_env_metadata(run_dir / "myapp" / "prod", repo_a)
+    _write_env_metadata(run_dir / "otherapp" / "dev", repo_b)
+
+    monkeypatch.chdir(tmp_path)
+    rc = _invoke_aggregate_main(
+        ["aggregate.py", "--run-dir", str(run_dir)]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2, (
+        f"aggregate.main() should return rc=2 for mixed target_repo; "
+        f"got rc={rc}; stdout={captured.out!r}; stderr={captured.err!r}"
+    )
+    assert "mixed multiple target_repo values" in captured.err, (
+        f"expected mixed-target_repo error in stderr; got {captured.err!r}"
+    )
+
+
+def test_aggregate_main_falls_back_to_git_walkup_when_no_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Legacy run-dirs without ``pacioli_environment.json`` keep the walk-up.
+
+    Forward-compat: run-dirs written by older pacioli versions lack
+    ``target_repo`` (and may lack ``pacioli_environment.json``
+    entirely). The aggregator must still resolve ``repo_root`` via the
+    legacy ``.git`` walk-up so those run-dirs remain aggregatable.
+    """
+    # Build a fake consumer repo with a .git dir so the walk-up
+    # terminates there.
+    fake_repo = tmp_path / "legacy-repo"
+    (fake_repo / ".git").mkdir(parents=True)
+    run_dir = fake_repo / "runs" / "current"
+    _build_synthetic_run_dir(run_dir)
+    # NOTE: no _write_env_metadata call — exercises the fallback.
+
+    monkeypatch.chdir(tmp_path)
+    out_dir = tmp_path / "aggregate_out"
+    rc = _invoke_aggregate_main(
+        ["aggregate.py", "--run-dir", str(run_dir), "--out", str(out_dir)]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0, (
+        f"aggregate.main() returned rc={rc}; "
+        f"stdout={captured.out!r}; stderr={captured.err!r}"
+    )
+    expected_scope = fake_repo / ".pacioli" / "scope.yaml"
+    assert f"scope:   {expected_scope}" in captured.out, (
+        f"legacy walk-up should still resolve scope to {expected_scope}; "
+        f"stdout={captured.out!r}"
+    )
