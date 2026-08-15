@@ -89,11 +89,10 @@ def test_environment_exclusions_recompute_and_persist(
     checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
     assert checkboxes.count() == 3
 
-    checkboxes.nth(0).focus()
-    page.keyboard.press("Space")
-    checkboxes.nth(1).check()
+    checkboxes.nth(0).uncheck()
+    checkboxes.nth(1).uncheck()
 
-    assert "2 environments excluded; viewing 1 of 3 environments." in page.locator("#environment-exclusion-status").inner_text()
+    assert "1 of 3 environments visible" in page.locator("#environment-exclusion-status").inner_text()
     assert page.locator("#kpi-total").inner_text() == "1"
     assert page.locator("#badge-envs").inner_text() == "1"
     assert page.locator("#environment-table-body tr").count() == 1
@@ -102,16 +101,16 @@ def test_environment_exclusions_recompute_and_persist(
     assert page.locator("#top-resources").inner_text().find("blue") == -1
 
     page.reload(wait_until="domcontentloaded")
-    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 2
+    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 1
     assert page.locator("#kpi-total").inner_text() == "1"
 
-    page.get_by_role("button", name="Full-report reset").click()
-    assert page.locator("#environment-exclusion-status").inner_text() == "Full scan: viewing all 3 environments."
+    page.get_by_role("button", name="Select all").click()
+    assert "All 3 environments visible" in page.locator("#environment-exclusion-status").inner_text()
     assert page.locator("#kpi-total").inner_text() == "3"
 
-    checkboxes.nth(0).check()
-    checkboxes.nth(1).check()
-    checkboxes.nth(2).check()
+    checkboxes.nth(0).uncheck()
+    checkboxes.nth(1).uncheck()
+    checkboxes.nth(2).uncheck()
     assert page.locator("#kpi-total").inner_text() == "0"
     assert page.locator("#env-health-list .empty-view").count() == 1
     assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
@@ -177,16 +176,16 @@ def test_report_visual_evidence_at_responsive_theme_and_motion_contracts(
 
     checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
     for index in range(checkboxes.count()):
-        checkboxes.nth(index).check()
+        checkboxes.nth(index).uncheck()
     assert page.locator("#env-health-list .empty-view").count() == 1
     assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
     assert '"excluded"' in page.evaluate("localStorage.getItem('pacioli.report.filters')")
     page.screenshot(path=str(EVIDENCE_DIR / "all-environments-excluded.png"), full_page=True)
 
     page.reload(wait_until="domcontentloaded")
-    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 3
-    page.get_by_role("button", name="Full-report reset").click()
     assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 0
+    page.get_by_role("button", name="Select all").click()
+    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 3
     assert console_errors == []
 
 
