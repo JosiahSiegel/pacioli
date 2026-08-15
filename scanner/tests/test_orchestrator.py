@@ -282,8 +282,58 @@ def test_environment_metadata_is_written_before_first_checkov_pass(
             "project": "payments",
             "env": "prod",
             "stack_label": "east",
+            "target_repo": str(tmp_path.resolve()),
         }
     ]
+
+
+def test_scan_writes_target_repo_into_environment_metadata(
+    tmp_path: Path,
+    fake_checkov_module: type[_FakeCheckov],
+    stub_aggregate: list[list[str]],
+) -> None:
+    """Orchestrator.scan() echoes the resolved target_repo into per-env metadata.
+
+    Todo 3: every ``<run_dir>/<project>/<env>/pacioli_environment.json``
+    carries a ``target_repo`` field equal to the absolute resolved path
+    passed to :meth:`Orchestrator.scan`. The aggregator (Todo 2's
+    ``_resolve_repo_root_from_env_metadata``) reads this field to resolve
+    the repo-root from scan artifacts instead of the ``.git`` walk-up.
+    """
+    _make_env_tree(
+        tmp_path,
+        {"payments": {"prod": ["main.tf", "variables.tf"]}},
+    )
+    output_dir = tmp_path / "runs"
+
+    orch = Orchestrator(mode="report", tier="source", no_aggregate=False)
+    rc = orch.scan(
+        target_repo=tmp_path,
+        project=None,
+        env=None,
+        label=None,
+        output_dir=output_dir,
+        mapping_path=None,
+        baseline_path=None,
+        state_account=None,
+    )
+
+    assert rc == 0
+    metadata_files = sorted(output_dir.rglob("pacioli_environment.json"))
+    assert metadata_files, (
+        f"no pacioli_environment.json written under {output_dir}"
+    )
+    for metadata_path in metadata_files:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert metadata["target_repo"] == str(tmp_path.resolve()), (
+            f"{metadata_path}: target_repo {metadata.get('target_repo')!r} "
+            f"!= {str(tmp_path.resolve())!r}"
+        )
+        # The additive field does not disturb the pre-existing schema.
+        assert metadata["schema_version"] == 1
+        assert metadata["project"] == "payments"
+        assert metadata["env"] == "prod"
+        assert metadata["stack_label"] is None
 
 
 def test_invalid_scope_fails_before_creating_output_directory(tmp_path: Path) -> None:

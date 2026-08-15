@@ -643,8 +643,21 @@ class Orchestrator:
             shutil.rmtree(child)
 
     @staticmethod
-    def _write_environment_metadata(env_run_dir: Path, pair: DiscoveredPair) -> None:
-        """Atomically record the pair identity before any Checkov pass executes."""
+    def _write_environment_metadata(
+        env_run_dir: Path,
+        pair: DiscoveredPair,
+        target_repo: Path,
+    ) -> None:
+        """Atomically record the pair identity before any Checkov pass executes.
+
+        ``target_repo`` (Todo 3) records the absolute, resolved repo the
+        scan ran against so the aggregator's
+        ``_resolve_repo_root_from_env_metadata`` can resolve the correct
+        repo-root from the run-dir artifacts instead of walking up
+        looking for ``.git``. Consumers ignore unknown fields, so
+        run-dirs from older scans that lack the field still aggregate
+        via the walk-up fallback.
+        """
         artifact = env_run_dir / "pacioli_environment.json"
         temporary = artifact.with_suffix(".json.tmp")
         metadata = {
@@ -652,6 +665,7 @@ class Orchestrator:
             "project": pair.project,
             "env": pair.env,
             "stack_label": pair.stack_label,
+            "target_repo": str(Path(target_repo).resolve()),
         }
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, indent=2)
@@ -762,7 +776,7 @@ class Orchestrator:
             label_suffix = f"-{pair.stack_label}" if pair.stack_label else ""
             env_run_dir = run_root / proj / f"{env_name}{label_suffix}"
             env_run_dir.mkdir(parents=True, exist_ok=True)
-            self._write_environment_metadata(env_run_dir, pair)
+            self._write_environment_metadata(env_run_dir, pair, target_repo)
 
             _log("INFO", f"scanning {proj}/{env_name}")
 
