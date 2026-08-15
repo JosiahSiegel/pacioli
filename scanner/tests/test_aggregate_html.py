@@ -874,7 +874,13 @@ class TestHtmlReport:
 
         report = report_path.read_text(encoding="utf-8")
         assert '<fieldset id="environment-exclusions"' in report
-        assert "<legend>Hide environments</legend>" in report
+        assert "<legend>Environments</legend>" in report
+        assert 'id="environment-select-all"' in report
+        assert 'id="environment-select-none"' in report
+        assert "environment-select-visible" not in report
+        assert "environment-reset" not in report
+        assert "Hide environments" not in report
+        assert "Full-report reset" not in report
         assert "pacioli.report.filters" in report
         assert "pacioli_req" in report
         assert "localStorage.setItem" in report
