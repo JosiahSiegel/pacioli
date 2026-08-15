@@ -3804,3 +3804,310 @@ def test_pacioli_aggregate_echoes_target_repo_scope(tmp_path: Path) -> None:
     assert f"scope:   {stale}" not in agg_result.stdout, (
         f"stale scope echo {stale} still present; stdout={agg_result.stdout!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# TODO 4 (aggregate-clean-flag) — End-to-end fixture QA scenarios. These
+# three subprocess tests lock the plan-level contracts that unit tests
+# cannot prove end-to-end: fixture A drives ``--clean`` against the
+# DEFAULT run-root (``~/.pacioli/runs/current``) with a scope manifest
+# that marks only one env in_scope; fixture B proves the aggregator
+# ``scope:`` echo names the original scanned repo for a ``--label`` run
+# WITHOUT any metadata injection (todo 3's ``target_repo`` field is
+# written by the real scan); fixture C proves the aggregator rejects a
+# run-dir whose per-env metadata carries MIXED ``target_repo`` values
+# with the documented error message and a non-zero exit code.
+# ---------------------------------------------------------------------------
+
+
+def _fake_home_env(fake_home: Path) -> dict[str, str]:
+    """Return env overrides pointing ``Path.home()`` at ``fake_home``.
+
+    The orchestrator's default run-root is
+    ``Path.home() / ".pacioli" / "runs" / "current"``
+    (scanner/paths.py:resolve_run_dir). On Windows ``Path.home()``
+    honours ``USERPROFILE``; on POSIX it honours ``HOME``. Setting both
+    keeps the fixtures hermetic on either platform so the real
+    ``~/.pacioli`` is never touched.
+    """
+    return {"USERPROFILE": str(fake_home), "HOME": str(fake_home)}
+
+
+def test_e2e_clean_flag_wipes_fake_env_under_default_run_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture A: ``--clean`` end-to-end against the DEFAULT run-root.
+
+    Plan contract: populate ``~/.pacioli/runs/current/CR_Fake/prod/``
+    with a fake ``pacioli_environment.json`` + ``results_fake.sarif``,
+    then run ``pacioli scan <repo> --clean --non-interactive`` (NO
+    ``--output-dir`` — the wipe must be allowed because the resolved
+    run-root lives inside ``~/.pacioli/runs/``). After the scan:
+
+    * the fake ``CR_Fake/prod`` run-dir is GONE,
+    * ``CR_Real/prod`` (the only in_scope env) WAS scanned,
+    * the scan exited rc=0.
+    """
+    import json as _json
+
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    # Redirect Path.home() for THIS pytest process too, so any in-file
+    # assertions about the default run-root resolve to the fake home.
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    # Real consumer repo: .pacioli/scope.yaml marks ONLY CR_Real/prod
+    # in_scope (the classic "operator edited the scope to drop envs"
+    # scenario that --clean exists for).
+    target_repo = _seed_env_tree(
+        tmp_path / "repo", project="CR_Real", env="prod"
+    )
+    pacioli_dir = target_repo / ".pacioli"
+    pacioli_dir.mkdir(parents=True, exist_ok=True)
+    (pacioli_dir / "scope.yaml").write_text(
+        "projects:\n"
+        "  - project: CR_Real\n"
+        "    status: in_scope\n"
+        "    envs:\n"
+        "      - name: prod\n"
+        "        status: in_scope\n",
+        encoding="utf-8",
+    )
+    (pacioli_dir / "baseline.yaml").write_text(
+        "version: 1\n", encoding="utf-8"
+    )
+
+    # Stale leftovers under the DEFAULT run-root
+    # (~/.pacioli/runs/current/): a fake CR_Fake/prod pair whose env is
+    # NOT in the scope manifest — exactly the residue that made
+    # excluded envs reappear in the aggregate report.
+    default_run_root = fake_home / ".pacioli" / "runs" / "current"
+    fake_pair = default_run_root / "CR_Fake" / "prod"
+    fake_pair.mkdir(parents=True, exist_ok=True)
+    (fake_pair / "pacioli_environment.json").write_text(
+        _json.dumps(
+            {
+                "schema_version": 1,
+                "project": "CR_Fake",
+                "env": "prod",
+                "stack_label": None,
+                "target_repo": str(target_repo.resolve()),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (fake_pair / "results_fake.sarif").write_text(
+        '{"$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json", "version": "2.1.0", "runs": []}\n',
+        encoding="utf-8",
+    )
+    assert fake_pair.is_dir(), "setup: fake CR_Fake/prod was not created"
+
+    # No --output-dir: the wipe must be permitted by the
+    # "inside ~/.pacioli/runs/" branch of the safety rail
+    # (orchestrator._wipe_stale_per_env_dirs), NOT by --clean-allowed.
+    result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--clean",
+        "--non-interactive",
+        env=_fake_home_env(fake_home),
+        timeout=240,
+    )
+
+    assert result.returncode == 0, (
+        f"fixture A: pacioli scan --clean returned rc={result.returncode}; "
+        f"stdout={result.stdout[-1000:]!r} "
+        f"stderr={result.stderr[-1000:]!r}"
+    )
+
+    # (i) The fake per-env dir is gone.
+    assert not fake_pair.exists(), (
+        f"fixture A: --clean did not remove the stale CR_Fake/prod dir "
+        f"{fake_pair}; contents of {default_run_root}: "
+        f"{sorted(str(p) for p in default_run_root.rglob('*'))}"
+    )
+
+    # (ii) CR_Real/prod WAS scanned (run-dir metadata exists under the
+    # DEFAULT run-root — proving the scan wrote to the wiped root).
+    scanned = _collect_run_dirs(default_run_root)
+    scanned_rel = sorted(
+        p.relative_to(default_run_root).as_posix() for p in scanned
+    )
+    assert "CR_Real/prod" in scanned_rel, (
+        f"fixture A: CR_Real/prod was not scanned under the default "
+        f"run-root {default_run_root}; run-dirs found: {scanned_rel}"
+    )
+
+    # (iii) The wipe log line surfaced so operators see the cleanup.
+    combined = result.stdout + result.stderr
+    assert "--clean: removed" in combined, (
+        f"fixture A: expected 'INFO --clean: removed N stale per-env "
+        f"dir(s)' in output; stdout={result.stdout[-500:]!r} "
+        f"stderr={result.stderr[-500:]!r}"
+    )
+
+
+def test_e2e_aggregate_echo_names_original_repo_for_label_run(
+    tmp_path: Path,
+) -> None:
+    """Fixture B: aggregator ``scope:`` echo end-to-end for a ``--label`` run.
+
+    Plan contract: run ``pacioli scan <repo> --label echo-test
+    --non-interactive``, then ``pacioli aggregate <run_dir>`` and assert
+    the captured stdout contains ``scope: <original-repo>/.pacioli/scope.yaml``
+    and NOT ``<run_dir>/.pacioli/scope.yaml``. Unlike the earlier
+    ``test_pacioli_aggregate_echoes_target_repo_scope`` (which INJECTS
+    ``target_repo`` into the metadata to stay self-contained before todo
+    3 shipped), this fixture relies on the REAL scan writing the field
+    — true end-to-end coverage of the todo 1→3 chain.
+
+    The scan uses an explicit ``--output-dir <tmp>/runs`` (inside the
+    tmpdir) so the real ``~/.pacioli`` is never touched; the
+    ``--label`` slug creates ``<tmp>/runs/echo-test/`` — the same
+    run-dir-nesting shape as ``~/.pacioli/runs/echo-test`` that
+    triggered the original stale-echo bug.
+    """
+    target_repo = _make_minimal_tf_repo(tmp_path / "repo")
+    output_dir = tmp_path / "runs"
+    label = "echo-test"
+
+    scan_result = _run_cli(
+        "scan",
+        str(target_repo),
+        "--output-dir",
+        str(output_dir),
+        "--label",
+        label,
+        "--non-interactive",
+        timeout=240,
+    )
+    assert scan_result.returncode == 0, (
+        f"fixture B: setup scan failed rc={scan_result.returncode}; "
+        f"stdout={scan_result.stdout[-500:]!r} "
+        f"stderr={scan_result.stderr[-500:]!r}"
+    )
+
+    run_dir = output_dir / label
+    assert run_dir.is_dir(), (
+        f"fixture B: scan did not create the labelled run-dir {run_dir}; "
+        f"contents of {output_dir}: "
+        f"{sorted(str(p) for p in output_dir.rglob('*'))}"
+    )
+    # The real scan must have written target_repo-bearing metadata
+    # (todo 3) — if this pre-condition fails, the E2E chain is broken
+    # and the echo assertion below would pass only via the .git walk-up.
+    metadata_files = list(run_dir.rglob("pacioli_environment.json"))
+    assert metadata_files, (
+        f"fixture B: no pacioli_environment.json under {run_dir}; "
+        f"contents: {sorted(str(p) for p in run_dir.rglob('*'))}"
+    )
+    import json as _json
+
+    for mf in metadata_files:
+        data = _json.loads(mf.read_text(encoding="utf-8"))
+        assert data.get("target_repo") == str(target_repo.resolve()), (
+            f"fixture B: real scan did not write the todo-3 target_repo "
+            f"field into {mf}; got {data!r}"
+        )
+
+    agg_result = _run_cli("aggregate", str(run_dir), timeout=120)
+    assert agg_result.returncode == 0, (
+        f"fixture B: pacioli aggregate returned rc={agg_result.returncode}; "
+        f"stdout={agg_result.stdout[-1000:]!r} "
+        f"stderr={agg_result.stderr[-1000:]!r}"
+    )
+
+    # The echo names the ORIGINAL scanned repo, not the run-dir.
+    expected_scope = target_repo.resolve() / ".pacioli" / "scope.yaml"
+    assert f"scope:   {expected_scope}" in agg_result.stdout, (
+        f"fixture B: expected scope echo to name {expected_scope}; "
+        f"stdout={agg_result.stdout!r}"
+    )
+    stale = run_dir / ".pacioli" / "scope.yaml"
+    assert f"scope:   {stale}" not in agg_result.stdout, (
+        f"fixture B: stale scope echo {stale} still present; "
+        f"stdout={agg_result.stdout!r}"
+    )
+
+
+def test_e2e_aggregate_rejects_mixed_target_repo_run_dir(
+    tmp_path: Path,
+) -> None:
+    """Fixture C: ``pacioli aggregate <run_dir>`` rejects MIXED target_repo.
+
+    Plan contract: create two fake per-env dirs under a run_dir whose
+    ``pacioli_environment.json`` metadata carries DIFFERENT
+    ``target_repo`` values, run ``pacioli aggregate <run_dir>``, and
+    assert rc != 0 AND stderr contains the mixed-target_repo error
+    message (aggregate.py:_resolve_repo_root_from_env_metadata).
+
+    The two fake pairs also carry minimal SARIF results files so the
+    run-dir shape matches a real scan output; the aggregator fails at
+    the repo-root resolution step BEFORE any SARIF parsing matters.
+    """
+    import json as _json
+
+    run_dir = tmp_path / "runs" / "mixed"
+
+    pair_one = run_dir / "CR_One" / "prod"
+    pair_one.mkdir(parents=True, exist_ok=True)
+    (pair_one / "pacioli_environment.json").write_text(
+        _json.dumps(
+            {
+                "schema_version": 1,
+                "project": "CR_One",
+                "env": "prod",
+                "stack_label": None,
+                "target_repo": str((tmp_path / "repo-one").resolve()),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (pair_one / "results_one.sarif").write_text(
+        '{"version": "2.1.0", "runs": []}\n',
+        encoding="utf-8",
+    )
+
+    pair_two = run_dir / "CR_Two" / "prod"
+    pair_two.mkdir(parents=True, exist_ok=True)
+    (pair_two / "pacioli_environment.json").write_text(
+        _json.dumps(
+            {
+                "schema_version": 1,
+                "project": "CR_Two",
+                "env": "prod",
+                "stack_label": None,
+                "target_repo": str((tmp_path / "repo-two").resolve()),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (pair_two / "results_two.sarif").write_text(
+        '{"version": "2.1.0", "runs": []}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_cli("aggregate", str(run_dir), timeout=120)
+
+    # rc != 0 — the aggregator returns 2 for the mixed-repo
+    # misconfiguration (SystemExit(2) is caught in main()).
+    assert result.returncode != 0, (
+        f"fixture C: pacioli aggregate on a mixed-target_repo run-dir "
+        f"should exit non-zero; got rc=0; stdout={result.stdout!r}"
+    )
+    # The documented error message must surface on stderr so the
+    # operator knows to re-run scan with a consistent target repo.
+    assert (
+        "mixed multiple target_repo values across per-env" in result.stderr
+    ), (
+        f"fixture C: stderr missing the mixed-target_repo error message; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "target_repo" in result.stderr, (
+        f"fixture C: stderr should name the offending field; "
+        f"stderr={result.stderr!r}"
+    )
