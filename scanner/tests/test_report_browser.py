@@ -89,11 +89,10 @@ def test_environment_exclusions_recompute_and_persist(
     checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
     assert checkboxes.count() == 3
 
-    checkboxes.nth(0).focus()
-    page.keyboard.press("Space")
-    checkboxes.nth(1).check()
+    checkboxes.nth(0).uncheck()
+    checkboxes.nth(1).uncheck()
 
-    assert "2 environments excluded; viewing 1 of 3 environments." in page.locator("#environment-exclusion-status").inner_text()
+    assert "1 of 3 environments visible" in page.locator("#environment-exclusion-status").inner_text()
     assert page.locator("#kpi-total").inner_text() == "1"
     assert page.locator("#badge-envs").inner_text() == "1"
     assert page.locator("#environment-table-body tr").count() == 1
@@ -102,19 +101,88 @@ def test_environment_exclusions_recompute_and_persist(
     assert page.locator("#top-resources").inner_text().find("blue") == -1
 
     page.reload(wait_until="domcontentloaded")
-    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 2
+    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 1
     assert page.locator("#kpi-total").inner_text() == "1"
 
-    page.get_by_role("button", name="Full-report reset").click()
-    assert page.locator("#environment-exclusion-status").inner_text() == "Full scan: viewing all 3 environments."
+    page.get_by_role("button", name="Select all").click()
+    assert "All 3 environments visible" in page.locator("#environment-exclusion-status").inner_text()
     assert page.locator("#kpi-total").inner_text() == "3"
 
-    checkboxes.nth(0).check()
-    checkboxes.nth(1).check()
-    checkboxes.nth(2).check()
+    checkboxes.nth(0).uncheck()
+    checkboxes.nth(1).uncheck()
+    checkboxes.nth(2).uncheck()
     assert page.locator("#kpi-total").inner_text() == "0"
     assert page.locator("#env-health-list .empty-view").count() == 1
     assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
+
+    # Verify the persisted localStorage shape is the NEW v2 schema with `included` field
+    persisted = page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    import json as _json
+    payload = _json.loads(persisted)
+    assert payload.get("schemaVersion") == 2, f"expected schemaVersion=2, got {payload}"
+    assert sorted(payload.get("included") or []) == sorted([checkboxes.nth(i).get_attribute("value") for i in range(checkboxes.count()) if checkboxes.nth(i).is_checked()]), "included set must reflect currently-checked envs only"
+
+
+@pytest.mark.browser
+def test_environment_exclusions_migrates_legacy_persistence(
+    page: Page,
+    exclusion_report_url: str,
+) -> None:
+    """Pre-existing localStorage `excluded` shape (v1) is migrated to v2 `included` on load."""
+    import json as _json
+
+    # First navigation: load the page so we can read the actual identity strings.
+    page.goto(exclusion_report_url, wait_until="networkidle")
+    checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
+    identities = [checkboxes.nth(i).get_attribute("value") for i in range(checkboxes.count())]
+    excluded = identities[:1]  # pretend the user previously hid the first env
+
+    # Capture the visible envs BEFORE re-seeding (baseline = all visible).
+    page.reload(wait_until="networkidle")
+    all_visible = [
+        checkboxes.nth(i).get_attribute("value")
+        for i in range(checkboxes.count())
+        if checkboxes.nth(i).is_checked()
+    ]
+    assert sorted(all_visible) == sorted(identities), "baseline must show all envs visible"
+
+    # Register an init script that writes the v1 payload on every page load.
+    excluded_json = _json.dumps(excluded)
+    page.add_init_script(
+        f"""
+        (() => {{
+          try {{
+            localStorage.setItem('pacioli.report.filters', JSON.stringify({{q: '', sev: 'ALL', req: '', excluded: {excluded_json}}}));
+          }} catch (e) {{}}
+        }})();
+        """
+    )
+
+    # Reload — the init script seeds the v1 payload, the IIFE migrates it to v2.
+    page.reload(wait_until="networkidle")
+    # Wait for the IIFE's persist() to write the migrated v2 payload.
+    page.wait_for_function(
+        "() => { try { const v = localStorage.getItem('pacioli.report.filters'); return v && JSON.parse(v).schemaVersion === 2; } catch (e) { return false; } }",
+        timeout=5000,
+    )
+
+    # The previously-excluded env must STILL be hidden (the migration must preserve user intent).
+    visible_labels = [
+        checkboxes.nth(i).get_attribute("value")
+        for i in range(checkboxes.count())
+        if checkboxes.nth(i).is_checked()
+    ]
+    assert sorted(visible_labels) == sorted([label for label in identities if label not in excluded]), (
+        f"after legacy migration, visible envs should be identities - excluded; "
+        f"got visible={visible_labels} identities={identities} excluded={excluded}"
+    )
+
+    # And the persisted shape must now be the new v2 schema.
+    persisted = page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    payload = _json.loads(persisted)
+    assert payload.get("schemaVersion") == 2, f"expected schemaVersion=2, got {payload}"
+    assert sorted(payload.get("included") or []) == sorted(visible_labels)
+    assert "excluded" not in payload
 
 
 @pytest.mark.browser
@@ -177,16 +245,22 @@ def test_report_visual_evidence_at_responsive_theme_and_motion_contracts(
 
     checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
     for index in range(checkboxes.count()):
-        checkboxes.nth(index).check()
+        checkboxes.nth(index).uncheck()
     assert page.locator("#env-health-list .empty-view").count() == 1
     assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
-    assert '"excluded"' in page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    # New schemaVersion 2 shape uses `included` (currently [] since all unchecked)
+    persisted = page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    import json as _json
+    payload = _json.loads(persisted)
+    assert payload.get("schemaVersion") == 2, f"expected schemaVersion=2, got {payload}"
+    assert payload.get("included") == [], f"expected included=[], got {payload}"
+    assert "excluded" not in payload, "legacy 'excluded' key should not appear in v2 payload"
     page.screenshot(path=str(EVIDENCE_DIR / "all-environments-excluded.png"), full_page=True)
 
     page.reload(wait_until="domcontentloaded")
-    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 3
-    page.get_by_role("button", name="Full-report reset").click()
     assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 0
+    page.get_by_role("button", name="Select all").click()
+    assert page.locator('#environment-exclusions input[type="checkbox"]:checked').count() == 3
     assert console_errors == []
 
 

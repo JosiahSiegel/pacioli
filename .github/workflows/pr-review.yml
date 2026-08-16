@@ -1,0 +1,37 @@
+# pr-review — automated PR review via umactually-action (third-party).
+# Trust rationale: umactually-action is a third-party automated PR reviewer that
+# posts inline review comments on PRs. It is pinned to a specific commit SHA
+# (immutable reference) AND a human-readable tag comment. It runs in an ephemeral
+# GitHub-hosted runner. A supply-chain compromise of this action would allow
+# an attacker to post arbitrary comments on PRs in this repo, but cannot modify
+# repo contents, workflows, secrets, or source code. Acceptable trade-off for
+# the review-automation convenience.
+name: pr-review
+on:
+  pull_request:
+    branches: [ main ]
+concurrency:
+  group: umactually-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+# Minimum permissions needed: contents:read for actions/checkout@v4; pull-requests:write
+# for posting review comments (no narrower permission exists for comments-only).
+# issues:write is NOT requested — labels are not used by this workflow.
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    # Pin: this SHA (9924e79...) is the user's deliberate pin — newer than the
+    # upstream v1 tag (which points to 70548b0e...). The "# v1" annotation is
+    # conceptual only; GitHub Actions resolves the SHA at install. To switch to
+    # the upstream v1 tag, change the SHA to 70548b0e7bd660938fb5c7925999bda999efa878.
+    - uses: JosiahSiegel/umactually-action@9924e799c11ae31a694caf761bdfe7d66b7e78e9 # newer than upstream v1 tag (70548b0e...)
+      with:
+        cli-version: 0.10.1
+        provider: openai-compatible
+        model: MiniMax-M3
+        api-url: ${{ secrets.UMACTUALLY_API_URL }}
+        api-key: ${{ secrets.UMACTUALLY_API_KEY }}
