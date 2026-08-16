@@ -2173,19 +2173,21 @@ def write_html_report(
     medium = report_model["counts"]["medium"]
     low = report_model["counts"]["low"]
 
-    banner = '<div id="filter-banner" role="region" aria-label="Active filters" hidden><span id="filter-chips"></span><button type="button" id="filter-banner-clear">Reset filters</button></div>'
+    filter_banner_html = '<div id="filter-banner" role="region" aria-label="Active filters" hidden><span id="filter-chips"></span><button type="button" id="filter-banner-clear">Reset filters</button></div>'
+    error_banner_html = ""
     if failed_envs:
         envs_str = ", ".join(
             _environment_display_label(er.project, er.env, er.stack_label)
             for er in failed_envs
         )
-        banner += (
+        error_banner_html = (
             f'<div class="banner-error">'
             f"RED BANNER: state-pull failed for {envs_str}. "
             f"Reports below are based on source-only scan; do not rely on PCI "
             f"compliance claims until re-scan succeeds."
             f"</div>"
         )
+    banner = filter_banner_html + error_banner_html
 
     # CSS is held as a plain string (NOT inside an f-string) because Python
     # 3.12+ parses `{...}` greedily inside f-strings -- and CSS has braces.

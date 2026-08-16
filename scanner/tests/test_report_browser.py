@@ -131,19 +131,40 @@ def test_environment_exclusions_migrates_legacy_persistence(
     """Pre-existing localStorage `excluded` shape (v1) is migrated to v2 `included` on load."""
     import json as _json
 
-    page.goto(exclusion_report_url, wait_until="domcontentloaded")
-    page.evaluate("localStorage.removeItem('pacioli.report.filters')")
-    page.reload(wait_until="domcontentloaded")
+    # First navigation: load the page so we can read the actual identity strings.
+    page.goto(exclusion_report_url, wait_until="networkidle")
     checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
     identities = [checkboxes.nth(i).get_attribute("value") for i in range(checkboxes.count())]
     excluded = identities[:1]  # pretend the user previously hid the first env
 
-    # Pre-seed the legacy v1 shape (no schemaVersion, contains `excluded`).
-    page.evaluate(
-        "(payload) => localStorage.setItem('pacioli.report.filters', JSON.stringify(payload))",
-        {"q": "", "sev": "ALL", "req": "", "excluded": excluded},
+    # Capture the visible envs BEFORE re-seeding (baseline = all visible).
+    page.reload(wait_until="networkidle")
+    all_visible = [
+        checkboxes.nth(i).get_attribute("value")
+        for i in range(checkboxes.count())
+        if checkboxes.nth(i).is_checked()
+    ]
+    assert sorted(all_visible) == sorted(identities), "baseline must show all envs visible"
+
+    # Register an init script that writes the v1 payload on every page load.
+    excluded_json = _json.dumps(excluded)
+    page.add_init_script(
+        f"""
+        (() => {{
+          try {{
+            localStorage.setItem('pacioli.report.filters', JSON.stringify({{q: '', sev: 'ALL', req: '', excluded: {excluded_json}}}));
+          }} catch (e) {{}}
+        }})();
+        """
     )
-    page.reload(wait_until="domcontentloaded")
+
+    # Reload — the init script seeds the v1 payload, the IIFE migrates it to v2.
+    page.reload(wait_until="networkidle")
+    # Wait for the IIFE's persist() to write the migrated v2 payload.
+    page.wait_for_function(
+        "() => { try { const v = localStorage.getItem('pacioli.report.filters'); return v && JSON.parse(v).schemaVersion === 2; } catch (e) { return false; } }",
+        timeout=5000,
+    )
 
     # The previously-excluded env must STILL be hidden (the migration must preserve user intent).
     visible_labels = [
