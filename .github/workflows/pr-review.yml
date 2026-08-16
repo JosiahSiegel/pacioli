@@ -1,0 +1,22 @@
+name: pr-review
+on:
+  pull_request:
+    branches: [ main ]
+concurrency:
+  group: umactually-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: JosiahSiegel/umactually-action@9924e799c11ae31a694caf761bdfe7d66b7e78e9 # v1
+      with:
+        cli-version: 0.10.1
+        provider: openai-compatible
+        model: MiniMax-M3
+        api-url: ${{ secrets.UMACTUALLY_API_URL }}
+        api-key: ${{ secrets.UMACTUALLY_API_KEY }}
