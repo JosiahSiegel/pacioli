@@ -115,6 +115,54 @@ def test_environment_exclusions_recompute_and_persist(
     assert page.locator("#env-health-list .empty-view").count() == 1
     assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
 
+    # Verify the persisted localStorage shape is the NEW v2 schema with `included` field
+    persisted = page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    import json as _json
+    payload = _json.loads(persisted)
+    assert payload.get("schemaVersion") == 2, f"expected schemaVersion=2, got {payload}"
+    assert sorted(payload.get("included") or []) == sorted([checkboxes.nth(i).get_attribute("value") for i in range(checkboxes.count()) if checkboxes.nth(i).is_checked()]), "included set must reflect currently-checked envs only"
+
+
+@pytest.mark.browser
+def test_environment_exclusions_migrates_legacy_persistence(
+    page: Page,
+    exclusion_report_url: str,
+) -> None:
+    """Pre-existing localStorage `excluded` shape (v1) is migrated to v2 `included` on load."""
+    import json as _json
+
+    page.goto(exclusion_report_url, wait_until="domcontentloaded")
+    page.evaluate("localStorage.removeItem('pacioli.report.filters')")
+    page.reload(wait_until="domcontentloaded")
+    checkboxes = page.locator('#environment-exclusions input[type="checkbox"]')
+    identities = [checkboxes.nth(i).get_attribute("value") for i in range(checkboxes.count())]
+    excluded = identities[:1]  # pretend the user previously hid the first env
+
+    # Pre-seed the legacy v1 shape (no schemaVersion, contains `excluded`).
+    page.evaluate(
+        "(payload) => localStorage.setItem('pacioli.report.filters', JSON.stringify(payload))",
+        {"q": "", "sev": "ALL", "req": "", "excluded": excluded},
+    )
+    page.reload(wait_until="domcontentloaded")
+
+    # The previously-excluded env must STILL be hidden (the migration must preserve user intent).
+    visible_labels = [
+        checkboxes.nth(i).get_attribute("value")
+        for i in range(checkboxes.count())
+        if checkboxes.nth(i).is_checked()
+    ]
+    assert sorted(visible_labels) == sorted([label for label in identities if label not in excluded]), (
+        f"after legacy migration, visible envs should be identities - excluded; "
+        f"got visible={visible_labels} identities={identities} excluded={excluded}"
+    )
+
+    # And the persisted shape must now be the new v2 schema.
+    persisted = page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    payload = _json.loads(persisted)
+    assert payload.get("schemaVersion") == 2, f"expected schemaVersion=2, got {payload}"
+    assert sorted(payload.get("included") or []) == sorted(visible_labels)
+    assert "excluded" not in payload
+
 
 @pytest.mark.browser
 def test_report_visual_evidence_at_responsive_theme_and_motion_contracts(
@@ -179,7 +227,13 @@ def test_report_visual_evidence_at_responsive_theme_and_motion_contracts(
         checkboxes.nth(index).uncheck()
     assert page.locator("#env-health-list .empty-view").count() == 1
     assert "NO VISIBLE ENVIRONMENTS" in page.locator("#coverage-status-table").inner_text()
-    assert '"excluded"' in page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    # New schemaVersion 2 shape uses `included` (currently [] since all unchecked)
+    persisted = page.evaluate("localStorage.getItem('pacioli.report.filters')")
+    import json as _json
+    payload = _json.loads(persisted)
+    assert payload.get("schemaVersion") == 2, f"expected schemaVersion=2, got {payload}"
+    assert payload.get("included") == [], f"expected included=[], got {payload}"
+    assert "excluded" not in payload, "legacy 'excluded' key should not appear in v2 payload"
     page.screenshot(path=str(EVIDENCE_DIR / "all-environments-excluded.png"), full_page=True)
 
     page.reload(wait_until="domcontentloaded")

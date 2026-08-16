@@ -2173,13 +2173,13 @@ def write_html_report(
     medium = report_model["counts"]["medium"]
     low = report_model["counts"]["low"]
 
-    banner = ""
+    banner = '<div id="filter-banner" role="region" aria-label="Active filters" hidden><span id="filter-chips"></span><button type="button" id="filter-banner-clear">Reset filters</button></div>'
     if failed_envs:
         envs_str = ", ".join(
             _environment_display_label(er.project, er.env, er.stack_label)
             for er in failed_envs
         )
-        banner = (
+        banner += (
             f'<div class="banner-error">'
             f"RED BANNER: state-pull failed for {envs_str}. "
             f"Reports below are based on source-only scan; do not rely on PCI "
@@ -3107,7 +3107,7 @@ def write_html_report(
   const storageKey = 'pacioli.report.filters';
   const validSeverities = new Set(['ALL', 'HIGH', 'MEDIUM', 'LOW']);
   const identities = model.environments.map(function (environment) { return environment.identity.display_label; });
-  const state = { q: '', sev: 'ALL', req: '', excluded: new Set() };
+  const state = { q: '', sev: 'ALL', req: '', included: new Set(identities) };
   const storage = {
     get: function () { try { return localStorage.getItem(storageKey); } catch (error) { return null; } },
     set: function (value) { try { localStorage.setItem(storageKey, value); } catch (error) { return; } },
@@ -3127,8 +3127,17 @@ def write_html_report(
       state.q = typeof saved.q === 'string' ? saved.q : '';
       state.sev = validSeverities.has(saved.sev) ? saved.sev : 'ALL';
       state.req = typeof saved.req === 'string' ? saved.req : '';
-      if (Array.isArray(saved.excluded)) saved.excluded = saved.excluded.filter(function (label) { return typeof label === 'string' && identities.includes(label); });
-      state.excluded = new Set(saved.excluded || []);
+      if (saved.schemaVersion === 2 && Array.isArray(saved.included)) {
+        const filtered = saved.included.filter(function (label) { return typeof label === 'string' && identities.includes(label); });
+        state.included = new Set(filtered);
+        return;
+      }
+      if (Array.isArray(saved.excluded)) {
+        const legacyExcluded = new Set(saved.excluded.filter(function (label) { return typeof label === 'string' && identities.includes(label); }));
+        state.included = new Set(identities.filter(function (label) { return !legacyExcluded.has(label); }));
+        return;
+      }
+      state.included = new Set(identities);
       return;
     }
     const legacyValue = storage.legacy();
@@ -3137,13 +3146,15 @@ def write_html_report(
       state.q = typeof legacy.q === 'string' ? legacy.q : '';
       state.sev = validSeverities.has(legacy.sev) ? legacy.sev : 'ALL';
       state.req = typeof legacy.req === 'string' ? legacy.req : '';
-      if (typeof legacy.env === 'string' && identities.includes(legacy.env)) state.excluded.add(legacy.env);
+      if (typeof legacy.env === 'string' && identities.includes(legacy.env)) {
+        state.included = new Set(identities.filter(function (label) { return label !== legacy.env; }));
+      }
     }
     storage.clearLegacy();
   }
-  function persist() { storage.set(JSON.stringify({ q: state.q, sev: state.sev, req: state.req, excluded: Array.from(state.excluded).sort() })); }
+  function persist() { storage.set(JSON.stringify({ schemaVersion: 2, q: state.q, sev: state.sev, req: state.req, included: Array.from(state.included).sort() })); }
   function make(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
-  function visibleEnvironments() { return model.environments.filter(function (environment) { return !state.excluded.has(environment.identity.display_label); }); }
+  function visibleEnvironments() { return model.environments.filter(function (environment) { return state.included.has(environment.identity.display_label); }); }
   function filteredFindings(environments) {
     const visible = new Set(environments.map(function (environment) { return environment.identity.display_label; }));
     return model.findings.filter(function (finding) {
@@ -3183,7 +3194,7 @@ def write_html_report(
       const summary = counts(environment.findings); const row = make('div', undefined, 'env-bar-row'); row.dataset.identityLabel = environment.identity.display_label; row.appendChild(make('div', environment.identity.display_label + ' (' + environment.scan_status + ')', 'env-bar-name')); const track = make('div', undefined, 'env-bar-track'); const denominator = summary.total || 1; [['high', summary.high], ['medium', summary.medium], ['low', summary.low]].forEach(function (part) { const segment = make('div', '', 'env-bar-segment ' + part[0]); segment.style.width = part[1] / denominator * 100 + '%'; track.appendChild(segment); }); row.appendChild(track); row.appendChild(make('div', String(summary.total), 'env-bar-count')); health.appendChild(row);
       const tr = document.createElement('tr'); [environment.identity.project, environment.identity.env + (environment.identity.stack_label ? ' [' + environment.identity.stack_label + ']' : ''), environment.scan_status, String(summary.total), String(summary.high), String(summary.medium), String(summary.low)].forEach(function (value, index) { tr.appendChild(make('td', value, index === 4 ? 'count-high' : index === 5 ? 'count-medium' : index === 6 ? 'count-low' : '')); }); table.appendChild(tr);
     });
-    document.querySelectorAll('.finding-environment-heading').forEach(function (heading) { heading.hidden = state.excluded.has(heading.dataset.identityLabel); });
+    document.querySelectorAll('.finding-environment-heading').forEach(function (heading) { heading.hidden = !state.included.has(heading.dataset.identityLabel); });
   }
   function renderFindings(environments) {
     const visible = new Set(environments.map(function (environment) { return environment.identity.display_label; }));
@@ -3217,22 +3228,23 @@ def write_html_report(
   }
   function renderDrift(environments) { const visiblePairs = new Set(environments.map(function (environment) { return environment.identity.project + '\u0000' + environment.identity.env; })); document.querySelectorAll('#route-drift tr[data-project]').forEach(function (row) { row.hidden = !visiblePairs.has(row.dataset.project + '\u0000' + row.dataset.env); }); }
   function renderControls(environments) {
-    const options = document.getElementById('environment-exclusion-options'); replaceChildren(options); identities.forEach(function (identity) { const label = make('label', undefined, 'environment-exclusion-option'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = !state.excluded.has(identity); checkbox.value = identity; checkbox.addEventListener('change', function () { checkbox.checked ? state.excluded.delete(identity) : state.excluded.add(identity); update(); }); label.appendChild(checkbox); label.appendChild(document.createTextNode(identity)); options.appendChild(label); }); document.getElementById('environment-exclusion-status').textContent = environments.length === identities.length ? 'All ' + identities.length + ' environments visible' : environments.length + ' of ' + identities.length + ' environments visible';
+    const options = document.getElementById('environment-exclusion-options'); replaceChildren(options); identities.forEach(function (identity) { const label = make('label', undefined, 'environment-exclusion-option'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = state.included.has(identity); checkbox.value = identity; checkbox.addEventListener('change', function () { checkbox.checked ? state.included.add(identity) : state.included.delete(identity); update(); }); label.appendChild(checkbox); label.appendChild(document.createTextNode(identity)); options.appendChild(label); }); document.getElementById('environment-exclusion-status').textContent = environments.length === identities.length ? 'All ' + identities.length + ' environments visible' : environments.length + ' of ' + identities.length + ' environments visible';
   }
   function renderSummary(environments, summary) { const pct = function (value) { return summary.total ? (value / summary.total * 100).toFixed(1) : '0.0'; }; [['total', summary.total, 'across ' + environments.length + ' of ' + identities.length + ' environments'], ['high', summary.high, pct(summary.high) + '% of total'], ['medium', summary.medium, pct(summary.medium) + '% of total'], ['low', summary.low, pct(summary.low) + '% of total'], ['suppressed', summary.suppressed, pct(summary.suppressed) + '% of total · baseline waivers']].forEach(function (entry) { document.getElementById('kpi-' + entry[0]).textContent = String(entry[1]); document.getElementById('kpi-' + entry[0] + '-sub').textContent = entry[2]; }); }
-  function renderBanner() { const banner = document.getElementById('filter-banner'); const chips = document.getElementById('filter-chips'); if (!banner || !chips) return; replaceChildren(chips); const labels = []; if (state.q) labels.push('search: ' + state.q); if (state.sev !== 'ALL') labels.push('severity: ' + state.sev); if (state.req) labels.push(model.framework.name + ': ' + state.req); if (state.excluded.size) labels.push(state.excluded.size + ' environment exclusion' + (state.excluded.size === 1 ? '' : 's')); labels.forEach(function (label) { chips.appendChild(make('span', label, 'filter-chip')); }); banner.style.display = labels.length ? 'flex' : 'none'; }
+  function renderBanner() { const banner = document.getElementById('filter-banner'); const chips = document.getElementById('filter-chips'); if (!banner || !chips) return; replaceChildren(chips); const labels = []; if (state.q) labels.push('search: ' + state.q); if (state.sev !== 'ALL') labels.push('severity: ' + state.sev); if (state.req) labels.push(model.framework.name + ': ' + state.req); if (state.included.size !== identities.length) labels.push((identities.length - state.included.size) + ' environment hidden' + ((identities.length - state.included.size) === 1 ? '' : 's')); labels.forEach(function (label) { chips.appendChild(make('span', label, 'filter-chip')); }); banner.style.display = labels.length ? 'flex' : 'none'; }
   function syncInputs() { document.querySelectorAll('#finding-search, #global-search').forEach(function (input) { input.value = state.q; }); document.querySelectorAll('[data-severity-filter], .gsev-btn').forEach(function (button) { button.classList.toggle('active', (button.dataset.severityFilter || button.dataset.sev) === state.sev); }); document.querySelectorAll('#req-filter, #global-req').forEach(function (select) { select.value = state.req; }); }
   function update() { const environments = visibleEnvironments(); const findings = environments.reduce(function (all, environment) { return all.concat(environment.findings); }, []); const summary = counts(findings); renderControls(environments); renderSummary(environments, summary); renderDonut(summary); renderEnvironmentViews(environments); renderFindings(environments); renderTopLists(findings); renderCoverage(environments); renderDrift(environments); renderBanner(); syncInputs(); persist(); }
-  function reset() { state.q = ''; state.sev = 'ALL'; state.req = ''; state.excluded.clear(); update(); }
+  function reset() { state.q = ''; state.sev = 'ALL'; state.req = ''; state.included = new Set(identities); update(); }
   function addRequirementOptions() { const values = model.requirements.map(function (requirement) { return requirement.id; }); document.querySelectorAll('#req-filter, #global-req').forEach(function (select) { values.forEach(function (value) { const option = make('option', value); option.value = value; select.appendChild(option); }); }); }
   restore(); addRequirementOptions();
-  document.getElementById('environment-select-all').addEventListener('click', function () { state.excluded.clear(); update(); });
-  document.getElementById('environment-select-none').addEventListener('click', function () { identities.forEach(function (identity) { state.excluded.add(identity); }); update(); });
+  document.getElementById('environment-select-all').addEventListener('click', function () { state.included = new Set(identities); update(); });
+  document.getElementById('environment-select-none').addEventListener('click', function () { state.included = new Set(); update(); });
   document.querySelectorAll('#finding-search').forEach(function (input) { input.addEventListener('input', function () { state.q = input.value.toLowerCase(); update(); }); });
   document.querySelectorAll('[data-severity-filter]').forEach(function (button) { button.addEventListener('click', function () { state.sev = button.dataset.severityFilter; update(); }); });
   document.querySelectorAll('#req-filter').forEach(function (select) { select.addEventListener('change', function () { state.req = select.value; update(); }); });
   document.getElementById('heatmap-clear-btn').addEventListener('click', function () { state.req = ''; update(); });
   document.getElementById('heatmap-view-findings').addEventListener('click', function () { location.hash = '#findings'; });
+  document.getElementById('filter-banner-clear').addEventListener('click', reset);
   update();
 }());
 </script>
