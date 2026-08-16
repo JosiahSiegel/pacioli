@@ -5,6 +5,13 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [2.2.0](https://github.com/JosiahSiegel/pacioli/compare/v2.1.0...v2.2.0) (2026-08-16)
+
+
+### Features
+
+* **report:** invert environment checkbox semantics + minimal layout ([#41](https://github.com/JosiahSiegel/pacioli/issues/41)) ([9e19dd7](https://github.com/JosiahSiegel/pacioli/commit/9e19dd7821cfb28a10f3c1fc386cea879e63f697))
+
 ## [2.1.0](https://github.com/JosiahSiegel/pacioli/compare/v2.0.0...v2.1.0) (2026-08-15)
 
 
