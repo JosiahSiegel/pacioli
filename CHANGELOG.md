@@ -5,6 +5,13 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches 1.0.
 
+## [2.1.0](https://github.com/JosiahSiegel/pacioli/compare/v2.0.0...v2.1.0) (2026-08-15)
+
+
+### Features
+
+* **scanner:** --clean flag + fix stale scope echo via env metadata ([#39](https://github.com/JosiahSiegel/pacioli/issues/39)) ([7669d5f](https://github.com/JosiahSiegel/pacioli/commit/7669d5fd16b17d6641677dbf18b54bb2e57e909c))
+
 ## [2.0.0](https://github.com/JosiahSiegel/pacioli/compare/v1.5.0...v2.0.0) (2026-08-14)
 
 
